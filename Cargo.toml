@@ -129,9 +129,12 @@ jsonschema = { version = "0.58", default-features = false }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 keyring = "4"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
+ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 chromiumoxide = "0.9"
+enigo = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros", "process"] }
+x11rb = { version = "0.13", features = ["randr", "xinput", "xtest", "composite"] }
 flume = { version = "0.12", default-features = false, features = ["async", "select"] }
 pin-project-lite = "0.2"
 rustix = { version = "1", features = ["event", "fs", "process"] }

@@ -9,10 +9,13 @@ rust-version.workspace = true
 
 [dependencies]
 arc-swap = { workspace = true }
+arboard = { workspace = true }
+ashpd = { workspace = true }
 base64 = { workspace = true }
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 chromiumoxide = { workspace = true }
 crossterm = { workspace = true }
+enigo = { workspace = true }
 maki-agent = { workspace = true }
 maki-config = { workspace = true }
 maki-highlight = { workspace = true }
@@ -79,6 +82,7 @@ tree-sitter-zig = { workspace = true }
 tree-sitter-dart = { workspace = true }
 tree-sitter-yaml = { workspace = true }
 tree-sitter-containerfile = { workspace = true }
+x11rb = { workspace = true }
 tree-sitter-css = { workspace = true }
 tree-sitter-hcl = { workspace = true }
 tree-sitter-json = { workspace = true }

@@ -117,6 +117,7 @@ The rules:
 | [`maki.async.Task`](#maki-async-Task) | Handle returned by `maki.async.spawn`. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
 | [`maki.browser`](#maki-browser) | Chrome over CDP: `maki.browser.open` launches a browser (headless by |
+| [`maki.computer`](#maki-computer) | Desktop control: `maki.computer.screenshot` captures the screen, |
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
@@ -2318,6 +2319,134 @@ Requires the `net` [plugin permission](#plugin-permissions).
 
 Desktop control: `maki.computer.screenshot` captures the screen,
 `mouse`/`keyboard` drive pointer and keys, `position`/`display` report
+state, `clipboard` reads and writes the system clipboard. Needs a
+display server; every call fails cleanly without one.
+
+---
+
+### `maki.computer.screenshot()` {#maki-computer-screenshot}
+
+```lua
+maki.computer.screenshot({opts})
+```
+
+Capture the X11 root window (the whole desktop) to a PNG file.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `path` (`string`) file to write. Default: a timestamped file under the
+    maki state dir.
+
+**Returns:** (`table`, `string?`) Pair: `{ path, width, height }` on success, `(nil, err)`.
+
+---
+
+### `maki.computer.mouse()` {#maki-computer-mouse}
+
+```lua
+maki.computer.mouse({opts})
+```
+
+Move, click, press, release, or scroll the mouse.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `action` (`string`) move | click | press | release | scroll. Required.
+
+  - x (integer), y (integer): absolute position for move.
+
+  - `button` (`string`) left | right | middle. Default left.
+  - `amount` (`integer`) scroll clicks. Default 3.
+  - `axis` (`string`) vertical | horizontal. Default vertical.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+---
+
+### `maki.computer.keyboard()` {#maki-computer-keyboard}
+
+```lua
+maki.computer.keyboard({opts})
+```
+
+Type text, or press a key / key combo (e.g. "ctrl+c").
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `text` (`string`) literal text to type.
+  - `key` (`string`) key name, optionally a "+"-joined combo like ctrl+shift+s.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+---
+
+### `maki.computer.position()` {#maki-computer-position}
+
+```lua
+maki.computer.position({_opts})
+```
+
+Report the mouse pointer position.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{_opts}` (`table`) Unused.
+
+**Returns:** (`table`, `string?`) Pair: `{ x, y }` on success, `(nil, err)`.
+
+---
+
+### `maki.computer.display()` {#maki-computer-display}
+
+```lua
+maki.computer.display({_opts})
+```
+
+Report the main display size.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{_opts}` (`table`) Unused.
+
+**Returns:** (`table`, `string?`) Pair: `{ width, height }` on success, `(nil, err)`.
+
+---
+
+### `maki.computer.clipboard()` {#maki-computer-clipboard}
+
+```lua
+maki.computer.clipboard({opts})
+```
+
+Read or write the system clipboard.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `text` (`string`) set the clipboard text to this.
+  - `image_path` (`string`) set the clipboard image from this PNG file.
+  - `path` (`string`) save the clipboard image to this file (get mode).
+  - `get` (`boolean`) request text (default) or, with path, an image.
+
+**Returns:** (`table`, `string?`) Pair: `{ text }` or `{ path, width, height }` on
+  get, `(true, nil)` on set, `(nil, err)` on failure.
+
+
 ## maki.env {#maki-env}
 
 Paths to maki's own directories (config, state, logs, legacy).

@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 21 built-in tools in this reference (20 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 25 built-in tools in this reference (24 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -150,6 +150,25 @@ Execute Python in a sandbox where every tool is an async function.
 |-----------|------|----------|---------|-------------|
 | `code` | string | yes |  | Python code. Tools return strings, not objects, and you MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. |
 | `timeout` | integer | no | 30 | Script execution timeout in seconds |
+
+### `computer` {#computer}
+
+Control the desktop: mouse, keyboard, screenshots, clipboard.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `action` | string | yes |  | One of: screenshot, mouse, keyboard, position, display, clipboard |
+| `amount` | integer | no | 3 | mouse scroll: clicks |
+| `axis` | string | no | vertical | mouse scroll: vertical \| horizontal |
+| `button` | string | no | left | mouse: left \| right \| middle |
+| `get` | boolean | no | true | clipboard: request text |
+| `image_path` | string | no |  | clipboard: PNG file to copy onto the clipboard |
+| `key` | string | no |  | keyboard: key name or combo, e.g. enter, ctrl+shift+s |
+| `mouse_action` | string | no |  | mouse: move \| click \| press \| release \| scroll |
+| `path` | string | no | maki state dir | File to write the screenshot to |
+| `text` | string | no |  | keyboard: literal text to type; clipboard: text to set |
+| `x` | integer | no |  | mouse move: absolute x; clipboard: unused |
+| `y` | integer | no |  | mouse move: absolute y |
 
 ### `pwsh` {#pwsh}
 

@@ -66,6 +66,7 @@ pub fn api_docs() -> Vec<&'static ModuleDoc> {
         &api::r#async::TASK_DOCS,
         &api::base64::DOCS,
         &api::browser::DOCS,
+        &api::computer::DOCS,
         &api::env::DOCS,
         &api::r#fn::DOCS,
         &api::fs::DOCS,

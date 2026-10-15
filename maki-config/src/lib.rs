@@ -96,6 +96,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "batch",
     "browser",
     "code_execution",
+    "computer",
     "context_notes",
     "deepseek",
     "edit",
