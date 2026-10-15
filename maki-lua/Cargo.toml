@@ -11,6 +11,7 @@ rust-version.workspace = true
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 image = { workspace = true, features = ["jpeg", "gif", "webp", "bmp"] }
+chromiumoxide = { workspace = true }
 crossterm = { workspace = true }
 maki-agent = { workspace = true }
 maki-config = { workspace = true }

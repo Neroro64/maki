@@ -55,7 +55,7 @@ pub(crate) const SECTIONS: &[(&str, &[&str])] = &[
             "context_notes",
         ],
     ),
-    ("Web", &["webfetch", "websearch"]),
+    ("Web", &["webfetch", "websearch", "browser"]),
 ];
 
 struct Param {

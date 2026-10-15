@@ -102,6 +102,7 @@ pub const MIN_RETRY_MAX_MS: u64 = 1;
 pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "batch",
+    "browser",
     "code_execution",
     "completion",
     "context_notes",
