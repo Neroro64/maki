@@ -70,6 +70,10 @@ impl AgentDeps {
             .mcp_handle
             .clone()
             .map(|handle| McpSession::new(handle, &resumed.history));
+        let notes = resumed
+            .session
+            .as_ref()
+            .and_then(|s| s.meta.context_notes.clone());
         AgentSeed::new(
             resumed.id.clone(),
             Arc::clone(model_slot),
@@ -79,6 +83,7 @@ impl AgentDeps {
             mcp,
             self.timeouts,
             Arc::clone(&self.model_policy),
+            notes,
         )
     }
 }
@@ -136,6 +141,9 @@ impl AgentHandles {
             chat.set_restore_channel(Some(restore_tx.clone()));
         }
         self.publish_chat_settings(app);
+        if let Some(seed) = self.mailbox.seed() {
+            seed.set_notes(app.state.session.meta.context_notes.clone());
+        }
     }
 
     /// Background subagents read the chat's mode and thinking from the seed. A
@@ -196,13 +204,16 @@ impl AgentHandles {
             frame: app.state.session.frame().cloned(),
             session: None,
         };
-        let seed = self.deps.seed(
+        let mut seed = self.deps.seed(
             &resumed,
             model_slot,
             config,
             tool_output_lines,
             &app.permissions,
         );
+        if reason == Respawn::Load {
+            seed.set_notes(app.state.session.meta.context_notes.clone());
+        }
         let new = spawn_agent_internal(
             (
                 self.agent_tx.clone(),

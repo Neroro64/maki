@@ -52,6 +52,7 @@ pub(crate) const SECTIONS: &[(&str, &[&str])] = &[
             "todo_write",
             "memory",
             "skill",
+            "context_notes",
         ],
     ),
     ("Web", &["webfetch", "websearch"]),

@@ -245,6 +245,7 @@ impl App {
             ),
             checkpoints: state.session.meta.checkpoints.clone(),
             checkpoint: state.session.meta.checkpoint,
+            context_notes: state.session.meta.context_notes.clone(),
         }
     }
 
@@ -554,6 +555,7 @@ impl App {
             pending_background: Vec::new(),
             checkpoints: Vec::new(),
             checkpoint: self.state.session.meta.checkpoint,
+            context_notes: None,
         };
         open
     }

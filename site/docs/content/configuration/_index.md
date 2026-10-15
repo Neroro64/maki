@@ -153,6 +153,7 @@ With 0 you see only the header. The read, index and list tools default to 0, bec
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
 | `rtk` | bool | `true` | - | Rewrite the model's bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed |
 | `checkpoint` | bool | `false` | - | Commit working-tree changes to a temp git at the end of each turn so rewind restores project state |
+| `context_notes` | bool | `false` | - | Give the agent a context_notes notebook that survives compaction, with reminders near the compaction threshold |
 | `shell` | string | `auto` | - | Shell for string commands on Windows (`jobstart`, UI `!`): `auto` (Git Bash if installed, else `cmd.exe`), `cmd`, or a path to an executable |
 
 ### `provider`

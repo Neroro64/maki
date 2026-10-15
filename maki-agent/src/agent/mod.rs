@@ -4,6 +4,7 @@ mod frame;
 mod history;
 pub mod hook;
 mod instructions;
+mod notes;
 mod run;
 mod streaming;
 pub mod tool_dispatch;

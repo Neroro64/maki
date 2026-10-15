@@ -1346,6 +1346,7 @@ async fn session(
             ledger: RunLedger::child(&agent_ctx.ledger),
             audience,
             model_policy: Arc::clone(&agent_ctx.model_policy),
+            notes: Arc::default(),
         },
         context,
         opts,

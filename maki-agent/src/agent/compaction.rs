@@ -502,6 +502,16 @@ pub async fn compact(
         })?;
         history.push(Message::synthetic(text));
     }
+    if config.context_notes
+        && let Some(session_id) = hooks.session_id
+        && let Some(seed) = crate::AgentSeed::live(session_id.id())
+        && let Some(notes) = seed.notes().filter(|n| !n.is_empty())
+    {
+        history.push(Message::synthetic(format!(
+            "{}\n{notes}",
+            super::notes::INJECTED
+        )));
+    }
     fit_frame(history, next, mcp, hooks.model);
     if let Some((system, tools)) = history.request_prefix() {
         gauge.reset(history.as_slice(), system, tools);

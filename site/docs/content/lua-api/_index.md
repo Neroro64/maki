@@ -6017,6 +6017,31 @@ if dir then
 end
 ```
 
+---
+
+### `maki.session.notes()` {#maki-session-notes}
+
+```lua
+maki.session.notes({opts?})
+```
+
+Reads or replaces a session's context notebook, the durable notes the agent
+keeps for itself and that survive a compaction.
+
+**Parameters:**
+
+- `{opts?}` (`table?`) `session` (string?) Session id; defaults to focused.
+  - `text` (`string?`) Replaces the whole notebook when present; omit it to read.
+
+**Returns:** (`{notes: string}|nil`, `string|nil`) The notebook after the call, or nil
+  and an error.
+
+**Example:**
+
+```lua
+local notes = maki.session.notes({ text = "task: ship the parser" }).notes
+```
+
 
 ## maki.Timer {#maki-Timer}
 

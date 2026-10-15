@@ -3,6 +3,7 @@ use std::iter;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -33,8 +34,9 @@ use crate::tools::{
 use crate::types::EventSender;
 use crate::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, AgentParams, AgentSeed,
-    DoneReason, EventStreamGuard, McpHandle, McpSession, ModelSlot, PermissionsConfig, RunLedger,
-    RunTotals, SessionEvents, SessionMailbox, ToolDeferral, ToolOutputLines, event_stream,
+    DoneReason, EventStreamGuard, McpHandle, McpSession, ModelSlot, NotesCell, PermissionsConfig,
+    RunLedger, RunTotals, SessionEvents, SessionMailbox, ToolDeferral, ToolOutputLines,
+    event_stream,
 };
 
 const SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -551,6 +553,11 @@ pub async fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle,
 
     let session_ref_clone = session_ref.clone();
     let task_permissions = Arc::clone(&permissions);
+    let initial_notes = params
+        .resumed
+        .session
+        .as_ref()
+        .and_then(|s| s.meta.context_notes.clone());
     let spend = Arc::<RunLedger>::default();
     let track_spend = Arc::clone(&spend);
     let task = tokio::spawn(run_session(guard, params.mcp_handle.clone(), async move {
@@ -577,8 +584,19 @@ pub async fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle,
                 mcp.clone(),
                 params.timeouts,
                 Arc::clone(&params.model_policy),
+                initial_notes.clone(),
             )
         });
+        let notes = match &seed {
+            Some(seed) => Arc::clone(&seed.notes),
+            None => {
+                let cell = NotesCell::default();
+                if let Some(text) = initial_notes {
+                    *cell.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
+                }
+                cell
+            }
+        };
         let file_access = seed
             .as_ref()
             .map_or_else(FileAccess::fresh, |seed| Arc::clone(&seed.file_access));
@@ -690,6 +708,7 @@ pub async fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle,
                             ledger: turn.ledger(),
                             audience: ToolAudience::MAIN,
                             model_policy: Arc::clone(&params.model_policy),
+                            notes: Arc::clone(&notes),
                         },
                         turn.run_params(event_tx, Arc::clone(&context)),
                     )

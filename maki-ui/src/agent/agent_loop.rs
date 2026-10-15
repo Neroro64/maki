@@ -327,6 +327,7 @@ impl AgentLoop {
                 ledger: Arc::clone(ledger),
                 audience: ToolAudience::MAIN,
                 model_policy: Arc::clone(&self.seed.model_policy),
+                notes: Arc::clone(&self.seed.notes),
             },
             AgentRunParams {
                 history: &mut self.history,

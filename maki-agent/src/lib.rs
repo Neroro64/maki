@@ -34,8 +34,8 @@ pub use agent::{
 pub use call_scope::{AlreadyMoved, CallGuard, CallScope, MovedTrigger, SessionStub, TaskHome};
 pub use cancel::{CancelHandle, CancelMap, CancelToken, CancelTrigger};
 pub use live_session::{
-    AgentSeed, BackgroundNotice, CompactRequest, MailboxError, SessionMailbox, TaskLabel,
-    receipt_tag, result_notice,
+    AgentSeed, BackgroundNotice, CompactRequest, MailboxError, NotesCell, SessionMailbox,
+    TaskLabel, receipt_tag, result_notice,
 };
 pub use maki_config::{AgentConfig, PermissionsConfig, SessionDefaults, ToolOutputLines};
 pub use session_loop::{CutShort, TurnHost, run_turns};
