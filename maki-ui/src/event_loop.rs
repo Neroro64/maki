@@ -24,8 +24,8 @@ use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::session::Resumed;
 use maki_agent::{
-    AgentConfig, AgentEvent, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle,
-    Transcript, mcp,
+    AgentConfig, AgentEvent, AgentSeed, CancelToken, Envelope, McpCommand, McpConfigErrors,
+    McpHandle, Transcript, mcp,
 };
 use maki_config::project::TrustQuestion;
 use maki_config::{ModelPolicy, ProjectConfig, UiConfig};
@@ -46,7 +46,7 @@ use maki_providers::{Message, Model};
 use maki_storage::StateDir;
 use maki_storage::id::{MakiId, MakiIdParseError, SessionRef};
 use maki_storage::model::persist_model;
-use maki_storage::sessions::normalize_title;
+use maki_storage::sessions::{context_notes_fits, normalize_title};
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use serde_json::json;
@@ -82,6 +82,7 @@ const NOT_LIVE_ERR: &str = "session not live";
 const PACK_PREPARING: &str = "Checking packages...";
 const PACK_BUSY_ERR: &str = "a package command is already running";
 const UNKNOWN_MODE_ERR: &str = "unknown mode; expected \"build\" or \"plan\"";
+const NOTES_CAP_ERR: &str = "context notes exceed the 16 KiB cap";
 const PACK_PANIC_ERR: &str = "the package command stopped unexpectedly";
 const FORKED_MSG: &str = "Forked, {key} to switch back";
 
@@ -1420,6 +1421,28 @@ impl<'t> EventLoop<'t> {
                     self.sessions[idx].app.set_mode(mode);
                     Ok(json!(true))
                 });
+                let _ = reply_tx.send(reply);
+            }
+            // The notebook is written through the live session only: it is the
+            // agent's own notes, and a tab that is not running has none.
+            SessionRequest::Notes { id, text } => {
+                let reply = (|| {
+                    let idx = self.resolve_session_index(id.as_deref())?;
+                    let session_id = self.sessions[idx].id();
+                    let app = &mut self.sessions[idx].app;
+                    if let Some(text) = text {
+                        if !context_notes_fits(&text) {
+                            return Err(NOTES_CAP_ERR.to_owned());
+                        }
+                        let notes = (!text.is_empty()).then_some(text);
+                        app.state.session_mut().meta.context_notes = notes.clone();
+                        app.checkpoint_now();
+                        if let Some(seed) = AgentSeed::live(session_id) {
+                            seed.set_notes(notes);
+                        }
+                    }
+                    Ok(json!({ "notes": app.state.session.meta.context_notes }))
+                })();
                 let _ = reply_tx.send(reply);
             }
             SessionRequest::SetTitle { id, title } => {

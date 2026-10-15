@@ -24,6 +24,9 @@ const UNATTENDED_RUN_ID: u64 = 0;
 static LIVE_SESSIONS: LazyLock<Mutex<HashMap<MakiId, Weak<LiveSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// The notebook cell a session's frontend and its runs share.
+pub type NotesCell = Arc<Mutex<Option<String>>>;
+
 /// Every frontend registers the mailbox, but only an interactive agent loop
 /// publishes a seed. The seed is held weakly, so it dies with its loop. The
 /// mailbox lives on through a respawn, because the new loop registers before
@@ -72,6 +75,9 @@ pub struct AgentSeed {
     /// and not the mode on purpose. Handed to a background run, the mode would
     /// bring the plan prompt along, plus a free pass to write the plan file.
     chat_settings: Mutex<(RequestOptions, bool)>,
+    /// The chat's context notebook, shared with every run it spawns so a write
+    /// from a plugin reaches the agent mid-run.
+    pub notes: NotesCell,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -149,6 +155,7 @@ impl SessionMailbox {
         let mut published = lock(&self.live.seed);
         if let Some(previous) = published.upgrade() {
             *lock(&seed.chat_settings) = *lock(&previous.chat_settings);
+            *lock(&seed.notes) = lock(&previous.notes).clone();
             seed.file_access = previous.file_access.sharing_locks();
         }
         let seed = Arc::new(seed);
@@ -189,6 +196,7 @@ impl AgentSeed {
         mcp: Option<McpSession>,
         timeouts: Timeouts,
         model_policy: Arc<ModelPolicy>,
+        notes: Option<String>,
     ) -> Self {
         Self {
             session_id,
@@ -202,6 +210,7 @@ impl AgentSeed {
             model_policy,
             chat_settings: Mutex::default(),
             instruction_files: ArcSwap::from_pointee(default_instruction_files()),
+            notes: Arc::new(Mutex::new(notes)),
         }
     }
 
@@ -214,6 +223,14 @@ impl AgentSeed {
 
     pub fn set_chat_settings(&self, opts: RequestOptions, mode: &AgentMode) {
         *lock(&self.chat_settings) = (opts, mode.plan_path().is_some());
+    }
+
+    pub fn notes(&self) -> Option<String> {
+        lock(&self.notes).clone()
+    }
+
+    pub fn set_notes(&self, text: Option<String>) {
+        *lock(&self.notes) = text;
     }
 
     pub fn chat_opts(&self) -> RequestOptions {

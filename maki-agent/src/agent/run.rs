@@ -21,6 +21,7 @@ use super::frame::{
 use super::history::{History, sanitize_cancelled_history};
 use super::hook::{AgentHooks, AgentSlot};
 use super::instructions::{CallInstructions, LoadedInstructions};
+use super::notes::NotesState;
 use super::streaming::{StreamError, StreamRequest, stream_with_retry};
 use super::tool_dispatch::{self, RecentCalls};
 use crate::cancel::{CancelMap, CancelToken};
@@ -33,8 +34,8 @@ use crate::tools::{
 };
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
-    ExtractedCommand, InputSource, InterruptSource, RunLedger, SessionMailbox, SteerKind,
-    TurnCompleteEvent,
+    ExtractedCommand, InputSource, InterruptSource, NotesCell, RunLedger, SessionMailbox,
+    SteerKind, TurnCompleteEvent,
 };
 use maki_config::{ModelPolicy, ToolOutputLines};
 use maki_storage::id::{MakiId, SessionRef};
@@ -125,6 +126,9 @@ pub struct AgentParams {
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub audience: ToolAudience,
     pub model_policy: Arc<ModelPolicy>,
+    /// Shared with the frontend that owns the session, so a plugin's write
+    /// reaches a run already in flight. Subagents get their own cell.
+    pub notes: NotesCell,
 }
 
 pub struct AgentRunParams<'h> {
@@ -186,6 +190,7 @@ pub struct Agent<'h> {
     model_policy: Arc<ModelPolicy>,
     model_sync: Option<Arc<ArcSwap<ModelSlot>>>,
     stop_continuations: u32,
+    notes: NotesState,
 }
 
 impl<'h> Agent<'h> {
@@ -233,6 +238,7 @@ impl<'h> Agent<'h> {
             model_policy: params.model_policy,
             model_sync: None,
             stop_continuations: 0,
+            notes: NotesState::new(params.notes),
         }
     }
 
@@ -447,6 +453,8 @@ impl<'h> Agent<'h> {
             if self.turns_exhausted() {
                 return Ok(DoneReason::MaxTurns);
             }
+            self.notes
+                .maybe_reminder(&self.config, &self.model, self.gauge.size(), self.history);
             self.try_auto_compact().await?;
             match self.turn().await? {
                 TurnOutcome::Continue => {}
@@ -546,6 +554,7 @@ impl<'h> Agent<'h> {
             .is_some_and(|m| matches!(m.role, Role::Assistant));
         if !continues_answer {
             self.tell_changes();
+            self.notes.tell_change(&self.config, self.history);
         }
         Ok(())
     }
@@ -1029,6 +1038,7 @@ impl<'h> Agent<'h> {
         } else if let Some(text) = steer.continue_text {
             self.history.push(Message::synthetic(text));
         }
+        self.notes.inject(&self.config, self.history);
         Ok(())
     }
 
@@ -1082,6 +1092,7 @@ impl<'h> Agent<'h> {
         let carry_from = self.history.len() - carried;
         self.rollback_len = carry_from;
         self.carry_from = carry_from;
+        self.notes.cycle_done();
         // The old prefix has nothing worth keeping now, so the new prompt picks
         // up every fact told since.
         self.refresh_frame()?;
@@ -1436,6 +1447,7 @@ mod tests {
                 registry: Arc::new(crate::tools::ToolRegistry::new()),
                 audience: ToolAudience::MAIN,
                 model_policy: Arc::new(ModelPolicy::default()),
+                notes: NotesCell::default(),
             },
             AgentRunParams {
                 history,
@@ -3194,7 +3206,6 @@ mod tests {
             );
         });
     }
-
     const OVERFLOW_CHUNK: &str = "restored transcript chunk ";
     const OVERFLOW_CHUNKS: u32 = 400;
     const TINY_CONTEXT_WINDOW: u32 = 1_000;

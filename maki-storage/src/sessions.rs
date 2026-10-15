@@ -54,6 +54,9 @@ const NON_SESSION_STEMS: [&str; 2] = [CWD_INDEX_STEM, SCAN_CACHE_STEM];
 pub const SAVE_FAILED: &str = "maki: failed to save session ";
 const DEFAULT_TITLE: &str = "New session";
 const MAX_TITLE_LEN: usize = 60;
+/// The whole notebook is re-injected after every compaction, so its size is
+/// paid for on every request that follows.
+pub const MAX_CONTEXT_NOTES_BYTES: usize = 16 * 1024;
 const EPOCH_CHANGED: &str = "messages were rewritten";
 const FILE_CHANGED_UNDERNEATH: &str = "file changed underneath";
 const CURSOR_AHEAD: &str = "cursor ahead of session";
@@ -403,6 +406,16 @@ pub struct SessionMeta {
     /// config default in charge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<bool>,
+    /// The agent's durable notebook, kept under [`MAX_CONTEXT_NOTES_BYTES`] so
+    /// re-injecting it after a compaction cannot cost more than it saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_notes: Option<String>,
+}
+
+/// Whether `text` fits the notebook cap, counted in bytes the writer will pay
+/// for, not in chars the model may spend more of.
+pub fn context_notes_fits(text: &str) -> bool {
+    text.len() <= MAX_CONTEXT_NOTES_BYTES
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
@@ -2364,9 +2377,10 @@ mod tests {
     use super::canonical_key;
     use super::{
         ARCHIVE_DIR, ARCHIVE_KEEP, ARCHIVE_MAX_BYTES, CWD_INDEX_FILE, DEFAULT_TITLE, LOG_BLOATED,
-        MAX_APPENDS, MAX_TITLE_LEN, MSG_PREFIX, SESSION_VERSION, SESSIONS_DIR, StoredSubagent,
-        TAIL_BUF, generate_title, json_path, jsonl_path, load_cwd_index, lock_path, locks_dir,
-        next_epoch, update_cwd_index, write_full_session,
+        MAX_APPENDS, MAX_CONTEXT_NOTES_BYTES, MAX_TITLE_LEN, MSG_PREFIX, SESSION_VERSION,
+        SESSIONS_DIR, StoredSubagent, TAIL_BUF, context_notes_fits, generate_title, json_path,
+        jsonl_path, load_cwd_index, lock_path, locks_dir, next_epoch, update_cwd_index,
+        write_full_session,
     };
     use super::{
         HistorySnapshot, LOG_FORMAT_VERSION, NEWER_LOG_FORMAT, OLDEST_LOG_FORMAT_VERSION,
@@ -4666,5 +4680,14 @@ mod tests {
 
         let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_same_session(&loaded, &session);
+    }
+
+    #[test_case(String::new() => true; "empty")]
+    #[test_case("a".repeat(MAX_CONTEXT_NOTES_BYTES) => true; "at_the_cap")]
+    #[test_case("a".repeat(MAX_CONTEXT_NOTES_BYTES + 1) => false; "one_byte_over")]
+    #[test_case("é".repeat(MAX_CONTEXT_NOTES_BYTES / 2) => true; "multibyte_at_the_cap")]
+    #[test_case("é".repeat(MAX_CONTEXT_NOTES_BYTES / 2 + 1) => false; "multibyte_over")]
+    fn the_notebook_cap_counts_utf8_bytes(text: String) -> bool {
+        context_notes_fits(&text)
     }
 }

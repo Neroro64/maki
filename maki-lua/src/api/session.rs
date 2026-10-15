@@ -802,6 +802,28 @@ async fn set_title(
     roundtrip(lua, tx, req).await
 }
 
+/// Reads or replaces a session's context notebook, the durable notes the agent
+/// keeps for itself and that survive a compaction.
+///
+/// @param opts table? `session` (string?) Session id; defaults to focused.
+///   `text` (string?) Replaces the whole notebook when present; omit it to read.
+/// @return ({notes: string}|nil, string|nil) The notebook after the call, or nil
+///   and an error.
+/// @example
+/// local notes = maki.session.notes({ text = "task: ship the parser" }).notes
+#[lua_fn]
+async fn notes(
+    lua: Lua,
+    #[ctx] tx: Option<flume::Sender<UiAction>>,
+    opts: Option<Table>,
+) -> LuaResult<Pair<Value>> {
+    let (id, text) = match opts {
+        Some(opts) => (opts.opt("session")?, opts.opt("text")?),
+        None => (None, None),
+    };
+    roundtrip(lua, tx, SessionRequest::Notes { id, text }).await
+}
+
 lua_table! {
     /// Host session primitives. The interactive UI can run several sessions
     /// at once. These functions list, create, focus, rename, and delete them.
@@ -818,7 +840,7 @@ lua_table! {
     DOCS [
         list(tx), live(tx), current(tx), read(tx), export(perms, tx), messages(perms, tx), focus(tx),
         delete(perms, tx), new(perms, tx, grants), prompt(perms, tx), notify(perms, grants),
-        set_mode(perms, tx), set_title(perms, tx),
+        set_mode(perms, tx), set_title(perms, tx), notes(tx),
     ]
 }
 
