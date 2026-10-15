@@ -454,12 +454,14 @@ impl SpawnCtx {
             Arc::clone(&self.custom_commands),
             self.lua_event_handle.clone(),
             Arc::clone(&self.model_policy),
+            self.config.checkpoint,
         );
         app.trust_question = self.trust_question.clone();
         handles.apply_to_app(&mut app);
         if resumed {
             app.restore_resumed_session();
         }
+        app.ensure_initial_checkpoint();
         let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
         let last_title = app.state.session.title.clone();
         SessionRuntime {
@@ -517,6 +519,7 @@ enum Wake {
     Warn(String),
     Pack(Box<PackPreparation>),
     ModelsDiscovered,
+    Checkpoint(usize, crate::app::checkpoint::CheckpointEvent),
 }
 
 struct BackgroundModels {
@@ -846,6 +849,9 @@ impl<'t> EventLoop<'t> {
             sel = sel.recv(&rt.shell_rx, move |res| {
                 res.ok().map(|ev| Wake::Shell(i, ev))
             });
+            sel = sel.recv(&rt.app.checkpoint_rx, move |res| {
+                res.ok().map(|ev| Wake::Checkpoint(i, ev))
+            });
         }
         sel.wait_timeout(timeout).ok().flatten()
     }
@@ -861,6 +867,7 @@ impl<'t> EventLoop<'t> {
             Wake::Warn(warning) => self.focused_app().flash(warning),
             Wake::Pack(preparation) => self.finish_pack(*preparation),
             Wake::ModelsDiscovered => self.rebuild_models(),
+            Wake::Checkpoint(i, event) => self.sessions[i].app.handle_checkpoint_event(event),
         }
         Ok(())
     }

@@ -137,6 +137,8 @@ impl App {
             fast: state.fast_intent(),
             workflow: state.workflow,
             yolo: self.permissions.persisted_yolo(),
+            checkpoints: state.session.meta.checkpoints.clone(),
+            checkpoint: state.session.meta.checkpoint,
         }
     }
 
@@ -332,6 +334,8 @@ impl App {
             input_draft: None,
             queued_messages: Vec::new(),
             yolo: self.permissions.persisted_yolo(),
+            checkpoints: Vec::new(),
+            checkpoint: self.state.session.meta.checkpoint,
         };
         open
     }
@@ -358,6 +362,7 @@ impl App {
         self.state.session = Arc::new(session);
         self.state.claim = claim;
         self.reset_ui_chrome();
+        self.ensure_initial_checkpoint();
         maki_otel::emit::session_started(
             maki_otel::emit::START_FRESH,
             Some(&self.state.session.id.to_string()),
@@ -385,6 +390,7 @@ impl App {
             .state
             .context_size
             .saturating_sub(estimate_message_tokens(self.state.session.messages()));
+        self.restore_checkpoint(entry.turn_index);
         let session = self.state.session_mut();
         session.truncate_messages(entry.turn_index);
         session.prune_orphans(|m| m.tool_uses().map(|(id, _, _)| id.to_owned()).collect());
@@ -421,6 +427,7 @@ impl App {
         }
         self.reset_ui_chrome();
         self.restore_display();
+        self.ensure_initial_checkpoint();
 
         self.install_local_history()
     }

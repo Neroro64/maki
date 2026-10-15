@@ -5,6 +5,7 @@
 //! `AgentHandles::respawn`. Everything else only reads it.
 
 mod btw;
+pub(crate) mod checkpoint;
 mod image_paste;
 pub(crate) mod mode;
 mod mouse;
@@ -26,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::OpenSession;
+use crate::app::checkpoint::CheckpointEvent;
 use crate::app::tasks::TaskOutcome;
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
@@ -438,6 +440,10 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    /// The config default for sessions whose meta says nothing about it.
+    pub(super) checkpoint_default: bool,
+    checkpoint_tx: flume::Sender<CheckpointEvent>,
+    pub(crate) checkpoint_rx: flume::Receiver<CheckpointEvent>,
 }
 
 impl App {
@@ -459,8 +465,10 @@ impl App {
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
         model_policy: Arc<ModelPolicy>,
+        checkpoint_default: bool,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
+        let (checkpoint_tx, checkpoint_rx) = flume::unbounded::<CheckpointEvent>();
         let state = SessionState::from_session(session, model, &storage);
         let typewriter = ui_config.typewriter_ms_per_char;
         let flash = ui_config.flash_duration();
@@ -545,6 +553,9 @@ impl App {
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
+            checkpoint_default,
+            checkpoint_tx: checkpoint_tx.clone(),
+            checkpoint_rx,
         };
         app.model_picker.set_recents(
             maki_storage::model::read_recents(&app.storage)
@@ -1769,6 +1780,7 @@ impl App {
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
+                    self.checkpoint_turn();
                     if self.exit_on_done {
                         self.exit_request = ExitRequest::Success;
                     }
@@ -1929,6 +1941,10 @@ impl App {
                     "YOLO mode disabled"
                 };
                 self.flash(msg.into());
+                vec![]
+            }
+            "/checkpoint" => {
+                self.toggle_checkpoint();
                 vec![]
             }
             "/fast" => {

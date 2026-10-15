@@ -818,6 +818,7 @@ pub struct AgentFileConfig {
     pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
     pub rtk: Option<bool>,
+    pub checkpoint: Option<bool>,
     pub shell: Option<ShellPreference>,
 }
 
@@ -835,6 +836,7 @@ impl AgentFileConfig {
             post_compaction_instructions,
             stale_read_check,
             rtk,
+            checkpoint,
             shell
         );
     }
@@ -1490,6 +1492,12 @@ pub struct AgentConfig {
     pub rtk: bool,
 
     #[config(
+        default = false,
+        desc = "Commit working-tree changes to a temp git at the end of each turn so rewind restores project state"
+    )]
+    pub checkpoint: bool,
+
+    #[config(
         default = ShellPreference::Auto,
         ty = "string",
         default_doc = "auto",
@@ -1523,6 +1531,7 @@ impl AgentConfig {
             post_compaction_instructions: file.post_compaction_instructions,
             stale_read_check: file.stale_read_check.unwrap_or(true),
             rtk: file.rtk.unwrap_or(true),
+            checkpoint: file.checkpoint.unwrap_or(false),
             shell: file.shell.unwrap_or_default(),
             max_turns: None,
             allowed_tools: Vec::new(),

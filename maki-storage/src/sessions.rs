@@ -21,6 +21,7 @@ use std::time::UNIX_EPOCH;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::checkpoint::StoredCheckpoint;
 use crate::frame::StoredFrame;
 use crate::id::{MakiId, MakiIdParseError};
 use crate::paths::canonical_key;
@@ -367,6 +368,14 @@ pub struct SessionMeta {
     /// makes `--yolo` a property of the invocation rather than of the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo: Option<bool>,
+    /// Working-tree commits, one per turn end, so a rewind can put the files
+    /// back the way they were at the point it truncates to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<StoredCheckpoint>,
+    /// `None` when the user never set it for this session, which leaves the
+    /// config default in charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<bool>,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells
