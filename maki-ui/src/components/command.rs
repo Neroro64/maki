@@ -93,6 +93,13 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         plugin_access: WRITES_SESSION,
     },
     BuiltinCommand {
+        name: "/checkpoint",
+        description: "Toggle git-based checkpoints for this session",
+        max_args: 0,
+        bang: false,
+        plugin_access: WRITES_SESSION,
+    },
+    BuiltinCommand {
         name: "/help",
         description: "Show keybindings",
         max_args: 0,

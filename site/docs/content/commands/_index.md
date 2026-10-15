@@ -16,6 +16,7 @@ Type `/` in the input box to open the command palette.
 | `/compact` | Summarize and compact conversation history (optional guidance) |
 | `/new` | Start a new session |
 | `/fork` | Fork this session and switch to the copy |
+| `/checkpoint` | Toggle git-based checkpoints for this session |
 | `/help` | Show keybindings |
 | `/usage` | Show token usage breakdown |
 | `/queue` | Remove items from queue |

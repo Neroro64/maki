@@ -212,6 +212,7 @@ fn build_app_with_session(
         Arc::from([]),
         maki_lua::EventHandle::disconnected_for_test(),
         Arc::new(maki_config::ModelPolicy::default()),
+        false,
     )
 }
 
@@ -4426,6 +4427,27 @@ fn checkpoint_mirrors_the_yolo_toggle_into_meta() {
     app.execute_command(cmd("/yolo"), 0);
     app.checkpoint();
     assert_eq!(app.state.session.meta.yolo, Some(false));
+}
+
+/// The toggle is per-session like yolo, so it has to reach the log, and the
+/// flash is the only place the user learns which way it went.
+#[test]
+fn checkpoint_command_records_the_toggle_in_meta() {
+    let mut app = test_app();
+    app.checkpoint();
+    assert_eq!(app.state.session.meta.checkpoint, None);
+
+    app.execute_command(cmd("/checkpoint"), 0);
+    app.checkpoint();
+    assert_eq!(app.state.session.meta.checkpoint, Some(true));
+    let flash = app.status_bar.flash_text().unwrap();
+    assert!(flash.contains("on"), "flash={flash:?}");
+
+    app.execute_command(cmd("/checkpoint"), 0);
+    app.checkpoint();
+    assert_eq!(app.state.session.meta.checkpoint, Some(false));
+    let flash = app.status_bar.flash_text().unwrap();
+    assert!(flash.contains("off"), "flash={flash:?}");
 }
 
 fn session_with_yolo(stored: Option<bool>) -> AppSession {

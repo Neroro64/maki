@@ -80,6 +80,7 @@ pub fn app(storage: StateDir) -> App {
         Arc::from([]),
         EventHandle::disconnected_for_test(),
         Arc::new(ModelPolicy::default()),
+        false,
     )
 }
 

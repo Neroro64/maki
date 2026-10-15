@@ -203,6 +203,8 @@ impl App {
             fast: state.fast_intent(),
             workflow: state.workflow,
             yolo: self.permissions.persisted_yolo(),
+            checkpoints: state.session.meta.checkpoints.clone(),
+            checkpoint: state.session.meta.checkpoint,
         }
     }
 
@@ -413,6 +415,8 @@ impl App {
             input_draft_writers: None,
             queued_messages: Vec::new(),
             yolo: self.permissions.persisted_yolo(),
+            checkpoints: Vec::new(),
+            checkpoint: self.state.session.meta.checkpoint,
         };
         open
     }
@@ -475,6 +479,7 @@ impl App {
         self.state.session = Arc::new(session);
         self.state.claim = claim;
         self.reset_ui_chrome();
+        self.ensure_initial_checkpoint();
         maki_otel::emit::session_started(
             maki_otel::emit::START_FRESH,
             Some(&self.state.session.id.to_string()),
@@ -538,11 +543,22 @@ impl App {
     }
 
     pub(super) fn rewind_to(&mut self, entry: RewindEntry) -> Vec<Action> {
-        let measured = self.state.context_size;
+        // The live size came from the provider, so it also counts the system
+        // prompt and the tool schemas, a baseline the estimator cannot see.
+        // Subtract only what we drop, or the gauge collapses until the next
+        // turn measures it again. An emptied history is a fresh session though,
+        // baseline included.
+        let baseline = self
+            .state
+            .context_size
+            .saturating_sub(estimate_message_tokens(self.state.session.messages()));
+        self.restore_checkpoint(entry.turn_index);
         let session = self.state.session_mut();
-        let context_size = truncate_to_turn(session, entry.turn_index, measured);
+        session.truncate_messages(entry.turn_index);
+        session.prune_orphans(|m| m.tool_uses().map(|(id, _, _)| id.to_owned()).collect());
         session.update_title_if_default();
-        self.state.context_size = context_size;
+        let kept = estimate_message_tokens(self.state.session.messages());
+        self.state.context_size = if kept == 0 { 0 } else { baseline + kept };
 
         self.reset_ui_chrome();
         self.restore_display();
@@ -583,6 +599,7 @@ impl App {
         }
         self.reset_ui_chrome();
         self.restore_display();
+        self.ensure_initial_checkpoint();
 
         self.install_local_history()
     }
