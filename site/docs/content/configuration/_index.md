@@ -129,6 +129,7 @@ With 0 you see only the header. The read, index and list tools default to 0, bec
 | Field | Default | Tools |
 |-------|---------|-------|
 | `bash` | 3 | bash |
+| `pwsh` | 3 | pwsh |
 | `code_execution` | 3 | code_execution |
 | `task` | 3 | task |
 | `index` | 0 | index |
@@ -351,6 +352,14 @@ maki.setup({
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `responses_api` | boolean | `false` | - | Use the Responses API (/v1/responses) instead of chat completions (/v1/chat/completions). Off by default while the path is still being tested. |
+
+### `plugins.pwsh`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `timeout_secs` | integer | `120` | 5 | Kill the persistent session after this many seconds. A call's `timeout` param overrides it. |
 
 ### `plugins.read`
 
