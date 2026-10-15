@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
@@ -31,8 +31,8 @@ use crate::tools::{
 };
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, DoneReason, EventSender,
-    ExtractedCommand, InputSource, InterruptSource, RunLedger, SessionMailbox, SteerKind,
-    TurnCompleteEvent,
+    ExtractedCommand, InputSource, InterruptSource, NotesCell, RunLedger, SessionMailbox,
+    SteerKind, TurnCompleteEvent,
 };
 use maki_config::{ModelPolicy, ToolOutputLines};
 use maki_storage::id::{MakiId, SessionRef};
@@ -67,6 +67,16 @@ const NO_FRAME: &str = "no prompt frame to send the request under";
 const MODEL_BINDING_MISMATCH: &str = "model_binding_mismatch";
 const THINKING_DROPPED: &str =
     "The prompt changed under earlier reasoning, so it was dropped to keep the session going.";
+/// Lands once per compaction cycle, in the last stretch before the transcript
+/// is summarized away: the notebook is worth writing while everything it has
+/// to say is still in context.
+const NOTES_REMINDER: &str = "Context notes reminder: the context window is nearing its compaction threshold. Use context_notes to save a compact durable notebook (task state, decisions, changed files, blockers, next steps — one line per item) before compaction.";
+/// What the notebook is worth is that the model reads it again after the
+/// transcript it wrote it from is gone.
+const NOTES_INJECTED: &str = "Context notes (persisted, current):";
+const NOTES_CHANGED: &str = "Context notes now read:";
+/// The reminder lands in the last fifth of the room before the threshold.
+const NOTES_REMINDER_LEAD_DIVISOR: u32 = 5;
 
 pub async fn resolve_compaction_model(
     provider: &Arc<dyn Provider>,
@@ -121,6 +131,9 @@ pub struct AgentParams {
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub audience: ToolAudience,
     pub model_policy: Arc<ModelPolicy>,
+    /// Shared with the frontend that owns the session, so a plugin's write
+    /// reaches a run already in flight. Subagents get their own cell.
+    pub notes: NotesCell,
 }
 
 pub struct AgentRunParams<'h> {
@@ -181,6 +194,9 @@ pub struct Agent<'h> {
     model_policy: Arc<ModelPolicy>,
     model_sync: Option<Arc<ArcSwap<ModelSlot>>>,
     stop_continuations: u32,
+    notes: NotesCell,
+    notes_reminded: bool,
+    notes_told: Option<String>,
 }
 
 impl<'h> Agent<'h> {
@@ -227,6 +243,9 @@ impl<'h> Agent<'h> {
             model_policy: params.model_policy,
             model_sync: None,
             stop_continuations: 0,
+            notes: params.notes,
+            notes_reminded: false,
+            notes_told: None,
         }
     }
 
@@ -413,6 +432,55 @@ impl<'h> Agent<'h> {
             .is_some_and(|max| self.num_turns >= max)
     }
 
+    fn notes_text(&self) -> Option<String> {
+        self.notes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The notebook only pays for itself when it is written while everything it
+    /// has to say is still in context, so the model hears about it in the last
+    /// stretch before the threshold, once per compaction cycle.
+    fn maybe_notes_reminder(&mut self) {
+        if !self.config.context_notes || self.notes_reminded {
+            return;
+        }
+        let usable = compaction::usable(&self.model, &self.config);
+        let size = self.gauge.size();
+        if size >= usable - usable / NOTES_REMINDER_LEAD_DIVISOR && size < usable {
+            self.history
+                .push(Message::synthetic(NOTES_REMINDER.to_owned()));
+            self.notes_reminded = true;
+        }
+    }
+
+    /// The notebook the model last read, told to it as it was then.
+    fn tell_notes_change(&mut self) {
+        if !self.config.context_notes {
+            return;
+        }
+        let current = self.notes_text();
+        if self.notes_told == current {
+            return;
+        }
+        self.notes_told = current.clone();
+        if let Some(text) = current.filter(|text| !text.is_empty()) {
+            self.history
+                .push(Message::synthetic(format!("{NOTES_CHANGED}\n{text}")));
+        }
+    }
+
+    /// Re-injects the notebook after its transcript was summarized away.
+    fn inject_notes(&mut self) {
+        let Some(text) = self.notes_text().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        self.notes_told = Some(text.clone());
+        self.history
+            .push(Message::synthetic(format!("{NOTES_INJECTED}\n{text}")));
+    }
+
     async fn run_loop(&mut self) -> Result<DoneReason, AgentError> {
         loop {
             // Ahead of `try_auto_compact`: a switch landing after the check
@@ -422,6 +490,7 @@ impl<'h> Agent<'h> {
             if self.turns_exhausted() {
                 return Ok(DoneReason::MaxTurns);
             }
+            self.maybe_notes_reminder();
             self.try_auto_compact().await?;
             match self.turn().await? {
                 TurnOutcome::Continue => {}
@@ -521,6 +590,7 @@ impl<'h> Agent<'h> {
             .is_some_and(|m| matches!(m.role, Role::Assistant));
         if !continues_answer {
             self.tell_changes();
+            self.tell_notes_change();
         }
         Ok(())
     }
@@ -1003,6 +1073,9 @@ impl<'h> Agent<'h> {
         } else if let Some(text) = steer.continue_text {
             self.history.push(Message::synthetic(text));
         }
+        if self.config.context_notes {
+            self.inject_notes();
+        }
         Ok(())
     }
 
@@ -1056,6 +1129,7 @@ impl<'h> Agent<'h> {
         let carry_from = self.history.len() - carried;
         self.rollback_len = carry_from;
         self.carry_from = carry_from;
+        self.notes_reminded = false;
         // The old prefix has nothing worth keeping now, so the new prompt picks
         // up every fact told since.
         self.refresh_frame()?;
@@ -1393,6 +1467,7 @@ mod tests {
                 registry: Arc::new(crate::tools::ToolRegistry::new()),
                 audience: ToolAudience::MAIN,
                 model_policy: Arc::new(ModelPolicy::default()),
+                notes: NotesCell::default(),
             },
             AgentRunParams {
                 history,
@@ -2519,6 +2594,86 @@ mod tests {
                     AgentEvent::AutoCompacting { .. }
                 )),
                 expected,
+            );
+        });
+    }
+
+    const NOTES_WINDOW: u32 = 200_000;
+    const NOTES_MAX_OUTPUT: u32 = 8_192;
+    const NOTES_IN_BAND: u32 = 150_000;
+    const NOTES_BELOW: u32 = 100_000;
+    const NOTES_PAST: u32 = 170_000;
+    const NOTE_BODY: &str = "task: ship the parser";
+
+    fn notes_agent<'h>(history: &'h mut History, context_size: u32, enabled: bool) -> Agent<'h> {
+        let (mut agent, _) = make_agent(MockProvider::new(vec![]), history);
+        *agent.gauge = ContextGauge::restored(context_size);
+        agent.model = Arc::new(small_context_model(NOTES_WINDOW, NOTES_MAX_OUTPUT));
+        agent.config.context_notes = enabled;
+        agent
+    }
+
+    fn synthetic_texts(history: &History) -> Vec<String> {
+        history
+            .as_slice()
+            .iter()
+            .filter(|m| m.display_text.as_deref() == Some(""))
+            .filter_map(Message::first_text_content)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test_case(true,  NOTES_IN_BAND, true  ; "in_the_lead")]
+    #[test_case(true,  NOTES_BELOW,   false ; "below_the_lead")]
+    #[test_case(true,  NOTES_PAST,    false ; "past_the_threshold")]
+    #[test_case(false, NOTES_IN_BAND, false ; "disabled_in_the_lead")]
+    fn the_notes_reminder_lands_once_in_the_lead(enabled: bool, context_size: u32, expected: bool) {
+        smol::block_on(async {
+            let mut history = History::new(vec![Message::user("go".into())]);
+            let mut agent = notes_agent(&mut history, context_size, enabled);
+            agent.maybe_notes_reminder();
+            agent.maybe_notes_reminder();
+            drop(agent);
+            let landed = synthetic_texts(&history)
+                .iter()
+                .filter(|text| *text == NOTES_REMINDER)
+                .count();
+            assert_eq!(landed, usize::from(expected));
+        });
+    }
+
+    #[test]
+    fn notes_reach_the_model_on_a_write_and_never_again_untouched() {
+        smol::block_on(async {
+            let mut history = History::new(vec![Message::user("go".into())]);
+            let mut agent = notes_agent(&mut history, NOTES_BELOW, true);
+            agent.tell_notes_change();
+
+            *agent.notes.lock().unwrap() = Some(NOTE_BODY.into());
+            agent.tell_notes_change();
+            agent.tell_notes_change();
+            *agent.notes.lock().unwrap() = None;
+            agent.tell_notes_change();
+            drop(agent);
+            assert_eq!(
+                synthetic_texts(&history),
+                [format!("{NOTES_CHANGED}\n{NOTE_BODY}")]
+            );
+        });
+    }
+
+    #[test]
+    fn notes_are_re_injected_after_compaction_and_told_as_read() {
+        smol::block_on(async {
+            let mut history = History::new(vec![Message::user("go".into())]);
+            let mut agent = notes_agent(&mut history, NOTES_BELOW, true);
+            *agent.notes.lock().unwrap() = Some(NOTE_BODY.into());
+            agent.inject_notes();
+            agent.tell_notes_change();
+            drop(agent);
+            assert_eq!(
+                synthetic_texts(&history),
+                [format!("{NOTES_INJECTED}\n{NOTE_BODY}")]
             );
         });
     }

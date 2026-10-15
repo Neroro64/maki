@@ -95,6 +95,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "bash",
     "batch",
     "code_execution",
+    "context_notes",
     "deepseek",
     "edit",
     "glob",
@@ -819,6 +820,7 @@ pub struct AgentFileConfig {
     pub stale_read_check: Option<bool>,
     pub rtk: Option<bool>,
     pub checkpoint: Option<bool>,
+    pub context_notes: Option<bool>,
     pub shell: Option<ShellPreference>,
 }
 
@@ -837,6 +839,7 @@ impl AgentFileConfig {
             stale_read_check,
             rtk,
             checkpoint,
+            context_notes,
             shell
         );
     }
@@ -1498,6 +1501,12 @@ pub struct AgentConfig {
     pub checkpoint: bool,
 
     #[config(
+        default = false,
+        desc = "Give the agent a context_notes notebook that survives compaction, with reminders near the compaction threshold"
+    )]
+    pub context_notes: bool,
+
+    #[config(
         default = ShellPreference::Auto,
         ty = "string",
         default_doc = "auto",
@@ -1532,6 +1541,7 @@ impl AgentConfig {
             stale_read_check: file.stale_read_check.unwrap_or(true),
             rtk: file.rtk.unwrap_or(true),
             checkpoint: file.checkpoint.unwrap_or(false),
+            context_notes: file.context_notes.unwrap_or(false),
             shell: file.shell.unwrap_or_default(),
             max_turns: None,
             allowed_tools: Vec::new(),

@@ -217,6 +217,14 @@ Load a skill that provides instructions and workflows for specific tasks.
 |-----------|------|----------|-------------|
 | `name` | string | yes | Name of the skill to load |
 
+### `context_notes` {#context_notes}
+
+Read or replace the persistent context notebook for this session. Omit text to read; supply text to replace the whole notebook; empty string clears it. The notebook survives compaction and is re-injected into context. Keep it a compact index: task state, decisions, changed files, evidence, blockers, next steps — one line per item, no copied logs or file bodies. Cap 16 KiB.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `text` | string | no | The whole new notebook. Omit to read the current one, pass "" to clear it |
+
 ## Web
 
 ### `webfetch` {#webfetch}

@@ -903,6 +903,7 @@ async fn session(
             registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
             audience,
             model_policy: Arc::clone(&agent_ctx.model_policy),
+            notes: Arc::default(),
         },
         context,
         opts,

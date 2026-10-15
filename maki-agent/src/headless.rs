@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use maki_config::{ModelPolicy, ProjectConfig, SessionDefaults};
@@ -24,8 +25,8 @@ use crate::tools::{FileAccess, LocalTools, RequestTools, ToolAudience, ToolRegis
 use crate::types::EventSender;
 use crate::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, EventStreamGuard,
-    ImageSource, InputSource, McpHandle, McpSession, PermissionsConfig, RunLedger, SessionEvents,
-    SessionMailbox, ToolDeferral, ToolOutputLines, event_stream,
+    ImageSource, InputSource, McpHandle, McpSession, NotesCell, PermissionsConfig, RunLedger,
+    SessionEvents, SessionMailbox, ToolDeferral, ToolOutputLines, event_stream,
 };
 
 const SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -187,6 +188,15 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
     let session_ref = params.resumed.id.clone();
     let mailbox = SessionMailbox::register(session_ref.id());
     let run_session_ref = session_ref.clone();
+    let notes = NotesCell::default();
+    if let Some(text) = params
+        .resumed
+        .session
+        .as_ref()
+        .and_then(|s| s.meta.context_notes.clone())
+    {
+        *notes.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
+    }
     let defaults = params.defaults;
     let working_dir_path = params.initial_wd.clone();
     let task_working_dir = working_dir.clone();
@@ -230,6 +240,7 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
                 registry: Arc::clone(ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,
                 model_policy: Arc::clone(&params.model_policy),
+                notes,
             },
             turn.run_params(event_tx, context),
         )
@@ -351,6 +362,15 @@ pub fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle, Sessi
 
     let session_ref_clone = session_ref.clone();
     let task_permissions = Arc::clone(&permissions);
+    let notes = NotesCell::default();
+    if let Some(text) = params
+        .resumed
+        .session
+        .as_ref()
+        .and_then(|s| s.meta.context_notes.clone())
+    {
+        *notes.lock().unwrap_or_else(PoisonError::into_inner) = Some(text);
+    }
     let task = smol::spawn(run_session(guard, params.mcp_handle.clone(), async move {
         let mut model = params.model;
         let Some(mut provider) = connect(&mut model, params.timeouts, &base_tx).await else {
@@ -420,6 +440,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle, Sessi
                     registry: Arc::clone(ToolRegistry::global_arc()),
                     audience: ToolAudience::MAIN,
                     model_policy: Arc::clone(&params.model_policy),
+                    notes: Arc::clone(&notes),
                 },
                 turn.run_params(event_tx, Arc::clone(&context)),
             )

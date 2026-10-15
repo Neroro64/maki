@@ -153,6 +153,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/code_execution"),
     },
     BundledPlugin {
+        name: "context_notes",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/context_notes"),
+    },
+    BundledPlugin {
         name: "completion",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/completion"),
     },

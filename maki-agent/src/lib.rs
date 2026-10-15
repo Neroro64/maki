@@ -29,7 +29,7 @@ pub use agent::{
     close_dangling_tool_calls, find_subdirectory_instructions, is_instruction_file,
 };
 pub use cancel::{CancelMap, CancelToken, CancelTrigger};
-pub use live_session::{AgentSeed, MailboxError, SessionMailbox};
+pub use live_session::{AgentSeed, MailboxError, NotesCell, SessionMailbox};
 pub use maki_config::{AgentConfig, PermissionsConfig, SessionDefaults, ToolOutputLines};
 pub mod command;
 pub mod diff;

@@ -82,6 +82,10 @@ impl AgentLoop {
         model_policy: Arc<ModelPolicy>,
     ) -> Self {
         let mcp = mcp_handle.map(|h| McpSession::new(h, &resumed.history));
+        let notes = resumed
+            .session
+            .as_ref()
+            .and_then(|s| s.meta.context_notes.clone());
         let seed = mailbox.publish_seed(AgentSeed::new(
             resumed.id,
             model_slot,
@@ -91,6 +95,7 @@ impl AgentLoop {
             mcp,
             timeouts,
             model_policy,
+            notes,
         ));
         Self {
             seed,
@@ -329,6 +334,7 @@ impl AgentLoop {
                 registry: Arc::clone(maki_agent::tools::ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,
                 model_policy: Arc::clone(&self.seed.model_policy),
+                notes: Arc::clone(&self.seed.notes),
             },
             AgentRunParams {
                 history: &mut self.history,

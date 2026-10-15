@@ -37,7 +37,7 @@ const SECTIONS: &[(&str, &[&str])] = &[
     ),
     (
         "Agent & Knowledge",
-        &["task", "todo_write", "memory", "skill"],
+        &["task", "todo_write", "memory", "skill", "context_notes"],
     ),
     ("Web", &["webfetch", "websearch"]),
 ];

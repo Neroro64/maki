@@ -463,6 +463,12 @@ pub enum SessionRequest {
         id: String,
         title: String,
     },
+    /// The session's context notebook. `text` of `None` reads it, `Some`
+    /// replaces it, and an empty string clears it.
+    Notes {
+        id: Option<String>,
+        text: Option<String>,
+    },
 }
 
 pub enum TaskRequest {

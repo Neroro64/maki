@@ -139,6 +139,7 @@ impl App {
             yolo: self.permissions.persisted_yolo(),
             checkpoints: state.session.meta.checkpoints.clone(),
             checkpoint: state.session.meta.checkpoint,
+            context_notes: state.session.meta.context_notes.clone(),
         }
     }
 
@@ -336,6 +337,7 @@ impl App {
             yolo: self.permissions.persisted_yolo(),
             checkpoints: Vec::new(),
             checkpoint: self.state.session.meta.checkpoint,
+            context_notes: None,
         };
         open
     }
