@@ -135,6 +135,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/pwsh"),
     },
     BundledPlugin {
+        name: "computer",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/computer"),
+    },
+    BundledPlugin {
         name: "batch",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/batch"),
     },
