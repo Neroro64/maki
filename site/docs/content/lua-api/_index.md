@@ -130,6 +130,7 @@ The rules:
 | [`maki.net`](#maki-net) | HTTP and plain TCP for plugins. |
 | [`maki.net.Conn`](#maki-net-Conn) | A TCP connection opened by `maki.net.connect`. |
 | [`maki.provider`](#maki-provider) | Providers implemented in Lua. |
+| [`maki.pwsh`](#maki-pwsh) | Persistent PowerShell sessions: `maki.pwsh.exec` runs a command in a |
 | [`maki.provider.auth`](#maki-provider-auth) | Credential storage for the providers this plugin registered. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.Timer`](#maki-Timer) | Handle returned by `maki.defer_fn`. |
@@ -4379,6 +4380,78 @@ fetch_usage = function(ctx)
   return { limits = {} }
 end
 ```
+
+
+## maki.pwsh {#maki-pwsh}
+
+Persistent PowerShell sessions: `maki.pwsh.exec` runs a command in a
+process that stays alive across tool calls, so variables and cwd
+persist. `reset` kills it, `status` reports it.
+
+---
+
+### `maki.pwsh.exec()` {#maki-pwsh-exec}
+
+```lua
+maki.pwsh.exec({opts})
+```
+
+Run one command in the session's persistent PowerShell process.
+
+The process is spawned on first use and kept alive for the session, so
+variables, functions, and the working directory carry over between calls.
+A timeout kills the process: the next call starts a fresh one with no
+leftover state.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this shell. Required.
+  - `command` (`string`) PowerShell command to run. Required.
+  - `timeout` (`integer`) seconds to wait for the reply. Default 120.
+
+**Returns:** (`table`, `string?`) Pair: `{ output, exit_code, timed_out, dead }` on
+  success, `(nil, err)` on failure. `exit_code` is nil when PowerShell
+  tracked no native command exit code.
+
+---
+
+### `maki.pwsh.reset()` {#maki-pwsh-reset}
+
+```lua
+maki.pwsh.reset({opts})
+```
+
+Kill the session's persistent PowerShell process.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this shell. Required.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)` on failure.
+
+---
+
+### `maki.pwsh.status()` {#maki-pwsh-status}
+
+```lua
+maki.pwsh.status({opts})
+```
+
+Report whether the session's persistent PowerShell process is alive.
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this shell. Required.
+
+**Returns:** (`table`, `string?`) Pair: `{ alive, pid, elapsed_secs }` on success,
+  `(nil, err)` on failure.
 
 
 ## maki.provider.auth {#maki-provider-auth}

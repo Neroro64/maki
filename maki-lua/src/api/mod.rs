@@ -16,6 +16,7 @@ pub(crate) mod options;
 pub(crate) mod pack;
 pub(crate) mod plan;
 pub(crate) mod provider;
+pub(crate) mod pwsh;
 pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod split;
@@ -147,6 +148,7 @@ pub(crate) fn create_maki_global(
         "interpreter",
         interpreter::create_interpreter_table(lua, permissions)?,
     )?;
+    maki.set("pwsh", pwsh::create_pwsh_table(lua, permissions)?)?;
     maki.set(
         "agent",
         agent::create_agent_table(lua, Arc::clone(&plugin), permissions.clone())?,

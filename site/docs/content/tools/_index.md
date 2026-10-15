@@ -151,6 +151,18 @@ Execute Python in a sandbox where every tool is an async function.
 | `code` | string | yes |  | Python code. Tools return strings, not objects, and you MUST await every call: `result = await read(path='/file', offset=1, limit=0)`. |
 | `timeout` | integer | no | 30 | Script execution timeout in seconds |
 
+### `pwsh` {#pwsh}
+
+Execute a PowerShell command in a persistent session.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `command` | string | yes |  | The PowerShell command to execute |
+| `description` | string | no |  | Short description (3-5 words) of what the command does |
+| `reset` | boolean | no |  | Kill the persistent session first, discarding all state |
+| `tail` | integer | no |  | Return only the last N lines |
+| `timeout` | integer | no | 120 | Timeout in seconds |
+
 ### `question` {#question}
 
 Use this tool when you need to ask the user questions during execution. This allows you to:
