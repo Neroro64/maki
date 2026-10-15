@@ -108,6 +108,7 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | Field | Default |
 |-------|---------|
 | `bash` | 5 |
+| `pwsh` | 5 |
 | `code_execution` | 5 |
 | `task` | 5 |
 | `index` | 3 |
@@ -322,6 +323,14 @@ maki.setup({
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `max_file_size_mb` | integer | `2` | 1 | Refuse to index files larger than this many MB. |
+
+### `plugins.pwsh`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
+| `timeout_secs` | integer | `120` | 5 | Kill the persistent session after this many seconds. A call's `timeout` param overrides it. |
 
 ### `plugins.read`
 

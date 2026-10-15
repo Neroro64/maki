@@ -104,6 +104,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "memory",
     "mistral",
     "openrouter",
+    "pwsh",
     "question",
     "read",
     "regolo",
@@ -737,6 +738,7 @@ pub enum NotificationMethod {
 #[serde(default, deny_unknown_fields)]
 pub struct ToolOutputLinesFile {
     pub bash: Option<usize>,
+    pub pwsh: Option<usize>,
     pub code_execution: Option<usize>,
     pub task: Option<usize>,
     pub index: Option<usize>,
@@ -753,6 +755,7 @@ impl ToolOutputLinesFile {
             self,
             overlay,
             bash,
+            pwsh,
             code_execution,
             task,
             index,
@@ -1402,6 +1405,7 @@ impl UiConfig {
 #[serde(default)]
 pub struct ToolOutputLines {
     pub bash: usize,
+    pub pwsh: usize,
     pub code_execution: usize,
     pub task: usize,
     pub index: usize,
@@ -1415,6 +1419,7 @@ pub struct ToolOutputLines {
 impl ToolOutputLines {
     pub const DEFAULT: Self = Self {
         bash: 5,
+        pwsh: 5,
         code_execution: 5,
         task: 5,
         index: 3,
@@ -1427,6 +1432,7 @@ impl ToolOutputLines {
 
     pub const FIELD_DEFAULTS: &[(&'static str, usize)] = &[
         ("bash", Self::DEFAULT.bash),
+        ("pwsh", Self::DEFAULT.pwsh),
         ("code_execution", Self::DEFAULT.code_execution),
         ("task", Self::DEFAULT.task),
         ("index", Self::DEFAULT.index),
@@ -1442,6 +1448,7 @@ impl ToolOutputLines {
         let f = f.unwrap_or_default();
         Self {
             bash: f.bash.unwrap_or(d.bash),
+            pwsh: f.pwsh.unwrap_or(d.pwsh),
             code_execution: f.code_execution.unwrap_or(d.code_execution),
             task: f.task.unwrap_or(d.task),
             index: f.index.unwrap_or(d.index),
@@ -1453,9 +1460,10 @@ impl ToolOutputLines {
         }
     }
 
-    fn fields(&self) -> [(&'static str, usize); 9] {
+    fn fields(&self) -> [(&'static str, usize); 10] {
         [
             ("bash", self.bash),
+            ("pwsh", self.pwsh),
             ("code_execution", self.code_execution),
             ("task", self.task),
             ("index", self.index),
