@@ -6,6 +6,7 @@
 
 mod agent_events;
 mod btw;
+pub(crate) mod checkpoint;
 mod commands;
 mod image_paste;
 pub(crate) mod mode;
@@ -28,9 +29,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::OpenSession;
+use crate::app::checkpoint::CheckpointEvent;
 use crate::app::tasks::{BackgroundMoves, TaskOutcome, TaskStatus, count_phrase};
 use crate::chat::Chat;
 use crate::chat::{CANCELLED_TEXT, ERROR_TEXT};
@@ -614,6 +616,10 @@ pub struct App {
     /// The agent's mailbox, held here so the live session outlives every
     /// write of its receipts.
     pub(crate) mailbox: Option<SessionMailbox>,
+    /// The config default for sessions whose meta says nothing about it.
+    pub(super) checkpoint_default: bool,
+    checkpoint_tx: UnboundedSender<CheckpointEvent>,
+    pub(crate) checkpoint_rx: UnboundedReceiver<CheckpointEvent>,
 }
 
 impl App {
@@ -636,8 +642,10 @@ impl App {
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
+        checkpoint_default: bool,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
+        let (checkpoint_tx, checkpoint_rx) = unbounded_channel::<CheckpointEvent>();
         let state = SessionState::from_session(session, model, &storage);
         let typewriter = ui_config.typewriter_ms_per_char;
         let flash = ui_config.flash_duration();
@@ -734,6 +742,9 @@ impl App {
             restore_event_tx: None,
             mailbox: None,
             restoring: Arc::new(AtomicBool::new(false)),
+            checkpoint_default,
+            checkpoint_tx,
+            checkpoint_rx,
         };
         // The manager arrives forked from the prototype the process was
         // started with, so a tab that resumes or spawns blank runs on

@@ -470,6 +470,7 @@ impl App {
                 self.terminalize_turn(MISSING_TOOL_COMPLETION);
                 self.chat_index.clear();
                 self.status = Status::Idle;
+                self.checkpoint_turn();
                 if let Some(ExitOnDone { background_wait }) = self.exit_on_done {
                     self.exit_request = ExitRequest::Success;
                     self.background_deadline = self

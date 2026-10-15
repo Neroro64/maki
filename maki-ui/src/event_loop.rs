@@ -529,12 +529,14 @@ impl SpawnCtx {
             permissions,
             Arc::clone(&self.custom_commands),
             self.lua_event_handle.clone(),
+            self.config.checkpoint,
         );
         app.trust = self.trust.clone();
         handles.apply_to_app(&mut app);
         if resumed {
             app.restore_resumed_session();
         }
+        app.ensure_initial_checkpoint();
         let (shell_tx, shell_rx) = unbounded_channel::<ShellEvent>();
         let last_title = app.state.session.title.clone();
         SessionRuntime {
@@ -619,6 +621,7 @@ enum Wake {
     /// `None` when the read panicked, which dropped its reply.
     SessionOpened(Option<Box<OpenedSession>>),
     ModelsDiscovered,
+    Checkpoint(usize, crate::app::checkpoint::CheckpointEvent),
 }
 
 /// A value from the channel, or never, once it is closed: a closed channel
@@ -668,13 +671,23 @@ async fn session_wake(sessions: &mut [SessionRuntime]) -> Wake {
         .iter_mut()
         .enumerate()
         .flat_map(|(i, rt)| {
-            let (agent_rx, shell_rx) = (&mut rt.handles.agent_rx, &mut rt.shell_rx);
+            let (agent_rx, shell_rx, checkpoint_rx) = (
+                &mut rt.handles.agent_rx,
+                &mut rt.shell_rx,
+                &mut rt.app.checkpoint_rx,
+            );
             [
                 Box::pin(async move { Wake::Agent(i, Box::new(next_or_pending(agent_rx).await)) })
                     as LocalBoxFuture<'_, Wake>,
                 Box::pin(async move {
                     match shell_rx.recv().await {
                         Some(event) => Wake::Shell(i, event),
+                        None => pending().await,
+                    }
+                }),
+                Box::pin(async move {
+                    match checkpoint_rx.recv().await {
+                        Some(event) => Wake::Checkpoint(i, event),
                         None => pending().await,
                     }
                 }),
@@ -1043,6 +1056,7 @@ impl<'t> EventLoop<'t> {
             Wake::Pack(preparation) => self.finish_pack(*preparation),
             Wake::SessionOpened(answer) => self.finish_open(answer),
             Wake::ModelsDiscovered => self.rebuild_models(),
+            Wake::Checkpoint(i, event) => self.sessions[i].app.handle_checkpoint_event(event),
         }
         Ok(())
     }

@@ -811,6 +811,7 @@ pub struct AgentFileConfig {
     pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
     pub rtk: Option<bool>,
+    pub checkpoint: Option<bool>,
     pub shell: Option<ShellPreference>,
 }
 
@@ -1380,253 +1381,7 @@ impl ToolOutputLines {
     }
 }
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-        #[serde(default)]
-        pub struct ToolOutputLines {
-            $(pub $field: usize,)+
-        }
 
-        impl ToolOutputLines {
-            pub const DEFAULT: Self = Self { $($field: $default),+ };
-
-            pub const FIELD_DEFAULTS: &[(&'static str, usize)] =
-                &[$((stringify!($field), Self::DEFAULT.$field)),+];
-
-            fn from_file(f: Option<ToolOutputLinesFile>) -> Self {
-                let f = f.unwrap_or_default();
-                Self { $($field: f.$field.unwrap_or(Self::DEFAULT.$field)),+ }
-            }
-
-            pub fn get(&self, tool: &str) -> usize {
-                match Self::field_for(tool) {
-                    $(stringify!($field) => self.$field,)+
-                    _ => self.other,
-                }
-            }
-        }
-    };
-}
-
-tool_output_lines! {
-    bash = 3,
-    code_execution = 3,
-    task = 3,
-    index = 0,
-    grep = 3,
-    read = 0,
-    write = 5,
-    web = 3,
-    other = 3,
-||||||| parent of d056afab (feat(pwsh): persistent PowerShell session tool)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ToolOutputLines {
-    pub bash: usize,
-    pub code_execution: usize,
-    pub task: usize,
-    pub index: usize,
-    pub grep: usize,
-    pub read: usize,
-    pub write: usize,
-    pub web: usize,
-    pub other: usize,
-=======
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ToolOutputLines {
-    pub bash: usize,
-    pub pwsh: usize,
-    pub code_execution: usize,
-    pub task: usize,
-    pub index: usize,
-    pub grep: usize,
-    pub read: usize,
-    pub write: usize,
-    pub web: usize,
-    pub other: usize,
->>>>>>> d056afab (feat(pwsh): persistent PowerShell session tool)
-}
-
-impl ToolOutputLines {
-<<<<<<< HEAD
-    pub fn field_for(tool: &str) -> &'static str {
-        match tool {
-            "bash" => "bash",
-            "code_execution" => "code_execution",
-            "task" => "task",
-            "index" => "index",
-            "grep" | "glob" => "grep",
-            "read" | "list" => "read",
-            "memory" => "write",
-            tool if FILE_WRITE_TOOLS.contains(&tool) => "write",
-            "webfetch" | "websearch" => "web",
-            _ => "other",
-||||||| parent of d056afab (feat(pwsh): persistent PowerShell session tool)
-    pub const DEFAULT: Self = Self {
-        bash: 5,
-        code_execution: 5,
-        task: 5,
-        index: 3,
-        grep: 3,
-        read: 3,
-        write: 7,
-        web: 3,
-        other: 3,
-    };
-
-    pub const FIELD_DEFAULTS: &[(&'static str, usize)] = &[
-        ("bash", Self::DEFAULT.bash),
-        ("code_execution", Self::DEFAULT.code_execution),
-        ("task", Self::DEFAULT.task),
-        ("index", Self::DEFAULT.index),
-        ("grep", Self::DEFAULT.grep),
-        ("read", Self::DEFAULT.read),
-        ("write", Self::DEFAULT.write),
-        ("web", Self::DEFAULT.web),
-        ("other", Self::DEFAULT.other),
-    ];
-
-    fn from_file(f: Option<ToolOutputLinesFile>) -> Self {
-        let d = Self::DEFAULT;
-        let f = f.unwrap_or_default();
-        Self {
-            bash: f.bash.unwrap_or(d.bash),
-            code_execution: f.code_execution.unwrap_or(d.code_execution),
-            task: f.task.unwrap_or(d.task),
-            index: f.index.unwrap_or(d.index),
-            grep: f.grep.unwrap_or(d.grep),
-            read: f.read.unwrap_or(d.read),
-            write: f.write.unwrap_or(d.write),
-            web: f.web.unwrap_or(d.web),
-            other: f.other.unwrap_or(d.other),
-        }
-    }
-
-    fn fields(&self) -> [(&'static str, usize); 9] {
-        [
-            ("bash", self.bash),
-            ("code_execution", self.code_execution),
-            ("task", self.task),
-            ("index", self.index),
-            ("grep", self.grep),
-            ("read", self.read),
-            ("write", self.write),
-            ("web", self.web),
-            ("other", self.other),
-        ]
-    }
-
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        for (name, value) in self.fields() {
-            check(
-                "ui.tool_output_lines",
-                name,
-                value as u64,
-                MIN_TOOL_OUTPUT_LINES as u64,
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn get(&self, name: &str) -> usize {
-        match name {
-            "bash" => self.bash,
-            "code_execution" => self.code_execution,
-            "task" => self.task,
-            "index" => self.index,
-            "grep" | "glob" => self.grep,
-            "read" => self.read,
-            "memory" => self.write,
-            name if FILE_WRITE_TOOLS.contains(&name) => self.write,
-            "webfetch" | "websearch" => self.web,
-            _ => self.other,
-=======
-    pub const DEFAULT: Self = Self {
-        bash: 5,
-        pwsh: 5,
-        code_execution: 5,
-        task: 5,
-        index: 3,
-        grep: 3,
-        read: 3,
-        write: 7,
-        web: 3,
-        other: 3,
-    };
-
-    pub const FIELD_DEFAULTS: &[(&'static str, usize)] = &[
-        ("bash", Self::DEFAULT.bash),
-        ("pwsh", Self::DEFAULT.pwsh),
-        ("code_execution", Self::DEFAULT.code_execution),
-        ("task", Self::DEFAULT.task),
-        ("index", Self::DEFAULT.index),
-        ("grep", Self::DEFAULT.grep),
-        ("read", Self::DEFAULT.read),
-        ("write", Self::DEFAULT.write),
-        ("web", Self::DEFAULT.web),
-        ("other", Self::DEFAULT.other),
-    ];
-
-    fn from_file(f: Option<ToolOutputLinesFile>) -> Self {
-        let d = Self::DEFAULT;
-        let f = f.unwrap_or_default();
-        Self {
-            bash: f.bash.unwrap_or(d.bash),
-            pwsh: f.pwsh.unwrap_or(d.pwsh),
-            code_execution: f.code_execution.unwrap_or(d.code_execution),
-            task: f.task.unwrap_or(d.task),
-            index: f.index.unwrap_or(d.index),
-            grep: f.grep.unwrap_or(d.grep),
-            read: f.read.unwrap_or(d.read),
-            write: f.write.unwrap_or(d.write),
-            web: f.web.unwrap_or(d.web),
-            other: f.other.unwrap_or(d.other),
-        }
-    }
-
-    fn fields(&self) -> [(&'static str, usize); 10] {
-        [
-            ("bash", self.bash),
-            ("pwsh", self.pwsh),
-            ("code_execution", self.code_execution),
-            ("task", self.task),
-            ("index", self.index),
-            ("grep", self.grep),
-            ("read", self.read),
-            ("write", self.write),
-            ("web", self.web),
-            ("other", self.other),
-        ]
-    }
-
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        for (name, value) in self.fields() {
-            check(
-                "ui.tool_output_lines",
-                name,
-                value as u64,
-                MIN_TOOL_OUTPUT_LINES as u64,
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn get(&self, name: &str) -> usize {
-        match name {
-            "bash" => self.bash,
-            "code_execution" => self.code_execution,
-            "task" => self.task,
-            "index" => self.index,
-            "grep" | "glob" => self.grep,
-            "read" => self.read,
-            "memory" => self.write,
-            name if FILE_WRITE_TOOLS.contains(&name) => self.write,
-            "webfetch" | "websearch" => self.web,
-            _ => self.other,
->>>>>>> d056afab (feat(pwsh): persistent PowerShell session tool)
-        }
-    }
-}
 
 impl Default for ToolOutputLines {
     fn default() -> Self {
@@ -1690,6 +1445,12 @@ pub struct AgentConfig {
     pub rtk: bool,
 
     #[config(
+        default = false,
+        desc = "Commit working-tree changes to a temp git at the end of each turn so rewind restores project state"
+    )]
+    pub checkpoint: bool,
+
+    #[config(
         default = ShellPreference::Auto,
         ty = "string",
         default_doc = "auto",
@@ -1729,6 +1490,7 @@ impl AgentConfig {
             post_compaction_instructions: file.post_compaction_instructions,
             stale_read_check: file.stale_read_check.unwrap_or(true),
             rtk: file.rtk.unwrap_or(true),
+            checkpoint: file.checkpoint.unwrap_or(false),
             shell: file.shell.unwrap_or_default(),
             max_turns: None,
             allowed_tools: Vec::new(),

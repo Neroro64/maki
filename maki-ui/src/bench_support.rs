@@ -84,6 +84,7 @@ pub fn app(storage: StateDir) -> App {
         permissions,
         Arc::from([]),
         EventHandle::disconnected_for_test(),
+        false,
     )
 }
 

@@ -20,6 +20,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::checkpoint::StoredCheckpoint;
 use crate::frame::StoredFrame;
 use crate::id::{MakiId, MakiIdParseError};
 use crate::paths::{canonical_key, session_task_logs_dir};
@@ -439,6 +440,14 @@ pub struct SessionMeta {
     /// ran it, and the model is told so instead of waiting forever.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_background: Vec<String>,
+    /// Working-tree commits, one per turn end, so a rewind can put the files
+    /// back the way they were at the point it truncates to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<StoredCheckpoint>,
+    /// `None` when the user never set it for this session, which leaves the
+    /// config default in charge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<bool>,
 }
 
 /// Messages plus the token of the run they belong to. Comparing tokens tells

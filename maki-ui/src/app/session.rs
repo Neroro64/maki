@@ -243,6 +243,8 @@ impl App {
                 || state.session.meta.pending_background.clone(),
                 SessionMailbox::unsettled,
             ),
+            checkpoints: state.session.meta.checkpoints.clone(),
+            checkpoint: state.session.meta.checkpoint,
         }
     }
 
@@ -550,6 +552,8 @@ impl App {
             queued_messages: Vec::new(),
             yolo: self.permissions.persisted_yolo(),
             pending_background: Vec::new(),
+            checkpoints: Vec::new(),
+            checkpoint: self.state.session.meta.checkpoint,
         };
         open
     }
@@ -612,6 +616,7 @@ impl App {
         self.state.session = Arc::new(session);
         self.state.claim = claim;
         self.reset_ui_chrome();
+        self.ensure_initial_checkpoint();
         maki_otel::emit::session_started(
             maki_otel::emit::START_FRESH,
             Some(&self.state.session.id.to_string()),
@@ -722,6 +727,7 @@ impl App {
         // The prune and the rebuild below read the meta.
         self.sync_subagents();
         let measured = self.state.context_size;
+        self.restore_checkpoint(entry.turn_index);
         let session = self.state.session_mut();
         let context_size = truncate_to_turn(session, entry.turn_index, measured);
         session.update_title_if_default(None);
@@ -779,6 +785,7 @@ impl App {
         self.reset_ui_chrome();
         self.restore_display();
         self.rebadge_moves();
+        self.ensure_initial_checkpoint();
 
         self.install_local_history()
     }

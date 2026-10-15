@@ -102,6 +102,10 @@ impl App {
                 self.flash(msg.into());
                 vec![]
             }
+            "/checkpoint" => {
+                self.toggle_checkpoint();
+                vec![]
+            }
             "/fast" => {
                 match self.set_fast(!self.state.fast_intent()) {
                     Ok(()) => self.flash(
