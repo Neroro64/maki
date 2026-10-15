@@ -1804,6 +1804,7 @@ async fn run_host_hook(lua: &Lua, hook: HostHook) {
             crate::api::autocmd::dispatch(lua.clone(), event.name().to_owned(), None, data).await;
             with_jobs(lua, |store| store.kill_session(lua, end.session));
             crate::api::pwsh::kill_session(lua, end.session);
+            crate::api::browser::kill_session(lua, end.session);
             BackgroundSessions::of(lua).end_session(end.session);
             // Nothing can pick from this session's plan form again.
             clear_session_rows(lua, &end.session.to_string());
