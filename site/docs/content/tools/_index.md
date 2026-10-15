@@ -245,3 +245,21 @@ Search the web for real-time information using Exa AI.
 |-----------|------|----------|---------|-------------|
 | `num_results` | integer | no | 8 | Number of results to return |
 | `query` | string | yes |  | Search query |
+
+### `browser` {#browser}
+
+Drive a Chrome browser over the DevTools protocol.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `action` | string | yes |  | One of: open, snapshot, click, type, press, scroll, screenshot, eval, status, close |
+| `executable` | string | no |  | Chrome/Chromium binary path (action=open, default auto-discovered) |
+| `headless` | boolean | no | true, action=open | Launch without a window |
+| `index` | integer | no |  | Element index from the latest snapshot (action=click/type) |
+| `key` | string | no |  | Key to press, e.g. Enter (action=press) |
+| `path` | string | no |  | File to write the PNG to (action=screenshot) |
+| `source` | string | no |  | JavaScript expression (action=eval) |
+| `text` | string | no |  | Text to type (action=type) |
+| `url` | string | no |  | URL to open (action=open) |
+| `x` | integer | no |  | Horizontal scroll pixels (action=scroll) |
+| `y` | integer | no |  | Vertical scroll pixels (action=scroll) |

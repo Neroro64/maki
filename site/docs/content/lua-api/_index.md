@@ -116,6 +116,7 @@ The rules:
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
 | [`maki.async.Task`](#maki-async-Task) | Handle returned by `maki.async.spawn`. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
+| [`maki.browser`](#maki-browser) | Chrome over CDP: `maki.browser.open` launches a browser (headless by |
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
@@ -2091,6 +2092,232 @@ maki.base64.decode("aGVsbG8=") -- "hello"
 ```
 
 
+## maki.browser {#maki-browser}
+
+Chrome over CDP: `maki.browser.open` launches a browser (headless by
+default) and navigates, `snapshot` indexes interactive elements for
+`click`/`type`, `press`/`scroll`/`eval` drive the page, `screenshot`
+captures it, `close` kills the process.
+
+---
+
+### `maki.browser.open()` {#maki-browser-open}
+
+```lua
+maki.browser.open({opts})
+```
+
+Launch the session's browser (if needed) and navigate to a URL.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `url` (`string`) URL to navigate to. Required.
+  - `headless` (`boolean`) launch without a window. Default true. Ignored
+    when the browser is already running.
+  - `executable` (`string`) path to the Chrome/Chromium/Brave binary. Default:
+    auto-discovered (MAKI_BROWSER_BIN env, then brave/chromium names on PATH).
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`table`, `string?`) Pair: `{ url, title }` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.snapshot()` {#maki-browser-snapshot}
+
+```lua
+maki.browser.snapshot({opts})
+```
+
+List the page's interactive elements, assigning each an index for later
+`click`/`type` calls.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`table`, `string?`) Pair: `{ count, title, url, elements }` where each
+  element is `{ idx, tag, type, role, text, href }`, on success, `(nil, err)`.
+
+---
+
+### `maki.browser.click()` {#maki-browser-click}
+
+```lua
+maki.browser.click({opts})
+```
+
+Click the element with the given snapshot index.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `index` (`integer`) element idx from the latest snapshot. Required.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.type()` {#maki-browser-type}
+
+```lua
+maki.browser.type({opts})
+```
+
+Type text into the element with the given snapshot index, or into the
+focused element when no index is given.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `text` (`string`) text to type. Required.
+  - `index` (`integer`) element idx from the latest snapshot. Optional.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.press()` {#maki-browser-press}
+
+```lua
+maki.browser.press({opts})
+```
+
+Press a key (e.g. "Enter", "Escape", "Tab", "ArrowDown").
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `key` (`string`) key name. Required.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.scroll()` {#maki-browser-scroll}
+
+```lua
+maki.browser.scroll({opts})
+```
+
+Scroll the page by (x, y) pixels.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `x` (`integer`) horizontal pixels. Default 0.
+  - `y` (`integer`) vertical pixels. Default 0.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.screenshot()` {#maki-browser-screenshot}
+
+```lua
+maki.browser.screenshot({opts})
+```
+
+Capture a PNG screenshot of the page to a file.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `path` (`string`) file to write. Required.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`string`, `string?`) Pair: the path on success, `(nil, err)`.
+
+---
+
+### `maki.browser.eval()` {#maki-browser-eval}
+
+```lua
+maki.browser.eval({opts})
+```
+
+Evaluate JavaScript in the page and return the JSON-serializable result.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+  - `source` (`string`) JavaScript expression to evaluate. Required.
+  - `timeout` (`integer`) seconds to wait. Default 30.
+
+**Returns:** (`any`, `string?`) Pair: the result on success, `(nil, err)`.
+
+---
+
+### `maki.browser.status()` {#maki-browser-status}
+
+```lua
+maki.browser.status({opts})
+```
+
+Report the session's browser state.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+
+**Returns:** (`table`, `string?`) Pair: `{ open, url, title }` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.close()` {#maki-browser-close}
+
+```lua
+maki.browser.close({opts})
+```
+
+Close the session's browser and kill the process.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `session` (`string`) session id owning this browser. Required.
+
+**Returns:** (`boolean`, `string?`) `(true, nil)` on success, `(nil, err)`.
+
+
+## maki.computer {#maki-computer}
+
+Desktop control: `maki.computer.screenshot` captures the screen,
+`mouse`/`keyboard` drive pointer and keys, `position`/`display` report
 ## maki.env {#maki-env}
 
 Paths to maki's own directories (config, state, logs, legacy).

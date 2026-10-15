@@ -2,6 +2,7 @@ pub(crate) mod agent;
 pub(crate) mod r#async;
 pub(crate) mod autocmd;
 pub(crate) mod base64;
+pub(crate) mod browser;
 pub(crate) mod env;
 pub(crate) mod r#fn;
 pub(crate) mod fs;
@@ -149,6 +150,7 @@ pub(crate) fn create_maki_global(
         interpreter::create_interpreter_table(lua, permissions)?,
     )?;
     maki.set("pwsh", pwsh::create_pwsh_table(lua, permissions)?)?;
+    maki.set("browser", browser::create_browser_table(lua, permissions)?)?;
     maki.set(
         "agent",
         agent::create_agent_table(lua, Arc::clone(&plugin), permissions.clone())?,
