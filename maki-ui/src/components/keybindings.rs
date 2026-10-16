@@ -374,7 +374,7 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         label: KeyLabel::Single("Tab"),
-        description: "Toggle mode",
+        description: "Toggle mode, complete path",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

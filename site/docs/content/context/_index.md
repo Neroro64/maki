@@ -118,6 +118,29 @@ On a large repository the first index walk takes a moment. The popup shows `scan
 
 Plugins can add their own entries to the popup, such as issues after `#` or people after `@`. See [completion sources](/docs/hooks/#completion-sources).
 
+## Completing a path with `Tab`
+
+The `@` popup searches the file index. `Tab` completes the path you are typing, so you can point at a file by its real path without leaving the keyboard. Put the caret in a path token and press `Tab`:
+
+```
+> read F:/Some
+       ╭─────────────────────────────────╮
+       │ F:/SomeApp/                     │
+       │ F:/SomeLib/                     │
+       ╰ ↑/↓ move  Tab insert  Esc close ╯
+```
+
+`Tab` lists the folder the token points at when the token looks like a path, and toggles plan mode when it does not. A token counts as a path when it has a separator, a leading `~`, a leading `.`, a leading `/`, or a drive letter. Directories come first, each with a trailing `/`. `~/` is your home, `./` and `../` are relative to the session's working directory, and `F:/` is a Windows drive root.
+
+| Key | Action |
+|-----|--------|
+| `↓`, `Ctrl+N` | Next row |
+| `↑`, `Ctrl+P` | Previous row |
+| `Tab`, `Enter` | Insert the highlighted entry |
+| `Esc` | Close the popup |
+
+While the popup is up it takes these keys, so `Tab` inserts a row rather than toggling mode. The popup closes when you move the caret out of the token, edit the input, switch sessions, or switch the focused task. The plugin is on by default, and its options are under `plugins.tabcomplete` in [configuration](/docs/configuration/).
+
 ## When the window fills
 
 Long sessions eventually approach the model's context limit. Maki reserves a slice of the window (`agent.compaction_buffer`, default 20%) and before running out it summarizes the older turns and continues from the summary. `/compact` triggers it early, `/compact keep the repro steps` steers that one summary, `/usage` shows where the tokens went, and `agent.compaction_instructions` steers every summary.

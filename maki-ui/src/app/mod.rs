@@ -1245,6 +1245,7 @@ impl App {
                 self.model_picker.open(&self.state.model.spec());
                 return vec![Action::RefreshModels];
             }
+            BuiltinAction::ModeToggle => return self.toggle_mode(),
         }
         vec![]
     }

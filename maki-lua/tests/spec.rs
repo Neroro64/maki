@@ -13,6 +13,7 @@ use test_case::test_case;
 #[test_case("question", include_str!("../../plugins/question/tests/spec.lua") ; "question_plugin_spec")]
 #[test_case("read", include_str!("../../plugins/read/tests/spec.lua") ; "read_plugin_spec")]
 #[test_case("skill", include_str!("../../plugins/skill/tests/spec.lua") ; "skill_plugin_spec")]
+#[test_case("tabcomplete", include_str!("../../plugins/tabcomplete/tests/spec.lua") ; "tabcomplete_plugin_spec")]
 #[test_case("task", include_str!("../../plugins/task/tests/spec.lua") ; "task_plugin_spec")]
 #[test_case("thinking", include_str!("../../plugins/thinking/tests/spec.lua") ; "thinking_plugin_spec")]
 #[test_case("view_image", include_str!("../../plugins/view_image/tests/spec.lua") ; "view_image_plugin_spec")]
