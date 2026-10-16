@@ -148,6 +148,7 @@ With 0 you see only the header. The read, index and list tools default to 0, bec
 | `max_continuation_turns` | u32 | `3` | 1 | Max automatic continuation turns |
 | `max_turn_output` | u32 | `32768` | 1024 | Output tokens one turn asks for, raised where an effort level needs the room and capped by the model's own limit |
 | `compaction_buffer` | u32 \| string | `20%` | - | Context reserved for compaction: token count or percent of the context window (e.g. "20%") |
+| `compaction_strategy` | string | `auto` | - | Compaction strategy: `auto` (snapcompact bitmap frames on vision models, LLM summary otherwise), `summarize`, or `snapcompact` |
 | `compaction_instructions` | String | `none` | - | Extra instructions appended to the compaction summary prompt |
 | `post_compaction_instructions` | String | `none` | - | Extra instructions the agent receives after any compaction (e.g. re-read plan.md) |
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |

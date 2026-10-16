@@ -40,6 +40,7 @@ open = { workspace = true }
 sha2 = { workspace = true }
 serde-saphyr = { workspace = true, features = ["deserialize"] }
 url = { workspace = true }
+image = { workspace = true }
 
 
 [dev-dependencies]

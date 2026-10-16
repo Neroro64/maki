@@ -6,6 +6,7 @@ pub mod hook;
 mod instructions;
 mod notes;
 mod run;
+mod snapcompact;
 mod streaming;
 pub mod tool_dispatch;
 mod transcript;
