@@ -4,20 +4,28 @@ local REFERENCE_FILE = "lua-api.md"
 local REFERENCE_UNAVAILABLE = "(unavailable; full reference inlined below)"
 local shorten_path = require("maki.shorten_path")
 local ToolView = require("maki.tool_view")
+local ListPicker = require("maki.list_picker")
+local Skills = require("maki.skills")
 local helpers = require("skill_helpers")
+local store = require("skill_store")
 local parse_frontmatter = helpers.parse_frontmatter
 local build_skill_list = helpers.build_skill_list
+local sorted = helpers.sorted
+local toggle_disabled = helpers.toggle_disabled
 
 local PROJECT_SKILL_DIRS = {
   ".maki/skills",
   ".claude/skills",
   ".opencode/skills",
   ".agents/skills",
+  ".agent/skills",
+  ".github/skills",
 }
 local GLOBAL_SKILL_DIRS = {
   ".claude/skills",
   ".config/opencode/skills",
   ".agents/skills",
+  ".copilot/skills",
 }
 
 local function scan_skill_dir(dir, skills)
@@ -95,6 +103,13 @@ local function resolve_builtin_content()
   return content .. "\n---\n\n" .. reference.content
 end
 
+local disabled = store.load()
+local cached_skills = {}
+
+Skills.publish(function()
+  return cached_skills
+end)
+
 local function discover_skills()
   local skills = {}
 
@@ -126,6 +141,10 @@ local function discover_skills()
     end
   end
 
+  for _, skill in pairs(skills) do
+    skill.enabled = not disabled[skill.name]
+  end
+  cached_skills = sorted(skills)
   return skills
 end
 
@@ -164,7 +183,7 @@ maki.api.register_tool({
 
     local skills = discover_skills()
     local skill = skills[input.name]
-    if not skill then
+    if not skill or skill.enabled == false then
       local available = build_skill_list(skills)
       return { llm_output = NOT_FOUND .. input.name .. available, is_error = true }
     end
@@ -206,4 +225,107 @@ maki.api.register_tool({
       header = header_buf,
     }
   end,
+})
+
+-- ── /skills picker ──
+
+local PICKER_FOOTER = { { "Enter", "details" }, { "d", "disable" }, { "Esc", "close" } }
+local DISABLED_LABEL = "disabled"
+local NO_SKILLS = "No skills found."
+
+-- Rows for the picker: name, then description · location · enabled state. The
+-- detail is a list of styled parts so a narrow row cuts the description and
+-- keeps the location whole.
+local function picker_items(skills)
+  local items = {}
+  for _, s in ipairs(sorted(skills)) do
+    local state = s.enabled == false and DISABLED_LABEL or shorten_path(s.location)
+    local state_style = s.enabled == false and "error" or "dim"
+    items[#items + 1] = {
+      label = s.name,
+      detail = {
+        { s.description, "dim", elastic = true },
+        { " · " .. state, state_style },
+      },
+      skill = s,
+    }
+  end
+  return items
+end
+
+-- Shows the skill body in a focused window, with its location in the title.
+local function view_details(skill)
+  if skill.resolve then
+    skill.content = skill.resolve()
+  end
+  local buf = maki.ui.buf()
+  local view = ToolView.new(buf, {
+    max_lines = math.huge,
+    max_expand_lines = math.huge,
+    keep = "head",
+  })
+  local ext = skill.location:match("%.([^%.]+)$") or "md"
+  if not view:set_highlight(skill.content, ext) then
+    for line in skill.content:gmatch("([^\n]*)\n?") do
+      view:append(line)
+    end
+  end
+  view:finish()
+  local win = maki.ui.open_win(buf, {
+    title = " " .. skill.name .. " ",
+    width = "80%",
+    height = "80%",
+    border = "rounded",
+    focus = true,
+    footer = { { "Esc", "close" } },
+  })
+  while true do
+    local ev = win:recv()
+    if not ev or ev.type == "close" then
+      return
+    end
+    if ev.type == "key" and (ev.key == "<Esc>" or ev.key == "<C-c>") then
+      win:close()
+      return
+    end
+  end
+end
+
+local function open_picker()
+  local skills = discover_skills()
+  if next(skills) == nil then
+    maki.ui.flash(NO_SKILLS)
+    return
+  end
+  local event = ListPicker.open(picker_items(skills), {
+    title = " Skills ",
+    footer = PICKER_FOOTER,
+    key = function(item)
+      return item.label
+    end,
+    live_keys = {
+      d = function(item)
+        if not item then
+          return nil
+        end
+        toggle_disabled(disabled, item.skill.name)
+        item.skill.enabled = not disabled[item.skill.name]
+        return picker_items(skills)
+      end,
+    },
+  })
+  local err = store.save(disabled)
+  if err then
+    maki.ui.flash("could not save disabled skills: " .. tostring(err))
+  end
+  cached_skills = sorted(skills)
+  if event.type == "choice" and event.item then
+    view_details(event.item.skill)
+  end
+end
+
+maki.api.register_command({
+  name = "/skills",
+  description = "Browse skills, view details, and disable them",
+  handler = open_picker,
 })

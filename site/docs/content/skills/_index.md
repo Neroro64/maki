@@ -17,10 +17,10 @@ A skill is a directory with a `SKILL.md` inside. Maki looks for them every time 
 
 1. The builtin `maki-plugin-dev` (if enabled)
 2. `~/.config/maki/skills/` (Windows: `%APPDATA%\maki\skills\`)
-3. `~/.claude/skills/`, `~/.config/opencode/skills/`, `~/.agents/skills/`
-4. In your project, walking from the current directory up to the `.git` root, at each step: `.maki/skills/`, `.claude/skills/`, `.opencode/skills/`, `.agents/skills/`
+3. `~/.claude/skills/`, `~/.config/opencode/skills/`, `~/.agents/skills/`, `~/.copilot/skills/`
+4. In your project, walking from the current directory up to the `.git` root, at each step: `.maki/skills/`, `.claude/skills/`, `.opencode/skills/`, `.agents/skills/`, `.agent/skills/`, `.github/skills/`
 
-So project skills beat personal ones, and a skill at the repo root beats one with the same name deeper down. The `.claude`, `.opencode` and `.agents` dirs are there so skills you already wrote for other agents keep working.
+So project skills beat personal ones, and a skill at the repo root beats one with the same name deeper down. The `.claude`, `.opencode`, `.agents`, `.agent`, `.copilot` and `.github` dirs are there so skills you already wrote for Claude Code, opencode, the `.agent` convention, GitHub Copilot CLI, and Copilot Agent Skills keep working.
 
 [Folder trust](/docs/folder-trust/) does not gate skills. Every project skill
 name and description is in the system prompt from startup, trusted or not, so
@@ -56,6 +56,29 @@ The frontmatter is optional. Without it, the directory name is the skill name an
 The `skill` tool lists every skill it found, the agent calls it with a name and gets the body back. A wrong name errors and reprints the list so the model can pick again.
 
 Skills are not slash commands: typing `/git-release` does nothing unless you also add a [custom command](/docs/commands/#custom-commands). Ask the agent to use a skill, or let it pick one on its own.
+
+## Browsing them: `/skills`
+
+`/skills` opens a picker over every skill found. Each row shows the name, its description, and where the `SKILL.md` lives.
+
+```
+ Skills
+❯
+  git-release   Cut a tagged release · .maki/skills/git-release
+  privacy       Privacy fork sync · .claude/skills/privacy
+  maki-plugin-dev  Write maki plugins · builtin:maki-plugin-dev
+Enter details   d disable   Esc close
+```
+
+- **Enter** opens the skill body in a window, with its location in the title.
+- **d** disables the highlighted skill. It drops out of the `skill` tool's list, out of completion, and the agent stops seeing it. Press **d** again to re-enable.
+- **Esc** closes.
+
+Disabled skills are saved to `skills.json` in the [state dir](/docs/configuration/#maki-env-directories) (`~/.local/state/maki/` on Linux, `%APPDATA%\maki\` on Windows), so they stay off across restarts.
+
+## Completing a skill name
+
+Type `/skill:` and press **Tab** to complete a skill name, the same way [Tab completes a path](/docs/context/#completing-a-path-with-tab). `/skill:git<Tab>` lists the skills starting with `git`; accepting writes `/skill:git-release`. Disabled skills are not offered.
 
 ## The builtin: maki-plugin-dev
 

@@ -7976,6 +7976,23 @@ end
 return shorten_path
 ```
 
+### `require("maki.skills")`
+
+```lua
+-- The skill registry: the discovered skills, published by the skill plugin so
+-- other plugins (the Tab completion popup) can list them without re-scanning
+-- the disk. One Lua VM runs every plugin, so a module-level table is shared
+-- state. The skill plugin writes it after each discovery; readers take a
+-- snapshot with `get`, and the completion popup asks for `rows`.
+function Skills.set(skills)
+function Skills.get()
+
+-- Rows for `/skill:<prefix>` completion: every enabled skill whose name starts
+-- with the prefix, case-insensitive, name order. The insert is the whole token,
+-- so the popup writes `/skill:name` over `/skill:pre`.
+function Skills.rows(prefix, limit)
+```
+
 ### `require("maki.test_helpers")`
 
 ```lua

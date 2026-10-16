@@ -12,6 +12,9 @@
 local Events = require("tc.events")
 local Menu = require("tc.menu")
 local Path = require("tc.path")
+local Skills = require("maki.skills")
+
+Skills.declare()
 
 maki.keymap.set("n", "<Tab>", function()
   if Menu.session_id() then

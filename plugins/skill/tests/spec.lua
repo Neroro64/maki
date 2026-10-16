@@ -102,6 +102,44 @@ case("build_skill_list_sorted_alphabetically", function()
   assert(middle_pos < zebra_pos, "middle should come before zebra")
 end)
 
+case("build_skill_list_skips_disabled", function()
+  local skills = {
+    on = { name = "on", description = "On", enabled = true },
+    off = { name = "off", description = "Off", enabled = false },
+  }
+  local result = build_skill_list(skills)
+  assert(result:find("on"), "the enabled skill is listed")
+  assert(not result:find("off"), "the disabled skill is not offered to the model")
+end)
+
+-- ── sorted, skill_rows, toggle_disabled ──
+
+case("sorted_returns_a_name_ordered_list", function()
+  local out = helpers.sorted({ z = { name = "z" }, a = { name = "a" } })
+  eq(out[1].name, "a")
+  eq(out[2].name, "z")
+end)
+
+case("skill_rows_filters_by_prefix_and_skips_disabled", function()
+  local skills = {
+    git = { name = "git-release", description = "d", enabled = true },
+    gitlab = { name = "gitlab", description = "d", enabled = true },
+    off = { name = "gitoff", description = "d", enabled = false },
+  }
+  local rows = helpers.skill_rows(skills, "git", 10)
+  eq(#rows, 2, "the disabled match is dropped")
+  eq(rows[1].insert, "/skill:git-release", "the insert carries the /skill: shape")
+  eq(rows[2].insert, "/skill:gitlab")
+end)
+
+case("toggle_disabled_flips_a_name_in_place", function()
+  local disabled = { a = true }
+  helpers.toggle_disabled(disabled, "a")
+  eq(disabled.a, nil, "toggling an off skill turns it on")
+  helpers.toggle_disabled(disabled, "b")
+  eq(disabled.b, true, "toggling an on skill turns it off")
+end)
+
 -- ── builtin plugin_dev skill ──
 
 case("builtin_plugin_dev_skill_loads", function()
