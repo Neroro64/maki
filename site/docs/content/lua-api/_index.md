@@ -8478,6 +8478,7 @@ key:
 | `"history_prev"`, `"history_next"` | Recalls the previous or next prompt | at either end of the history |
 | `"newline"` | Inserts a new line | |
 | `"background"` | Moves running calls to the background, like `Ctrl+B` | no call is running |
+| `"mode_toggle"` | Switches between plan and build, what Tab does | |
 
 `"undo"`, `"redo"`, `"history_prev"`, `"history_next"` and `"newline"`
 edit the chat input, also in normal mode. They need the `input`, `agent`
@@ -8485,7 +8486,9 @@ and `session_write` permissions, see [chat input](#chat-input), and throw
 without them like any gated call. They return `false` in a finished subagent's chat, which has
 no input. `"pop_queue"` needs `session_write`, because it throws away a
 queued prompt. `"background"` needs `agent`, because each call it moves
-wakes the chat with its result. The other built-ins need no permission.
+wakes the chat with its result. `"mode_toggle"` needs `session_settings`,
+the price of `maki.session.set_mode`, which flips the same switch. The
+other built-ins need no permission.
 
 A built-in runs in the UI after your earlier `maki.ui` calls, and
 `action` waits for its answer. While your plugin loads, it returns `nil`

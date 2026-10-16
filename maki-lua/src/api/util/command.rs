@@ -732,6 +732,7 @@ pub enum BuiltinAction {
     Newline,
     /// Moves the main chat's movable running calls to the background.
     Background,
+    ModeToggle,
 }
 
 impl BuiltinAction {
@@ -764,6 +765,7 @@ impl BuiltinAction {
             | Self::ModelPicker
             | Self::InputRaw => &[],
             Self::PopQueue => &[Permission::SessionWrite],
+            Self::ModeToggle => &[Permission::SessionSettings],
             Self::Undo | Self::Redo | Self::HistoryPrev | Self::HistoryNext | Self::Newline => {
                 EDITS_TEXT
             }
