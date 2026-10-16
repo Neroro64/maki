@@ -807,7 +807,7 @@ async fn set_title(
 ///
 /// @param opts table? `session` (string?) Session id; defaults to focused.
 ///   `text` (string?) Replaces the whole notebook when present; omit it to read.
-/// @return ({notes: string}|nil, string|nil) The notebook after the call, or nil
+/// @return (table|nil, string|nil) The notebook after the call as `{ notes }`, or nil
 ///   and an error.
 /// @example
 /// local notes = maki.session.notes({ text = "task: ship the parser" }).notes

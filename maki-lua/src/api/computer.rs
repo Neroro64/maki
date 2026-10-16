@@ -12,6 +12,7 @@ use mlua::{Lua, Result as LuaResult, Table};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use image::{ImageBuffer, Rgba, RgbaImage};
 
+use crate::api::util::convert::TableExt;
 use crate::api::util::pair::Pair;
 use crate::plugin_permissions::PluginPermissions;
 
@@ -182,7 +183,7 @@ fn rgba_to_image(width: usize, height: usize, bytes: &[u8]) -> Option<RgbaImage>
 /// @return (table, string?) Pair: `{ path, width, height }` on success, `(nil, err)`.
 #[lua_fn(guard = Run, name = "screenshot")]
 async fn computer_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let path: Option<String> = opts.get("path")?;
+    let path: Option<String> = opts.opt("path")?;
     let target = match path {
         Some(p) => std::path::PathBuf::from(p),
         None => match default_screenshot_path() {
@@ -263,19 +264,19 @@ async fn portal_screenshot(_target: &std::path::Path) -> Result<(u32, u32), Stri
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Run, name = "mouse")]
 fn computer_mouse(_lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let action: Option<String> = opts.get("action")?;
+    let action: Option<String> = opts.opt("action")?;
     let Some(action) = action else {
         return Ok((None, Some(MOUSE_ACTION_REQUIRED.to_owned())));
     };
-    let button = parse_button(opts.get("button")?);
+    let button = parse_button(opts.opt("button")?);
     let mut enigo = match enigo() {
         Ok(e) => e,
         Err(e) => return Ok((None, Some(e))),
     };
     let result = match action.as_str() {
         "move" => {
-            let x: Option<i32> = opts.get("x")?;
-            let y: Option<i32> = opts.get("y")?;
+            let x: Option<i32> = opts.opt("x")?;
+            let y: Option<i32> = opts.opt("y")?;
             match (x, y) {
                 (Some(x), Some(y)) => enigo.move_mouse(x, y, Coordinate::Abs),
                 _ => return Ok((None, Some("move needs x and y".to_owned()))),
@@ -285,8 +286,8 @@ fn computer_mouse(_lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
         "press" => enigo.button(button, Direction::Press),
         "release" => enigo.button(button, Direction::Release),
         "scroll" => {
-            let amount: i32 = opts.get::<Option<i32>>("amount")?.unwrap_or(3);
-            let axis = match opts.get::<Option<String>>("axis")?.as_deref() {
+            let amount: i32 = opts.opt::<i32>("amount")?.unwrap_or(3);
+            let axis = match opts.opt::<String>("axis")?.as_deref() {
                 Some("horizontal") => Axis::Horizontal,
                 _ => Axis::Vertical,
             };
@@ -308,8 +309,8 @@ fn computer_mouse(_lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Run, name = "keyboard")]
 fn computer_keyboard(_lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let text: Option<String> = opts.get("text")?;
-    let key: Option<String> = opts.get("key")?;
+    let text: Option<String> = opts.opt("text")?;
+    let key: Option<String> = opts.opt("key")?;
     let mut enigo = match enigo() {
         Ok(e) => e,
         Err(e) => return Ok((None, Some(e))),
@@ -416,10 +417,10 @@ fn clipboard<R>(f: impl FnOnce(&mut arboard::Clipboard) -> R) -> Result<R, Strin
 ///   get, `(true, nil)` on set, `(nil, err)` on failure.
 #[lua_fn(guard = Run, name = "clipboard")]
 fn computer_clipboard(lua: &Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let text: Option<String> = opts.get("text")?;
-    let image_path: Option<String> = opts.get("image_path")?;
-    let get_path: Option<String> = opts.get("path")?;
-    let get: bool = opts.get::<Option<bool>>("get")?.unwrap_or(true);
+    let text: Option<String> = opts.opt("text")?;
+    let image_path: Option<String> = opts.opt("image_path")?;
+    let get_path: Option<String> = opts.opt("path")?;
+    let get: bool = opts.opt_bool("get").unwrap_or(true);
 
     if let Some(text) = text {
         return match clipboard(|c| c.set_text(text)) {

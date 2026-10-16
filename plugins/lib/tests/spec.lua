@@ -1,6 +1,7 @@
 local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
+local Skills = require("maki.skills")
 local th = require("maki.test_helpers")
 
 -- Splitting a line is a method, not a key, so the random walk names it apart
@@ -1780,6 +1781,58 @@ case("provider_parse_models_keeps_the_first_row_per_id_sorted", function()
   eq(rows[2].id, "b")
   eq(rows[2].n, 1, "the first b wins")
   eq(#parse.models({}, function() end), 0, "a body without data")
+end)
+
+-- ── skills registry ──
+
+case("skills_rows_filters_enabled_by_prefix_in_name_order", function()
+  Skills.set({
+    { name = "privacy", description = "d", enabled = true },
+    { name = "git-release", description = "d", enabled = true },
+    { name = "gitoff", description = "d", enabled = false },
+  })
+  local rows = Skills.rows("git", 10)
+  eq(#rows, 1, "the disabled match is dropped")
+  eq(rows[1].insert, "/skill:git-release", "the insert carries the /skill: shape")
+  Skills.set({})
+end)
+
+case("skills_rows_empty_prefix_lists_every_enabled_skill", function()
+  Skills.set({
+    { name = "b", description = "d", enabled = true },
+    { name = "a", description = "d", enabled = true },
+    { name = "c", description = "d", enabled = false },
+  })
+  local rows = Skills.rows("", 10)
+  eq(#rows, 2, "disabled skills stay out")
+  eq(rows[1].label, "a", "name order")
+  eq(rows[2].label, "b")
+  Skills.set({})
+end)
+
+case("skills_rows_respects_the_limit", function()
+  Skills.set({
+    { name = "a", description = "d", enabled = true },
+    { name = "b", description = "d", enabled = true },
+    { name = "c", description = "d", enabled = true },
+  })
+  eq(#Skills.rows("", 2), 2, "the popup shows at most its limit")
+  Skills.set({})
+end)
+
+case("skills_publish_and_declare_share_across_slot", function()
+  local published = {
+    { name = "alpha", description = "A", enabled = true },
+    { name = "beta", description = "B", enabled = false },
+  }
+  Skills.publish(function()
+    return published
+  end)
+  Skills.declare()
+  local rows = Skills.rows("", 10)
+  eq(#rows, 1)
+  eq(rows[1].label, "alpha")
+  published = {}
 end)
 
 th.report()

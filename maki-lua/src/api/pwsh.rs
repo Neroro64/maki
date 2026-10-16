@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::api::util::convert::TableExt;
 use crate::api::util::pair::Pair;
 use crate::plugin_permissions::PluginPermissions;
 
@@ -215,17 +216,15 @@ fn parse_marker(line: &str, seq: u32) -> Option<Option<i32>> {
 ///   tracked no native command exit code.
 #[lua_fn(guard = Run, name = "exec")]
 async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let command: Option<String> = opts.get("command")?;
+    let command: Option<String> = opts.opt("command")?;
     let Some(command) = command else {
         return Ok((None, Some(COMMAND_REQUIRED.to_owned())));
     };
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
     let prepared = with_pwsh(&lua, |store| {
         store.ensure(&session).ok().map(|pwsh| {
@@ -318,7 +317,7 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)` on failure.
 #[lua_fn(guard = Run, name = "reset")]
 fn pwsh_reset(lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
@@ -334,7 +333,7 @@ fn pwsh_reset(lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
 ///   `(nil, err)` on failure.
 #[lua_fn(name = "status")]
 fn pwsh_status(lua: &Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };

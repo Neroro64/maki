@@ -5877,7 +5877,7 @@ keeps for itself and that survive a compaction.
 - `{opts?}` (`table?`) `session` (string?) Session id; defaults to focused.
   - `text` (`string?`) Replaces the whole notebook when present; omit it to read.
 
-**Returns:** (`{notes: string}|nil`, `string|nil`) The notebook after the call, or nil
+**Returns:** (`table|nil`, `string|nil`) The notebook after the call as `{ notes }`, or nil
   and an error.
 
 **Example:**
@@ -9109,6 +9109,33 @@ local function shorten_path(path)
 end
 
 return shorten_path
+```
+
+### `require("maki.skills")`
+
+```lua
+-- The skill registry: the discovered skills, published by the skill plugin so
+-- other plugins (the Tab completion popup) can list them without re-scanning
+-- the disk. Each plugin runs in its own Lua environment with its own `require`
+-- cache, so sharing crosses plugin boundaries through a zero-capability slot
+-- (`tabcomplete.skills`) rather than a module-local variable.
+Skills.SLOT = "tabcomplete.skills"
+
+-- Declared by the consumer (`tabcomplete`) so the slot exists for `rows` to
+-- call. Layers registered before `declare` attach automatically once it runs.
+function Skills.declare()
+
+-- Called by the skill plugin to supply the latest discovered skills list.
+function Skills.publish(get_fn)
+
+-- Sets the local fallback list (used in unit specs that do not wire the slot).
+function Skills.set(skills)
+function Skills.get()
+
+-- Rows for `/skill:<prefix>` completion: every enabled skill whose name starts
+-- with the prefix, case-insensitive, name order. The insert is the whole token,
+-- so the popup writes `/skill:name` over `/skill:pre`.
+function Skills.rows(prefix, limit)
 ```
 
 ### `require("maki.test_helpers")`

@@ -51,6 +51,26 @@ declare maki: {
     encode: @checked (data: string | buffer) -> (string),
     decode: @checked (str: string | buffer) -> (string?, string?),
   },
+  browser: {
+    open: @checked (opts: any) -> (any, string?),
+    snapshot: @checked (opts: any) -> (any, string?),
+    click: @checked (opts: any) -> (boolean, string?),
+    type: @checked (opts: any) -> (boolean, string?),
+    press: @checked (opts: any) -> (boolean, string?),
+    scroll: @checked (opts: any) -> (boolean, string?),
+    screenshot: @checked (opts: any) -> (string, string?),
+    eval: @checked (opts: any) -> (any, string?),
+    status: @checked (opts: any) -> (any, string?),
+    close: @checked (opts: any) -> (boolean, string?),
+  },
+  computer: {
+    screenshot: @checked (opts: any) -> (any, string?),
+    mouse: @checked (opts: any) -> (boolean, string?),
+    keyboard: @checked (opts: any) -> (boolean, string?),
+    position: @checked (_opts: any) -> (any, string?),
+    display: @checked (_opts: any) -> (any, string?),
+    clipboard: @checked (opts: any) -> (any, string?),
+  },
   env: {
     state_dir: @checked () -> (string?),
     config_dir: @checked () -> (string?),
@@ -146,6 +166,11 @@ declare maki: {
       clear: @checked (slug: string) -> (boolean?, string?),
     },
   },
+  pwsh: {
+    exec: @checked (opts: any) -> (any, string?),
+    reset: @checked (opts: any) -> (boolean, string?),
+    status: @checked (opts: any) -> (any, string?),
+  },
   session: {
     list: @checked () -> (any, string?),
     live: @checked () -> (any, string?),
@@ -160,6 +185,7 @@ declare maki: {
     notify: @checked (text: string, opts: any) -> (boolean?, string?),
     set_mode: @checked (mode: string, opts: any) -> (boolean?, string?),
     set_title: @checked (opts: any) -> (boolean?, string?),
+    notes: @checked (opts: any) -> (any, string?),
   },
   task: {
     list: @checked () -> (any, string?),
