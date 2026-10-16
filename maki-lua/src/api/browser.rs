@@ -19,6 +19,7 @@ use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_lite::StreamExt;
 use tokio::runtime::Runtime;
 
+use crate::api::util::convert::TableExt;
 use crate::api::util::pair::Pair;
 use crate::plugin_permissions::PluginPermissions;
 
@@ -230,20 +231,18 @@ async fn eval_bool(page: Page, source: String) -> Result<bool, String> {
 /// @return (table, string?) Pair: `{ url, title }` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "open")]
 async fn browser_open(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let url: Option<String> = opts.get("url")?;
+    let url: Option<String> = opts.opt("url")?;
     let Some(url) = url else {
         return Ok((None, Some("url is required".to_owned())));
     };
-    let headless: bool = opts.get::<Option<bool>>("headless")?.unwrap_or(true);
-    let executable: Option<String> = opts.get("executable")?;
+    let headless: bool = opts.opt_bool("headless").unwrap_or(true);
+    let executable: Option<String> = opts.opt("executable")?;
     let executable = executable.or_else(discover_executable);
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
     let existing = page_of(&lua, &session);
     let outcome = tokio_call(timeout, async move {
@@ -314,13 +313,11 @@ async fn browser_open(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
 ///   element is `{ idx, tag, type, role, text, href }`, on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "snapshot")]
 async fn browser_snapshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -342,17 +339,15 @@ async fn browser_snapshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "click")]
 async fn browser_click(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let index: Option<i64> = opts.get("index")?;
+    let index: Option<i64> = opts.opt("index")?;
     let Some(index) = index else {
         return Ok((None, Some("index is required".to_owned())));
     };
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -382,18 +377,16 @@ async fn browser_click(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "type")]
 async fn browser_type(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let text: Option<String> = opts.get("text")?;
+    let text: Option<String> = opts.opt("text")?;
     let Some(text) = text else {
         return Ok((None, Some("text is required".to_owned())));
     };
-    let index: Option<i64> = opts.get("index")?;
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let index: Option<i64> = opts.opt("index")?;
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -426,17 +419,15 @@ async fn browser_type(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "press")]
 async fn browser_press(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let key: Option<String> = opts.get("key")?;
+    let key: Option<String> = opts.opt("key")?;
     let Some(key) = key else {
         return Ok((None, Some("key is required".to_owned())));
     };
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -468,15 +459,13 @@ async fn browser_press(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "scroll")]
 async fn browser_scroll(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let x: i32 = opts.get::<Option<i32>>("x")?.unwrap_or(0);
-    let y: i32 = opts.get::<Option<i32>>("y")?.unwrap_or(0);
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let x: i32 = opts.opt::<i32>("x")?.unwrap_or(0);
+    let y: i32 = opts.opt::<i32>("y")?.unwrap_or(0);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -496,17 +485,15 @@ async fn browser_scroll(lua: Lua, opts: Table) -> LuaResult<Pair<bool>> {
 /// @return (string, string?) Pair: the path on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "screenshot")]
 async fn browser_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<String>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let path: Option<String> = opts.get("path")?;
+    let path: Option<String> = opts.opt("path")?;
     let Some(path) = path else {
         return Ok((None, Some("path is required".to_owned())));
     };
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -535,17 +522,15 @@ async fn browser_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<String>> {
 /// @return (any, string?) Pair: the result on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "eval")]
 async fn browser_eval(lua: Lua, opts: Table) -> LuaResult<Pair<LuaValue>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
-    let source: Option<String> = opts.get("source")?;
+    let source: Option<String> = opts.opt("source")?;
     let Some(source) = source else {
         return Ok((None, Some("source is required".to_owned())));
     };
-    let timeout: u64 = opts
-        .get::<Option<u64>>("timeout")?
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
     let Some(page) = page_of(&lua, &session) else {
         return Ok((None, Some(BROWSER_NOT_OPEN.to_owned())));
     };
@@ -562,7 +547,7 @@ async fn browser_eval(lua: Lua, opts: Table) -> LuaResult<Pair<LuaValue>> {
 /// @return (table, string?) Pair: `{ open, url, title }` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "status")]
 async fn browser_status(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };
@@ -596,7 +581,7 @@ async fn browser_status(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
 /// @return (boolean, string?) `(true, nil)` on success, `(nil, err)`.
 #[lua_fn(guard = Net, name = "close")]
 fn browser_close(lua: &Lua, opts: Table) -> LuaResult<Pair<bool>> {
-    let session: Option<String> = opts.get("session")?;
+    let session: Option<String> = opts.opt("session")?;
     let Some(session) = session else {
         return Ok((None, Some(SESSION_REQUIRED.to_owned())));
     };

@@ -28,6 +28,17 @@ function Path.parse(text, cursor)
   return start - 1, before:sub(start)
 end
 
+local SKILL_PREFIX = "/skill:"
+
+-- The skill name being typed in a `/skill:<name>` token, or nil when {token}
+-- is not one. Tab on such a token completes a skill name, not a file path.
+function Path.skill_prefix(token)
+  if starts_with(token, SKILL_PREFIX) then
+    return token:sub(#SKILL_PREFIX + 1)
+  end
+  return nil
+end
+
 -- Worth completing: it carries a separator, a home, a dot, a leading slash, or
 -- a drive letter. A bare word does not, so Tab on one stays the mode toggle.
 function Path.is_path(token)

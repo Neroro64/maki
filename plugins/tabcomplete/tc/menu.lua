@@ -4,6 +4,7 @@
 -- input beneath it.
 
 local ListPicker = require("maki.list_picker")
+local Skills = require("maki.skills")
 local Path = require("tc.path")
 
 local M = {}
@@ -70,7 +71,7 @@ local function render(size)
     width = maki.ui.display_width(NO_MATCHES) + PAD + BORDER
   end
   popup.buf:set_lines(lines())
-  popup.win:set_config({ width = math.min(width, size.cols), height = #view.rows + BORDER + 1 })
+  popup.win:set_config({ width = math.min(width, size.cols), height = math.max(1, #view.rows) + BORDER })
   popup.win:show()
 end
 
@@ -123,7 +124,9 @@ function M.close()
   end
   local mine = popup
   popup = nil
-  local ok, err = pcall(mine.win.close)
+  local ok, err = pcall(function()
+    mine.win:close()
+  end)
   if not ok then
     maki.log.warn(TEARDOWN_FAILED .. tostring(err))
   end
@@ -193,22 +196,28 @@ local function ensure_popup()
   read_keys(popup)
 end
 
--- Lists the directory the token names and paints the rows. A caret that has
--- left the token (no longer a path) takes the popup down: the rows on screen
--- answer a token the user is no longer typing.
+-- Lists the directory the token names, or the skills a `/skill:` token names,
+-- and paints the rows. A caret that has left the token (no longer a path or a
+-- skill mention) takes the popup down: the rows on screen answer a token the
+-- user is no longer typing.
 function M.refresh(st)
   local start, token = Path.parse(st.text, st.cursor)
-  if not Path.is_path(token) then
+  local rows
+  local skill_prefix = Path.skill_prefix(token)
+  if skill_prefix then
+    rows = Skills.rows(skill_prefix, opts.max_items)
+  elseif Path.is_path(token) then
+    local root = tree_of(st.session_id)
+    if not root then
+      return M.close()
+    end
+    local resolved = Path.resolve(token, root, maki.fs.abspath("~"))
+    local dir = maki.fs.normalize(resolved.dir)
+    local raw = maki.fs.dir(dir, { depth = 1 })
+    rows = raw and Path.entries(raw, resolved.disp, resolved.prefix, opts.max_items) or {}
+  else
     return M.close()
   end
-  local root = tree_of(st.session_id)
-  if not root then
-    return M.close()
-  end
-  local resolved = Path.resolve(token, root, maki.fs.abspath("~"))
-  local dir = maki.fs.normalize(resolved.dir)
-  local raw = maki.fs.dir(dir, { depth = 1 })
-  local rows = raw and Path.entries(raw, resolved.disp, resolved.prefix, opts.max_items) or {}
   ensure_popup()
   local was = popup.view and popup.view.rows[popup.sel]
   popup.view = {

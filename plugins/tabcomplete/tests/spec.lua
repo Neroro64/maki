@@ -1,6 +1,7 @@
 local Path = require("tc.path")
 local Menu = require("tc.menu")
 local Events = require("tc.events")
+local Skills = require("maki.skills")
 local th = require("maki.test_helpers")
 
 local case = th.case
@@ -53,6 +54,15 @@ case("is_path_wants_a_separator_a_home_a_dot_a_drive", function()
   for _, token in ipairs({ "main", "hello world", "" }) do
     eq(Path.is_path(token), false, token .. " is not a path, so Tab stays the mode toggle")
   end
+end)
+
+-- ------------------------------------------------------------- path.skill_prefix
+
+case("skill_prefix_takes_the_name_after_the_colon", function()
+  eq(Path.skill_prefix("/skill:git"), "git")
+  eq(Path.skill_prefix("/skill:"), "", "an empty prefix lists every skill")
+  eq(Path.skill_prefix("/skill"), nil, "no colon is not a skill mention")
+  eq(Path.skill_prefix("F:/x"), nil, "a path is not a skill mention")
 end)
 
 -- -------------------------------------------------------------- path.resolve
@@ -195,7 +205,10 @@ local function harness(body)
       set_config = function() end,
       show = function() end,
       recv = function() return { type = "close" } end,
-      close = function() h.closes = h.closes + 1 end,
+      close = function(self)
+        assert(self ~= nil, "win:close() must be called as a method with self")
+        h.closes = h.closes + 1
+      end,
     }
   end
   maki.ui.terminal_size = function() return { cols = 80 } end
@@ -329,6 +342,49 @@ case("accept_reports_a_refused_edit", function()
   end)
   eq(#h.flashes, 1)
   th.has(h.flashes[1], REFUSED, "the host's reason reaches the user")
+end)
+
+-- ----------------------------------------------------------- skill completion
+
+local SKILLS = {
+  { name = "git-release", description = "Cut a release", location = "l", enabled = true },
+  { name = "privacy", description = "Privacy", location = "l", enabled = true },
+  { name = "off", description = "Off", location = "l", enabled = false },
+}
+
+case("a_skill_token_lists_enabled_skills_by_prefix", function()
+  Skills.set(SKILLS)
+  local h = harness(function(hh)
+    hh.input = { text = "/skill:", cursor = 7, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+  end)
+  eq(row(h, 1), " git-release", "enabled skills, name order")
+  eq(row(h, 2), " privacy")
+  eq(row(h, 3), nil, "a disabled skill is not offered")
+  Skills.set({})
+end)
+
+case("a_skill_prefix_narrows_the_rows", function()
+  Skills.set(SKILLS)
+  local h = harness(function(hh)
+    hh.input = { text = "/skill:pr", cursor = 9, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+  end)
+  eq(row(h, 1), " privacy", "only the prefix match is left")
+  Skills.set({})
+end)
+
+case("accept_writes_the_whole_skill_token", function()
+  Skills.set(SKILLS)
+  local h = harness(function(hh)
+    hh.input = { text = "/skill:gi", cursor = 8, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+    Menu.accept()
+  end)
+  eq(h.edits[1].text, "/skill:git-release", "the insert carries the /skill: shape")
+  eq(h.edits[1].start, 0, "the token starts at the slash")
+  eq(h.edits[1].stop, 8, "and runs to the caret")
+  Skills.set({})
 end)
 
 -- ---------------------------------------------------------------- events
