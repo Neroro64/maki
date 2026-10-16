@@ -3286,6 +3286,7 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "image",
  "isahc",
  "jiff",
  "jsonrepair",

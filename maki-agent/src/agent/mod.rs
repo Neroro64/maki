@@ -4,6 +4,7 @@ mod history;
 pub mod hook;
 mod instructions;
 mod run;
+mod snapcompact;
 mod streaming;
 pub mod tool_dispatch;
 

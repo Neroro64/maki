@@ -817,6 +817,7 @@ pub struct AgentFileConfig {
     pub max_continuation_turns: Option<u32>,
     pub max_turn_output: Option<u32>,
     pub compaction_buffer: Option<CompactionBuffer>,
+    pub compaction_strategy: Option<CompactionStrategy>,
     pub compaction_instructions: Option<String>,
     pub post_compaction_instructions: Option<String>,
     pub stale_read_check: Option<bool>,
@@ -836,6 +837,7 @@ impl AgentFileConfig {
             max_continuation_turns,
             max_turn_output,
             compaction_buffer,
+            compaction_strategy,
             compaction_instructions,
             post_compaction_instructions,
             stale_read_check,
@@ -1452,6 +1454,20 @@ pub enum ShellPreference {
     Program(PathBuf),
 }
 
+/// How a compaction rewrites the transcript. `auto` picks snapcompact (history
+/// archived as bitmap frames a vision model reads) when the current model has
+/// vision, else LLM summarization; `summarize` always summarizes; `snapcompact`
+/// always archives as frames, falling back to summarization when the model has
+/// no vision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompactionStrategy {
+    #[default]
+    Auto,
+    Summarize,
+    Snapcompact,
+}
+
 #[derive(Debug, Clone, ConfigSection, Serialize)]
 #[config(section = "agent")]
 pub struct AgentConfig {
@@ -1469,6 +1485,14 @@ pub struct AgentConfig {
 
     #[config(default = DEFAULT_COMPACTION_BUFFER, ty = "u32 | string", default_doc = "20%", desc = "Context reserved for compaction: token count or percent of the context window (e.g. \"20%\")")]
     pub compaction_buffer: CompactionBuffer,
+
+    #[config(
+        default = CompactionStrategy::Auto,
+        ty = "string",
+        default_doc = "auto",
+        desc = "Compaction strategy: `auto` (snapcompact bitmap frames on vision models, LLM summary otherwise), `summarize`, or `snapcompact`"
+    )]
+    pub compaction_strategy: CompactionStrategy,
 
     #[config(
         ty = "String",
@@ -1538,6 +1562,7 @@ impl AgentConfig {
                 .unwrap_or(DEFAULT_MAX_CONTINUATION_TURNS),
             max_turn_output: file.max_turn_output.unwrap_or(DEFAULT_MAX_TURN_OUTPUT),
             compaction_buffer: file.compaction_buffer.unwrap_or(DEFAULT_COMPACTION_BUFFER),
+            compaction_strategy: file.compaction_strategy.unwrap_or_default(),
             compaction_instructions: file.compaction_instructions,
             post_compaction_instructions: file.post_compaction_instructions,
             stale_read_check: file.stale_read_check.unwrap_or(true),

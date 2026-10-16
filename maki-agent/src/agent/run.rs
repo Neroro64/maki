@@ -1378,7 +1378,11 @@ mod tests {
     }
 
     fn default_model() -> Model {
-        Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap()
+        let mut model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        // The compaction tests here script summarizer responses; keep them on
+        // the LLM path by marking this model text-only.
+        model.supports_vision_override = Some(false);
+        model
     }
 
     fn tool_search_model() -> Model {
