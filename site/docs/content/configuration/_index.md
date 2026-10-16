@@ -348,6 +348,12 @@ maki.setup({
 |-------|------|---------|-----|-------------|
 | `plugin_dev` | boolean | `true` | - | Offer the builtin maki-plugin-dev skill for writing maki plugins. |
 
+### `plugins.tabcomplete`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_items` | integer | `12` | 1 | Rows the path completion popup shows at once. |
+
 ### `plugins.task`
 
 | Field | Type | Default | Min | Description |

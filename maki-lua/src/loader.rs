@@ -175,6 +175,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/completion"),
     },
     BundledPlugin {
+        name: "tabcomplete",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/tabcomplete"),
+    },
+    BundledPlugin {
         name: "view_image",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/view_image"),
     },
@@ -3208,18 +3212,22 @@ mod bundled_manifests {
         })
     }
 
+    /// The built-ins `maki.ui.action` names in {source}, with the name lua
+    /// spelled, so a drift report can point at the call.
+    fn builtin_actions(source: &str) -> impl Iterator<Item = (&str, BuiltinAction)> {
+        source.match_indices(UI_ACTION_CALL).filter_map(|(start, _)| {
+            let rest = &source[start + UI_ACTION_CALL.len()..];
+            let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+            let name = &rest[1..];
+            let end = name.find(quote)?;
+            let builtin = name[..end].parse::<BuiltinAction>().ok()?;
+            Some((&name[..end], builtin))
+        })
+    }
+
     /// A `maki.ui.action` call naming a built-in that changes the input.
     fn runs_an_input_action(source: &str) -> bool {
-        source.match_indices(UI_ACTION_CALL).any(|(at, _)| {
-            let rest = &source[at + UI_ACTION_CALL.len()..];
-            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
-                return false;
-            };
-            let name = &rest[1..];
-            name.find(quote)
-                .and_then(|end| name[..end].parse::<BuiltinAction>().ok())
-                .is_some_and(BuiltinAction::changes_input)
-        })
+        builtin_actions(source).any(|(_, builtin)| builtin.changes_input())
     }
 
     #[test_case(r#"maki.ui.action("undo")"#, true ; "undo")]
@@ -3321,16 +3329,18 @@ mod bundled_manifests {
                         }
                     }
                 }
-                // A built-in action is guarded by its name, and an edit by
-                // whether it changes the text, which the API metadata cannot
-                // see.
-                let edits_by_action = runs_an_input_action(source);
-                if edits_by_action {
-                    needed
-                        .entry(Permission::Input)
-                        .or_insert_with(|| "a built-in action that edits".to_owned());
+                // A built-in action is guarded by its name, so a call spends
+                // what its `needs` lists, which the API metadata cannot see.
+                for (name, builtin) in builtin_actions(source) {
+                    for &permission in builtin.needs() {
+                        needed
+                            .entry(permission)
+                            .or_insert_with(|| format!("{UI_ACTION_CALL}\"{name}\")"));
+                    }
                 }
-                if edits_by_action || calls(source, INPUT_EDIT_CALL) {
+                // `maki.ui.input_edit` sends the text as the user's prompt,
+                // which the API metadata cannot see either.
+                if calls(source, INPUT_EDIT_CALL) {
                     for &permission in SENDS_PROMPT {
                         needed
                             .entry(permission)

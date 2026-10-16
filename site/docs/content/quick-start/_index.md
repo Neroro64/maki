@@ -89,7 +89,7 @@ maki
 Type what you want done, press Enter, watch it work. Worth knowing on day one:
 
 - **Permissions.** File edits inside the repo run freely. `bash` and web tools ask first: `y` allows once, `s` for the session, `a` for the project. Deny rules always win; `/yolo` skips the prompts. Details in [Permissions](/docs/permissions/).
-- **Plan mode.** `Tab` toggles it. The agent may only write the plan file until you approve, then back to build mode.
+- **Plan mode.** `Tab` toggles it. The agent may only write the plan file until you approve, then back to build mode. On a path token `Tab` completes the file path instead. Details in [Context](/docs/context/#completing-a-path-with-tab).
 - **Models.** `/model` switches mid-session.
 - **Sessions.** `/new` starts a second session while the first keeps working in the background; `/sessions` jumps between them. Tomorrow, `maki --continue` resumes where you left off.
 - **Your shell.** Prefix input with `!` to run a command yourself (`!cargo test`). `!!` hides command and output from the agent.

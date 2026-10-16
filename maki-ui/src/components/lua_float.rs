@@ -2053,6 +2053,53 @@ mod tests {
         assert!(took_a_key(&event_rx), "{CLAIM_NOT_DELIVERED}");
     }
 
+    /// The tab-complete popup opens hidden on the caret, then `show()` and a
+    /// resize land it on screen. The claim must arm on the frame that paints it,
+    /// the same as the `@` popup, or every key falls through to the chat input.
+    #[test]
+    fn a_caret_window_opened_hidden_then_shown_claims_its_keys() {
+        let mut mgr = FloatManager::new();
+        let (event_tx, cmd_rx, event_rx, cmd_tx) = make_channels();
+        let config = FloatConfig {
+            width: Dimension::Abs(4),
+            height: Dimension::Abs(3),
+            anchor: Anchor::InputCaret,
+            visible: false,
+            keys: vec![key("<Tab>")],
+            ..FloatConfig::default()
+        };
+        mgr.open(make_buf(&["x"]), config, false, event_tx, cmd_rx);
+        let area = Rect::new(0, 0, 80, 40);
+        let caret = Position::new(5, 20);
+        render_into(&mut mgr, area, |m, f| {
+            m.view(f, area, Some(caret));
+        });
+        assert!(
+            !claimed(&mut mgr, press("<Tab>")),
+            "{EXPECT_HIDDEN_UNPAINTED}"
+        );
+
+        cmd_tx.send(WinCommand::SetVisible(true)).unwrap();
+        cmd_tx
+            .send(WinCommand::SetConfig(FloatConfigPatch {
+                width: Some(Dimension::Abs(20)),
+                height: Some(Dimension::Abs(5)),
+                ..FloatConfigPatch::default()
+            }))
+            .unwrap();
+        let _ = mgr.tick();
+        render_into(&mut mgr, area, |m, f| {
+            m.view(f, area, Some(caret));
+        });
+
+        assert!(mgr.windows[0].on_screen, "{EXPECT_PAINTED}");
+        assert!(
+            claimed(&mut mgr, press("<Tab>")),
+            "a shown caret window must claim its key"
+        );
+        assert!(took_a_key(&event_rx), "{CLAIM_NOT_DELIVERED}");
+    }
+
     #[test]
     fn buf_content_update() {
         let mut mgr = FloatManager::new();

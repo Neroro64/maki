@@ -115,6 +115,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "sessions",
     "skill",
     "synthetic",
+    "tabcomplete",
     "task",
     "tensorx",
     "thinking",

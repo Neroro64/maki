@@ -6792,6 +6792,60 @@ fn job_callbacks_fire_while_command_handler_parked() {
     assert!(matches!(action, maki_lua::UiAction::Flash(msg) if msg == "job:hi"));
 }
 
+/// The tab-complete popup opens its window and starts its `win:recv` loop from
+/// inside a keymap callback. The loop must outlive the callback and consume the
+/// keys the window claims, the same as the `@` popup's loop started from an
+/// autocmd.
+#[test]
+fn keymap_callback_recv_loop_consumes_a_claimed_key() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "kb",
+        r#"
+        maki.keymap.set("n", "<C-g>", function()
+            local win = maki.ui.open_win(maki.ui.buf(), { focus = false, keys = { "<Tab>" } })
+            maki.async.run(function()
+                local ev = win:recv()
+                if ev and ev.type == "key" then
+                    maki.ui.flash("got:" .. ev.key)
+                end
+            end)
+        end, { desc = "open recv window" })
+        "#,
+    )
+    .unwrap();
+    let reader = host.keymap_reader();
+    let key = reader.load().entries[0].key;
+    let handle = host.event_handle();
+    reader.dispatch(key, maki_lua::InputMode::Normal, None, |ticket| {
+        handle.run_keybind_callback(ticket)
+    });
+
+    let rx = host.ui_action_rx();
+    let event_tx = loop {
+        let action = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("open_win action");
+        if let maki_lua::UiAction::OpenWin { event_tx, .. } = action {
+            break event_tx;
+        }
+    };
+    event_tx
+        .try_send(maki_lua::WinEvent::Key {
+            key: maki_lua::Key::parse("<Tab>").expect("nameable"),
+        })
+        .expect("send key to window");
+
+    let flash = loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(maki_lua::UiAction::Flash(msg)) => break msg,
+            Ok(_) => continue,
+            Err(_) => panic!("recv loop starved after its keymap callback returned"),
+        }
+    };
+    assert_eq!(flash, "got:<Tab>", "the recv loop did not consume the claimed key");
+}
+
 /// read tool requires offset and limit; missing fields should fail schema validation.
 mod read_tool_required_params {
     use super::*;

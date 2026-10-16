@@ -1703,6 +1703,7 @@ impl App {
                 self.input_box.buffer.toggle_raw();
                 true
             }
+            BuiltinAction::ModeToggle => return (true, self.toggle_mode()),
             BuiltinAction::Undo => self.input_action(InputBox::undo),
             BuiltinAction::Redo => self.input_action(InputBox::redo),
             BuiltinAction::HistoryPrev => self.input_action(InputBox::history_up),

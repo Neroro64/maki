@@ -515,13 +515,16 @@ fn set_mode(lua: &Lua, #[ctx] plugin: Arc<str>, mode: String) -> LuaResult<()> {
 /// | `"undo"`, `"redo"` | Undoes or redoes one input edit | nothing to undo or redo |
 /// | `"history_prev"`, `"history_next"` | Recalls the previous or next prompt | at either end of the history |
 /// | `"newline"` | Inserts a new line | |
+/// | `"mode_toggle"` | Switches between plan and build, what Tab does | |
 ///
 /// `"undo"`, `"redo"`, `"history_prev"`, `"history_next"` and `"newline"`
 /// edit the chat input, also in normal mode. They need the `input`, `agent`
 /// and `session_write` permissions, see [chat input](#chat-input), and throw
 /// without them like any gated call. They return `false` in a finished subagent's chat, which has
 /// no input. `"pop_queue"` needs `session_write`, because it throws away a
-/// queued prompt. The other built-ins need no permission.
+/// queued prompt. `"mode_toggle"` needs `session_settings`, the price of
+/// `maki.session.set_mode`, which flips the same switch. The other built-ins
+/// need no permission.
 ///
 /// A built-in runs in the UI after your earlier `maki.ui` calls, and
 /// `action` waits for its answer. While your plugin loads, it returns `nil`

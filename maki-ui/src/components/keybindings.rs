@@ -384,7 +384,7 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         label: KeyLabel::Single("Tab"),
-        description: "Switch between plan and build",
+        description: "Switch between plan and build, complete path",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },
