@@ -19,6 +19,7 @@ const SCREENSHOTS_DIR: &str = "screenshots";
 const NO_DISPLAY: &str = "cannot reach a display; computer control needs X11 (XWayland counts)";
 const KEY_UNKNOWN: &str = "unknown key; use names like enter, escape, tab, up, ctrl+c, f1";
 const MOUSE_ACTION_REQUIRED: &str = "action must be move, click, press, release, or scroll";
+#[cfg(unix)]
 const PORTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn enigo() -> Result<Enigo, String> {
@@ -210,6 +211,7 @@ async fn computer_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     Ok((Some(tbl), None))
 }
 
+#[cfg(unix)]
 async fn portal_screenshot(target: &std::path::Path) -> Result<(u32, u32), String> {
     use ashpd::desktop::screenshot::Screenshot;
     let request = async {
@@ -239,6 +241,15 @@ async fn portal_screenshot(target: &std::path::Path) -> Result<(u32, u32), Strin
         .unwrap_or((0, 0));
     std::fs::copy(&source, target).map_err(|e| e.to_string())?;
     Ok(dims)
+}
+
+/// The XDG desktop portal is a Unix thing; elsewhere the X11 grab is the only
+/// capture backend, so a failed grab is the final answer.
+#[cfg(not(unix))]
+async fn portal_screenshot(_target: &std::path::Path) -> Result<(u32, u32), String> {
+    Err(format!(
+        "no X11 capture ({NO_DISPLAY}); no portal fallback on this platform"
+    ))
 }
 
 /// Move, click, press, release, or scroll the mouse.
@@ -551,5 +562,30 @@ mod tests {
         let (w, h) = smol::block_on(portal_screenshot(&target)).expect("portal capture");
         assert!(w > 0 && h > 0);
         let _ = std::fs::remove_file(&target);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn screenshot_without_a_display_returns_a_clean_pair() {
+        const NO_PORTAL: &str = "no portal fallback on this platform";
+        let lua = Lua::new();
+        let computer = create_computer_table(&lua, &PluginPermissions::trusted()).unwrap();
+        lua.globals().set("computer", computer).unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("shot.png").display().to_string();
+        let src = format!(
+            "return computer.screenshot{{ path = '{}' }}",
+            path.replace('\\', "/")
+        );
+        let (val, err): (mlua::Value, Option<String>) =
+            smol::block_on(lua.load(&src).eval_async()).unwrap();
+        assert!(val.is_nil(), "a failed capture must answer nil");
+        let err = err.expect("a failed capture must answer a message");
+        assert!(err.contains(NO_DISPLAY), "got: {err}");
+        assert!(err.contains(NO_PORTAL), "got: {err}");
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "a failed capture must leave no file behind"
+        );
     }
 }

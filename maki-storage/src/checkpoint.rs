@@ -5,7 +5,6 @@
 //! or moved. A checkpoint is one commit of the whole tree; a rewind restores
 //! the commit that matches the history it is truncating to.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -174,7 +173,8 @@ impl Checkpoints {
 fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
-        PathBuf::from(<OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(bytes))
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(OsStrExt::from_bytes(bytes))
     }
     #[cfg(not(unix))]
     {
