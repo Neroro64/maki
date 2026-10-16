@@ -5292,6 +5292,39 @@ fn open_claiming_popup(
     open_claiming_popup_keys(app, &[(key, modifiers)])
 }
 
+/// A caret-anchored unfocused popup claiming {key}, as tab-complete opens one.
+fn open_caret_claiming_popup(
+    app: &mut App,
+    key: &str,
+) -> (flume::Receiver<WinEvent>, flume::Sender<WinCommand>) {
+    let (event_tx, event_rx) = flume::bounded::<WinEvent>(8);
+    let (cmd_tx, cmd_rx) = flume::bounded::<WinCommand>(8);
+    let config = FloatConfig {
+        anchor: maki_lua::Anchor::InputCaret,
+        keys: vec![maki_lua::Key::parse(key).expect("nameable key")],
+        ..FloatConfig::default()
+    };
+    app.float_mgr
+        .open(Arc::new(SharedBuf::new()), config, false, event_tx, cmd_rx);
+    let _ = draw_to_buffer(app);
+    (event_rx, cmd_tx)
+}
+
+/// Tab is the mode-toggle key. A popup that claims it must take it before the
+/// toggle, the way the `@` popup takes `<CR>` before the message sends.
+#[test]
+fn a_caret_popup_claiming_tab_takes_it_from_the_mode_toggle() {
+    let mut app = test_app();
+    let (events, _cmd_tx) = open_caret_claiming_popup(&mut app, "<Tab>");
+    let before = app.state.mode;
+    app.update(Msg::Key(key(KeyCode::Tab)));
+    assert_eq!(
+        app.state.mode, before,
+        "Tab must not toggle mode while the popup claims it"
+    );
+    assert!(took_a_key(&events), "{CLAIM_DELIVERED}");
+}
+
 fn took_a_key(events: &flume::Receiver<WinEvent>) -> bool {
     events.drain().any(|e| matches!(e, WinEvent::Key { .. }))
 }
