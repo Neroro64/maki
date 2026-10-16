@@ -13,6 +13,7 @@ use tracing::info;
 use super::frame::{RunContext, fit_frame};
 use super::history::{History, remove_orphaned_tool_results, strip_thinking};
 use super::hook::{AgentHooks, AgentSlot};
+use super::snapcompact;
 use super::streaming::{StreamError, StreamRequest, min_output, stream_with_retry};
 use crate::mcp::McpSession;
 use crate::prompt::COMPACTION_USER;
@@ -205,6 +206,17 @@ pub(super) async fn compact_history(
     strip_images(&mut compaction_history);
     strip_thinking(&mut compaction_history);
     prepare_collapse(hooks, &mut compaction_history, RECENT_TOOL_RESULT_BUDGET).await;
+
+    if snapcompact::strategy_enabled(config, hooks.model) {
+        return snapcompact::history(
+            history,
+            compaction_history,
+            summarized,
+            event_tx,
+            compact_start,
+        );
+    }
+
     compaction_history.push(Message::user(summary_prompt(config, instructions)));
 
     let empty_tools = serde_json::json!([]);
@@ -694,7 +706,11 @@ mod tests {
     }
 
     fn default_model() -> Model {
-        Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap()
+        let mut model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        // The summarizer-path tests below script MockProvider responses; keep
+        // them on the LLM path by marking this model text-only.
+        model.supports_vision_override = Some(false);
+        model
     }
 
     fn small_context_model(context_window: u32) -> Model {
@@ -828,6 +844,59 @@ mod tests {
     }
 
     const SUMMARISED_PROMPT: u32 = 150_000;
+
+    /// A vision-capable model archives the discarded transcript as bitmap
+    /// frames locally: no summarizer request goes out, and the summary message
+    /// carries image blocks the model reads back.
+    #[test]
+    fn compact_archives_history_as_frames_for_vision_models() {
+        smol::block_on(async {
+            let provider = MockProvider::new(Vec::new());
+            let mut history = History::new(vec![
+                Message::user("first".into()),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "reply".into(),
+                    }],
+                    ..Default::default()
+                },
+            ]);
+            let registry = ToolRegistry::new();
+            let (raw_tx, _rx) = flume::unbounded();
+            let mut vision_model = default_model();
+            vision_model.supports_vision_override = Some(true);
+            let cancel = CancelToken::none();
+            let compacted = compact_history(
+                &provider,
+                &vision_model,
+                &mut history,
+                &EventSender::new(raw_tx, 0),
+                &test_hooks(&registry, None, &vision_model, &cancel),
+                &AgentConfig::default(),
+                None,
+                0,
+                RetryPolicy::default(),
+            )
+            .await
+            .unwrap();
+
+            assert!(
+                provider.requests.lock().unwrap().is_empty(),
+                "snapcompact must not call the summarizer"
+            );
+            let msgs = history.as_slice();
+            assert_eq!(msgs.len(), 2);
+            assert!(
+                msgs[1]
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. })),
+                "the archive keeps a text edge"
+            );
+            assert_eq!(compacted.carried, 0);
+        });
+    }
 
     /// The measurement the gauge holds is of the transcript compaction just
     /// deleted, so left in place it sizes every later turn against a session
