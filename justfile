@@ -17,6 +17,13 @@ install *ARGS:
 test *ARGS:
     cargo nextest run --workspace {{ARGS}}
 
+# Rebase the fork onto upstream main. `origin` is tontinton/maki, `fork` is ours.
+# On conflicts: fix, `git add`, `git rebase --continue`. Then `just check && just lint && just test`.
+rebase-upstream:
+    git fetch origin
+    -git remote prune origin
+    git rebase origin/main
+
 lint:
     cargo clippy --all --all-targets --features maki-ui/bench -- -D warnings
 
