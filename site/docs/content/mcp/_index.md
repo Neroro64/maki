@@ -180,10 +180,10 @@ If one server fails, the rest still work.
 
 ## OAuth
 
-Some HTTP servers need auth. When that happens, Maki opens your browser to log in. Other servers keep working while you authenticate. Tokens refresh on their own. If you change the server URL, you log in again.
+Some HTTP servers need auth. A server that needs a login stays in `needs auth` until you ask for it: Maki never opens a browser on its own. Run `/mcp auth <server-name>` in the chat (Tab completes the name), or the CLI command below from a terminal. The server reconnects once the login finishes. Tokens refresh on their own. If you change the server URL, you log in again.
 
 ```bash
-maki mcp auth <server-name>     # manually trigger auth
+maki mcp auth <server-name>     # same login, outside the TUI; prints a URL to paste
 maki mcp logout <server-name>   # remove stored tokens
 ```
 

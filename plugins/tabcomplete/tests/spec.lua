@@ -1,6 +1,7 @@
 local Path = require("tc.path")
 local Menu = require("tc.menu")
 local Events = require("tc.events")
+local Mcp = require("tc.mcp")
 local Skills = require("maki.skills")
 local th = require("maki.test_helpers")
 
@@ -152,6 +153,10 @@ end)
 local SESSION = "session-1"
 local OTHER_SESSION = "session-2"
 local INPUT = { text = "read F:/Some", cursor = 12, version = 3, session_id = SESSION }
+local MCP_SERVERS = {
+  { name = "github", status = "needs_auth", needs_auth = true },
+  { name = "notion", status = "running", needs_auth = false },
+}
 
 -- Stubs every host call the menu makes. `h.dir` is what `maki.fs.dir` answers;
 -- `h.edits`, `h.rows`, `h.claimed`, `h.opens`, `h.closes`, `h.flashes` are what
@@ -172,6 +177,7 @@ local function harness(body)
     session = maki.session.read,
     run = maki.async.run,
     warn = maki.log.warn,
+    mcp = maki.mcp,
   }
   local h = {
     dir = { { "SomeFile", "file" }, { "SomeDir", "directory" } },
@@ -220,6 +226,7 @@ local function harness(body)
   maki.session.read = function() return { cwd = CWD } end
   maki.async.run = function(fn) fn() end
   maki.log.warn = function() end
+  maki.mcp = { servers = function() return h.mcp_servers or MCP_SERVERS end }
 
   local ok, err = pcall(body, h)
 
@@ -230,6 +237,7 @@ local function harness(body)
   maki.fs.dir, maki.fs.normalize, maki.fs.abspath = saved.dir, saved.normalize, saved.abspath
   maki.session.read, maki.async.run = saved.session, saved.run
   maki.log.warn = saved.warn
+  maki.mcp = saved.mcp
   if not ok then
     error(err)
   end
@@ -385,6 +393,68 @@ case("accept_writes_the_whole_skill_token", function()
   eq(h.edits[1].start, 0, "the token starts at the slash")
   eq(h.edits[1].stop, 8, "and runs to the caret")
   Skills.set({})
+end)
+
+-- -------------------------------------------------------- /mcp auth completion
+
+case("is_auth_arg_wants_the_command_before_the_token", function()
+  eq(Mcp.is_auth_arg("/mcp auth ", 10), true, "the empty argument slot")
+  eq(Mcp.is_auth_arg("/mcp  auth gi", 11), true, "extra spaces still address the argument")
+  eq(Mcp.is_auth_arg("/mcp auth", 5), false, "the cursor on auth is not the argument")
+  eq(Mcp.is_auth_arg("/mcp toggle gi", 11), false, "another argument is not a server")
+  eq(Mcp.is_auth_arg("run /mcp auth gi", 13), false, "the command must start the line")
+end)
+
+case("auth_rows_list_servers_by_name_prefix", function()
+  local saved = maki.mcp
+  maki.mcp = { servers = function() return MCP_SERVERS end }
+  local rows = Mcp.rows("", 10)
+  eq(#rows, 2, "every configured server, name order")
+  eq(rows[1].label, "github")
+  eq(rows[2].label, "notion")
+  rows = Mcp.rows("gi", 10)
+  eq(#rows, 1)
+  eq(rows[1].insert, "github")
+  eq(rows[1].highlights[1][2], 2, "the two matched bytes")
+  maki.mcp = saved
+end)
+
+case("an_auth_argument_lists_servers", function()
+  local h = harness(function(hh)
+    hh.input = { text = "/mcp auth ", cursor = 10, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+  end)
+  eq(row(h, 1), " github")
+  eq(row(h, 2), " notion")
+end)
+
+case("an_auth_prefix_narrows_the_rows", function()
+  local h = harness(function(hh)
+    hh.input = { text = "/mcp auth gi", cursor = 12, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+  end)
+  eq(row(h, 1), " github")
+  eq(row(h, 2), nil, "notion does not match")
+end)
+
+case("accept_writes_the_server_name", function()
+  local h = harness(function(hh)
+    hh.input = { text = "/mcp auth gi", cursor = 12, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+    Menu.accept()
+  end)
+  eq(h.edits[1].text, "github")
+  eq(h.edits[1].start, 10, "the token starts after the command")
+  eq(h.edits[1].stop, 12, "and runs to the caret")
+end)
+
+case("a_caret_past_the_argument_closes_the_popup", function()
+  local h = harness(function(hh)
+    hh.input = { text = "/mcp auth gi", cursor = 12, version = 3, session_id = SESSION }
+    Menu.refresh(hh.input)
+    Menu.refresh({ text = "/mcp auth github and", cursor = 20, version = 4, session_id = SESSION })
+  end)
+  eq(h.closes, 1, "the token is no longer the command's argument")
 end)
 
 -- ---------------------------------------------------------------- events

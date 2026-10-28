@@ -109,6 +109,16 @@ pub enum McpServerStatus {
 }
 
 impl McpServerStatus {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Running => "running",
+            Self::Disabled => "disabled",
+            Self::Failed(_) => "failed",
+            Self::NeedsAuth { .. } => "needs_auth",
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Running | Self::Connecting)
     }

@@ -318,6 +318,7 @@ pub enum Action {
     RefreshUsage,
     Compact(Option<String>),
     ToggleMcp(String, bool),
+    AuthMcp(String),
     OpenEditor(PathBuf),
     /// A URL to open in the user's browser, e.g. a provider's keys page.
     OpenUrl(String),

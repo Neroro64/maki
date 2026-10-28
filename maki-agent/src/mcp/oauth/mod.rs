@@ -360,7 +360,7 @@ async fn wait_for_code(
             }
             Interaction::Background => tokio::select! {
                 callback = wait_callback => callback,
-                cause = launch_failure => Err(format!("{cause}; run 'maki mcp auth {server_name}'")),
+                cause = launch_failure => Err(format!("{cause}; run '/mcp auth {server_name}'")),
             },
         }
     };

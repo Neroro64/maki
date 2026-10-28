@@ -9,7 +9,8 @@ use maki_storage::paths;
 
 use super::{
     AGENT_BUSY_MSG, App, BTW_USAGE_MSG, COMMAND_DEPTH_MSG, EXIT_COMMAND, FAST_OFF_MSG, FAST_ON_MSG,
-    FAST_PENDING_MSG, MAX_COMMAND_DEPTH, QueuedMessage, UNKNOWN_COMMAND_PREFIX, WORKFLOW_OFF_MSG,
+    FAST_PENDING_MSG, MAX_COMMAND_DEPTH, MCP_AUTH_USAGE, QueuedMessage, UNKNOWN_COMMAND_PREFIX,
+    WORKFLOW_OFF_MSG,
     WORKFLOW_ON_MSG, YOLO_OFF_MSG, YOLO_ON_MSG,
 };
 use crate::components::command::ParsedCommand;
@@ -87,10 +88,7 @@ impl App {
                 self.theme_picker.open();
                 vec![]
             }
-            "/mcp" => {
-                self.mcp_picker.open();
-                vec![]
-            }
+            "/mcp" => self.cmd_mcp(&cmd.args),
             "/login" => {
                 self.login_picker.open(self.storage.clone());
                 vec![]
@@ -229,6 +227,21 @@ impl App {
             text: cmd.render(args),
             images: Vec::new(),
         })
+    }
+
+    fn cmd_mcp(&mut self, args: &str) -> Vec<Action> {
+        if args.is_empty() {
+            self.mcp_picker.open();
+            return vec![];
+        }
+        let mut words = args.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("auth"), Some(server)) => vec![Action::AuthMcp(server.to_owned())],
+            _ => {
+                self.flash(MCP_AUTH_USAGE.to_owned());
+                vec![]
+            }
+        }
     }
 
     fn cmd_cd(&mut self, args: &str) -> Vec<Action> {

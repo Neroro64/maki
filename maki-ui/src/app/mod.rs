@@ -177,6 +177,7 @@ const INPUT_CHANGED_UNSENT: &str = "The input changed while you typed. Press Ent
 pub(crate) const HELD_KEYS_ABANDONED: &str = "Dropped keys typed behind a plugin.";
 const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
+pub(crate) const MCP_AUTH_USAGE: &str = "usage: /mcp auth <server> (Tab completes the name)";
 
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
 const NOTIFICATION_PREVIEW_CHARS: usize = 200;

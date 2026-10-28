@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::future::{pending, ready};
 use std::mem;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,11 +25,13 @@ use crossterm::event::{
 use futures::future::{LocalBoxFuture, select_all};
 use maki_agent::agent::SessionExport;
 use maki_agent::command::CustomCommand;
+use maki_agent::mcp::config::OauthClientConfig;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::session::Resumed;
 use maki_agent::{
     AgentConfig, AgentEvent, AgentSeed, CancelToken, CompactReason, Envelope, HostPrompt,
-    McpCommand, McpConfigErrors, McpHandle, SessionMailbox, Transcript, UiWaker, mcp,
+    McpCommand, McpConfigErrors, McpHandle, McpServerInfo, McpServerStatus, SessionMailbox,
+    Transcript, UiWaker, mcp,
 };
 use maki_config::project::TrustState;
 use maki_config::{ModelPolicy, ProjectConfig, UiConfig};
@@ -39,8 +42,8 @@ use maki_lua::session_snapshot::{
 };
 use maki_lua::{
     EventHandle, HintReader, InputMode, InputRequest, InputRulesReader, Key, KeymapReader,
-    LuaCommandReader, ModelRequest, PackCommand, PackPreparation, PlanRequest, SessionEndReason,
-    SessionRequest, TaskRequest, UiAction, UiReply, WinEvent,
+    LuaCommandReader, McpRequest, ModelRequest, PackCommand, PackPreparation, PlanRequest,
+    SessionEndReason, SessionRequest, TaskRequest, UiAction, UiReply, WinEvent,
 };
 use maki_providers::Timeouts;
 use maki_providers::model_registry;
@@ -100,6 +103,12 @@ const CWD_GONE_FLASH: &str = "current directory no longer exists. /cd to move el
 /// A `/reload` cannot ask the terminal: its input reader owns the tty.
 const RESTART_FOR_BACKGROUND: &str =
     "ui.theme: restart Maki to detect the terminal background, using dark until then";
+const MCP_SERVER_UNKNOWN: &str = "no MCP server named '{server}'";
+const MCP_NOT_HTTP: &str = "'{server}' is not an HTTP server, so it has no OAuth login";
+const MCP_AUTH_STARTED: &str =
+    "{server}: finish the login in your browser; it reconnects when done";
+const MCP_AUTH_DONE: &str = "MCP '{server}' authenticated";
+const MCP_AUTH_STORAGE_ERR: &str = "MCP '{server}': cannot resolve storage for OAuth: {error}";
 
 /// Tabs carry their in-memory sessions so `/reload` reopens them without a
 /// disk round-trip; `session_has_content` tells which ones were saved.
@@ -1249,6 +1258,9 @@ impl<'t> EventLoop<'t> {
             UiAction::Task { req, reply_tx } => {
                 let _ = reply_tx.send(self.handle_task_request(req));
             }
+            UiAction::Mcp { req, reply_tx } => {
+                let _ = reply_tx.send(self.handle_mcp_request(req));
+            }
             UiAction::Plan { req, reply_tx } => {
                 let _ = reply_tx.send(self.handle_plan_request(req));
             }
@@ -1780,6 +1792,28 @@ impl<'t> EventLoop<'t> {
         }
     }
 
+    /// MCP is shared across sessions, so the focused session's reader answers
+    /// for every one of them.
+    fn handle_mcp_request(&mut self, req: McpRequest) -> UiReply {
+        match req {
+            McpRequest::Servers => {
+                let snapshot = self.sessions[self.focused].handles.mcp_reader().load_full();
+                let servers: Vec<_> = snapshot
+                    .infos
+                    .iter()
+                    .map(|info| {
+                        json!({
+                            "name": info.name,
+                            "status": info.status.name(),
+                            "needs_auth": matches!(info.status, McpServerStatus::NeedsAuth { .. }),
+                        })
+                    })
+                    .collect();
+                Ok(json!(servers))
+            }
+        }
+    }
+
     fn handle_task_request(&mut self, req: TaskRequest) -> UiReply {
         match req {
             TaskRequest::List => Ok(json!(self.focused_app().tasks())),
@@ -2208,6 +2242,57 @@ impl<'t> EventLoop<'t> {
             .flash(FORKED_MSG.replace("{key}", key::SESSIONS.label));
     }
 
+    /// `/mcp auth <server>`: the only place an MCP OAuth login starts on its
+    /// own. Startup leaves a `NeedsAuth` server sitting there, so nothing
+    /// opens a browser the user did not ask for.
+    fn start_mcp_auth(&mut self, idx: usize, server: String) {
+        let Some(ref handle) = self.ctx.mcp_handle else {
+            return;
+        };
+        let snapshot = handle.reader().load();
+        let target = match auth_target(&snapshot.infos, &server) {
+            Ok(target) => target,
+            Err(msg) => {
+                self.sessions[idx].app.flash(msg);
+                return;
+            }
+        };
+        let handle = handle.clone();
+        let warn_tx = self.warn_tx.clone();
+        let started = MCP_AUTH_STARTED.replace("{server}", &server);
+        self.sessions[idx].app.flash(started);
+        tokio::spawn(async move {
+            let storage = match maki_storage::StateDir::resolve() {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = MCP_AUTH_STORAGE_ERR
+                        .replace("{server}", &server)
+                        .replace("{error}", &e.to_string());
+                    let _ = warn_tx.send(msg);
+                    return;
+                }
+            };
+            if let Err(e) = mcp::oauth::authenticate(
+                &server,
+                &target.url,
+                target.www_auth.as_deref(),
+                &storage,
+                mcp::oauth::Interaction::Background,
+                target.oauth,
+                target.ca_file.as_deref(),
+            )
+            .await
+            {
+                let _ = warn_tx.send(format!("MCP '{server}': {e}"));
+                return;
+            }
+            handle.send(McpCommand::Reconnect {
+                server: server.clone(),
+            });
+            let _ = warn_tx.send(MCP_AUTH_DONE.replace("{server}", &server));
+        });
+    }
+
     fn handle_action(&mut self, idx: usize, action: Action) {
         match action {
             Action::SendMessage(input) => {
@@ -2261,6 +2346,7 @@ impl<'t> EventLoop<'t> {
                     enabled,
                 });
             }
+            Action::AuthMcp(server) => self.start_mcp_auth(idx, server),
             Action::ShellCommand {
                 id,
                 command,
@@ -2515,6 +2601,35 @@ fn scroll_delta(kind: MouseEventKind, lines: u32) -> i32 {
     } else {
         -(lines as i32)
     }
+}
+
+/// What an OAuth login for {server} needs, taken out of the snapshot so the
+/// lookup is testable without a live event loop.
+#[cfg_attr(test, derive(Debug))]
+struct McpAuthTarget {
+    url: String,
+    www_auth: Option<String>,
+    oauth: Option<OauthClientConfig>,
+    ca_file: Option<PathBuf>,
+}
+
+fn auth_target(infos: &[McpServerInfo], server: &str) -> Result<McpAuthTarget, String> {
+    let Some(info) = infos.iter().find(|i| i.name == server) else {
+        return Err(MCP_SERVER_UNKNOWN.replace("{server}", server));
+    };
+    let Some(url) = info.url.clone() else {
+        return Err(MCP_NOT_HTTP.replace("{server}", server));
+    };
+    let www_auth = match &info.status {
+        McpServerStatus::NeedsAuth { url } => url.clone(),
+        _ => None,
+    };
+    Ok(McpAuthTarget {
+        url,
+        www_auth,
+        oauth: info.oauth.clone(),
+        ca_file: info.ca_file.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -2788,5 +2903,67 @@ mod tests {
         let answer = session_opened(&mut opening).await.unwrap();
         assert_eq!(answer.opened.err().as_deref(), Some(OPEN_ERROR));
         assert!(opening.is_none());
+    }
+
+    mod mcp_auth {
+        use super::super::{MCP_NOT_HTTP, MCP_SERVER_UNKNOWN, auth_target};
+        use maki_agent::{McpServerInfo, McpServerStatus};
+        use std::path::PathBuf;
+
+        const SERVER: &str = "github";
+        const URL: &str = "https://mcp.example.com/mcp";
+        const WWW_AUTH: &str = "Bearer realm=\"mcp.example.com\"";
+
+        fn info(name: &str, url: Option<&str>, status: McpServerStatus) -> McpServerInfo {
+            McpServerInfo {
+                name: name.into(),
+                transport_kind: "http",
+                tool_count: 0,
+                prompt_count: 0,
+                status,
+                config_path: PathBuf::new(),
+                url: url.map(str::to_string),
+                oauth: None,
+                ca_file: None,
+            }
+        }
+
+        #[test]
+        fn needs_auth_server_yields_url_and_challenge() {
+            let infos = [info(
+                SERVER,
+                Some(URL),
+                McpServerStatus::NeedsAuth {
+                    url: Some(WWW_AUTH.into()),
+                },
+            )];
+            let target = auth_target(&infos, SERVER).unwrap();
+            assert_eq!(target.url, URL);
+            assert_eq!(target.www_auth.as_deref(), Some(WWW_AUTH));
+        }
+
+        #[test]
+        fn running_server_can_reauth_without_a_challenge() {
+            let infos = [info(SERVER, Some(URL), McpServerStatus::Running)];
+            let target = auth_target(&infos, SERVER).unwrap();
+            assert_eq!(target.url, URL);
+            assert_eq!(target.www_auth, None);
+        }
+
+        #[test]
+        fn unknown_server_and_stdio_servers_are_refused() {
+            let infos = [
+                info(SERVER, None, McpServerStatus::Running),
+                info("other", Some(URL), McpServerStatus::Running),
+            ];
+            assert_eq!(
+                auth_target(&infos, "missing").unwrap_err(),
+                MCP_SERVER_UNKNOWN.replace("{server}", "missing")
+            );
+            assert_eq!(
+                auth_target(&infos, SERVER).unwrap_err(),
+                MCP_NOT_HTTP.replace("{server}", SERVER)
+            );
+        }
     }
 }
