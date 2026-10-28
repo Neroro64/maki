@@ -157,7 +157,7 @@ pub mod key {
     pub const FILE_PICKER: Bind = ctrl_bind!('s');
     pub const OPEN_EDITOR: Bind = ctrl_bind!('o');
     pub const PLAN_TOGGLE: Bind = ctrl_bind!('t');
-    pub const MODEL_PICKER: Bind = ctrl_bind!('l');
+    pub const MODEL_PICKER: Bind = ctrl_bind!('m');
     pub const REFRESH: Bind = ctrl_bind!('r');
     pub const SUSPEND: Bind = ctrl_bind!('z');
     pub const DELETE: Bind = ctrl_bind!('d');

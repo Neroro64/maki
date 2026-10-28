@@ -19,7 +19,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+S` | File picker |
 | `Ctrl+O` | Open plan in editor |
 | `Ctrl+T` | Toggle plan panel |
-| `Ctrl+L` | Model picker |
+| `Ctrl+M` | Model picker |
 
 ## Editing
 

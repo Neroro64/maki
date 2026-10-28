@@ -11106,10 +11106,10 @@ fn run_builtin_model_picker_opens_and_refreshes() {
 }
 
 #[test]
-fn ctrl_l_opens_model_picker() {
+fn ctrl_m_opens_model_picker() {
     let mut app = test_app();
     let key = KeyEvent {
-        code: KeyCode::Char('l'),
+        code: KeyCode::Char('m'),
         modifiers: KeyModifiers::CONTROL,
         kind: crossterm::event::KeyEventKind::Press,
         state: crossterm::event::KeyEventState::NONE,
