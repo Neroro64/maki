@@ -80,7 +80,7 @@ pub mod key {
     pub const FILE_PICKER: Bind = ctrl_bind!("S");
     pub const OPEN_EDITOR: Bind = ctrl_bind!("O");
     pub const PLAN_TOGGLE: Bind = ctrl_bind!("T");
-    pub const MODEL_PICKER: Bind = ctrl_bind!("L");
+    pub const MODEL_PICKER: Bind = ctrl_bind!("M");
     pub const REFRESH: Bind = ctrl_bind!("R");
     pub const SUSPEND: Bind = ctrl_bind!("Z");
     pub const DELETE: Bind = ctrl_bind!("D");
