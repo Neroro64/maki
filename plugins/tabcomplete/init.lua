@@ -11,6 +11,7 @@
 
 local Events = require("tc.events")
 local Menu = require("tc.menu")
+local Mcp = require("tc.mcp")
 local Path = require("tc.path")
 local Skills = require("maki.skills")
 
@@ -24,13 +25,13 @@ maki.keymap.set("n", "<Tab>", function()
   if not st then
     return
   end
-  local _, token = Path.parse(st.text, st.cursor)
-  if not Path.is_path(token) then
+  local start, token = Path.parse(st.text, st.cursor)
+  if not Path.is_path(token) and not Mcp.is_auth_arg(st.text, start) then
     maki.ui.action("mode_toggle")
     return
   end
   Menu.refresh_later(st)
-end, { desc = "Complete a file path, else toggle mode" })
+end, { desc = "Complete a file path, a /skill: name or a /mcp auth server, else toggle mode" })
 
 maki.api.create_autocmd("InputChanged", {
   callback = function(ev)

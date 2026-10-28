@@ -194,7 +194,7 @@ pub async fn authenticate(
                     .map(|e| format!("failed to open browser: {e}"))
             };
             match cause {
-                Some(cause) => Err(format!("{cause}; run 'maki mcp auth {server_name}'")),
+                Some(cause) => Err(format!("{cause}; run '/mcp auth {server_name}'")),
                 None => future::race(wait_callback, auth_timeout()).await,
             }
         }

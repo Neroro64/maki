@@ -139,6 +139,7 @@ The rules:
 | [`maki.json.SchemaValidator`](#maki-json-SchemaValidator) | A compiled JSON Schema validator. |
 | [`maki.keymap`](#maki-keymap) | Key mappings, modeled after `vim.keymap`. |
 | [`maki.log`](#maki-log) | Structured logging for plugins. |
+| [`maki.mcp`](#maki-mcp) | Read-only views over the MCP servers this session runs with. |
 | [`maki.model`](#maki-model) | The model behind the focused session. |
 | [`maki.net`](#maki-net) | HTTP and plain TCP for plugins. |
 | [`maki.net.Conn`](#maki-net-Conn) | A TCP connection opened by `maki.net.connect`. |
@@ -4597,6 +4598,38 @@ Emit an ERROR-level log message. Use for failures that need attention.
 
 ```lua
 maki.log.error("failed to connect to API")
+```
+
+
+## maki.mcp {#maki-mcp}
+
+Read-only views over the MCP servers this session runs with.
+Without an interactive UI every function returns
+`nil, "no interactive UI attached"`.
+
+---
+
+### `maki.mcp.servers()` {#maki-mcp-servers}
+
+```lua
+maki.mcp.servers()
+```
+
+The configured MCP servers, in the `/mcp` picker order. Each row carries
+`name`, `status` (`"connecting"`, `"running"`, `"disabled"`, `"failed"`,
+`"needs_auth"`) and `needs_auth`. A server that needs OAuth stays in
+`"needs_auth"` until you run `/mcp auth <server>`; nothing opens a browser
+on its own.
+
+**Returns:** (`table?`, `string?`) Array of server tables, or `(nil, err)` when no
+  interactive UI is attached.
+
+**Example:**
+
+```lua
+for _, s in ipairs(maki.mcp.servers() or {}) do
+  print(s.name, s.status)
+end
 ```
 
 

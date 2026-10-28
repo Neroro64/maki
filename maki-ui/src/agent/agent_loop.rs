@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use maki_agent::agent::{self, AgentHooks};
-use maki_agent::mcp::config::McpServerStatus;
 use maki_agent::mcp::{McpHandle, McpSession};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::prompt::ResolvedPrompts;
@@ -12,8 +11,8 @@ use maki_agent::template::Vars;
 use maki_agent::tools::{RequestTools, ToolAudience, ToolRegistry};
 use maki_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, AgentSeed, CancelMap,
-    CancelToken, DoneReason, Envelope, EventSender, History, Instructions, McpCommand, PromptRole,
-    RunContext, RunContextBuilder, RunLedger, SessionMailbox, SharedMessages, ToolOutputLines,
+    CancelToken, DoneReason, Envelope, EventSender, History, Instructions, PromptRole, RunContext,
+    RunContextBuilder, RunLedger, SessionMailbox, SharedMessages, ToolOutputLines,
 };
 use maki_config::ModelPolicy;
 use maki_lua::EventHandle;
@@ -199,11 +198,12 @@ impl AgentLoop {
 
         if let Some(ref mcp) = self.seed.mcp {
             // The queue is drained right after this, and a prompt typed during
-            // startup must still carry the MCP tools.
+            // startup must still carry the MCP tools. A server that needs
+            // OAuth stays in `NeedsAuth`: the login browser only opens on an
+            // explicit `/mcp auth <server>`.
             if teardown.race(mcp.ready()).await.is_err() {
                 return false;
             }
-            spawn_oauth_for_needs_auth(mcp);
         }
         !teardown.is_cancelled()
     }
@@ -374,51 +374,5 @@ impl AgentLoop {
         error!(error = %error, "agent error");
         let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
         let _ = event_tx.send(AgentEvent::error(&error));
-    }
-}
-
-fn spawn_oauth_for_needs_auth(handle: &McpHandle) {
-    let snapshot = handle.reader().load().clone();
-    for info in snapshot.infos.iter() {
-        let McpServerStatus::NeedsAuth { ref url } = info.status else {
-            continue;
-        };
-        let Some(ref server_url) = info.url else {
-            continue;
-        };
-        let handle = handle.clone();
-        let server_name = info.name.clone();
-        let server_url = server_url.clone();
-        let www_auth = url.clone();
-        let oauth = info.oauth.clone();
-        let ca_file = info.ca_file.clone();
-        smol::spawn(async move {
-            let storage = match maki_storage::StateDir::resolve() {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(server = %server_name, error = %e, "cannot resolve storage for OAuth");
-                    return;
-                }
-            };
-            if let Err(e) = maki_agent::mcp::oauth::authenticate(
-                &server_name,
-                &server_url,
-                www_auth.as_deref(),
-                &storage,
-                maki_agent::mcp::oauth::Interaction::Background,
-                oauth,
-                ca_file.as_deref(),
-            )
-            .await
-            {
-                tracing::warn!(server = %server_name, error = %e, "background OAuth failed");
-                return;
-            }
-            handle.send(McpCommand::Reconnect {
-                server: server_name.clone(),
-            });
-            tracing::info!(server = %server_name, "MCP server authenticated via OAuth");
-        })
-        .detach();
     }
 }

@@ -153,6 +153,7 @@ const INPUT_CHANGED_UNSENT: &str = "The input changed while you typed. Press Ent
 pub(crate) const HELD_KEYS_ABANDONED: &str = "Dropped keys typed behind a plugin.";
 const IMPLEMENT_MSG_PREFIX: &str = "Implement the plan";
 const IMPLEMENT_PARALLEL_HINT: &str = "Use batch+task to parallelize, assign each subagent a separate module and restrict its tests to that module to avoid interference.";
+const MCP_AUTH_USAGE: &str = "usage: /mcp auth <server> (Tab completes the name)";
 
 const MISSING_TOOL_COMPLETION: &str = "Tool did not report completion before the turn ended";
 const NOTIFICATION_PREVIEW_CHARS: usize = 200;
@@ -2698,10 +2699,7 @@ impl App {
                 self.theme_picker.open();
                 vec![]
             }
-            "/mcp" => {
-                self.mcp_picker.open();
-                vec![]
-            }
+            "/mcp" => self.cmd_mcp(&cmd.args),
             "/login" => {
                 self.login_picker.open(self.storage.clone());
                 vec![]
@@ -2874,6 +2872,21 @@ impl App {
             text: cmd.render(args),
             images: Vec::new(),
         })
+    }
+
+    fn cmd_mcp(&mut self, args: &str) -> Vec<Action> {
+        if args.is_empty() {
+            self.mcp_picker.open();
+            return vec![];
+        }
+        let mut words = args.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("auth"), Some(server)) => vec![Action::AuthMcp(server.to_owned())],
+            _ => {
+                self.flash(MCP_AUTH_USAGE.to_owned());
+                vec![]
+            }
+        }
     }
 
     fn cmd_cd(&mut self, args: &str) -> Vec<Action> {

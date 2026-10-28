@@ -527,6 +527,11 @@ pub enum TaskRequest {
     Stop { id: String, session: String },
 }
 
+pub enum McpRequest {
+    /// The configured servers with their status, for completion and pickers.
+    Servers,
+}
+
 pub enum ModelRequest {
     Get,
     Available,
@@ -817,6 +822,10 @@ pub enum UiAction {
     },
     Task {
         req: TaskRequest,
+        reply_tx: flume::Sender<UiReply>,
+    },
+    Mcp {
+        req: McpRequest,
         reply_tx: flume::Sender<UiReply>,
     },
     WinSaveView {

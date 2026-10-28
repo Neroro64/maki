@@ -6843,7 +6843,10 @@ fn keymap_callback_recv_loop_consumes_a_claimed_key() {
             Err(_) => panic!("recv loop starved after its keymap callback returned"),
         }
     };
-    assert_eq!(flash, "got:<Tab>", "the recv loop did not consume the claimed key");
+    assert_eq!(
+        flash, "got:<Tab>",
+        "the recv loop did not consume the claimed key"
+    );
 }
 
 /// read tool requires offset and limit; missing fields should fail schema validation.

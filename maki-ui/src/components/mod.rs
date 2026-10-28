@@ -237,6 +237,7 @@ pub enum Action {
     RefreshUsage,
     Compact(Option<String>),
     ToggleMcp(String, bool),
+    AuthMcp(String),
     OpenEditor(PathBuf),
     EditInputInEditor,
     Btw(String),

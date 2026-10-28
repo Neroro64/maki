@@ -5356,6 +5356,24 @@ fn mcp_toggle_dispatches_action() {
     ));
 }
 
+#[test_case("/mcp auth github", Some("github") ; "auth_names_the_server")]
+#[test_case("/mcp auth", None ; "auth_without_a_server_is_usage")]
+#[test_case("/mcp wrong github", None ; "another_subcommand_is_usage")]
+fn mcp_auth_command(cmdline: &str, expected: Option<&str>) {
+    let mut app = test_app();
+    let actions = app.execute_command(cmd(cmdline), 0);
+    match expected {
+        Some(server) => assert!(matches!(
+            &actions[..],
+            [Action::AuthMcp(name)] if name == server
+        )),
+        None => {
+            assert!(actions.is_empty());
+            assert_eq!(app.status_bar.flash_text(), Some(MCP_AUTH_USAGE));
+        }
+    }
+}
+
 #[test_case(
     |app: &mut App| { app.state.mode = Mode::Plan; app.plan_form.on_plan_ready(); },
     ""

@@ -22,7 +22,7 @@ Type `/` in the input box to open the command palette.
 | `/queue` | Remove items from queue |
 | `/model` | Switch model |
 | `/theme` | Switch color theme |
-| `/mcp` | Configure MCP servers |
+| `/mcp` | MCP servers; `auth <server>` starts an OAuth login |
 | `/login` | Authenticate with an LLM provider |
 | `/cd` | Change working directory |
 | `/btw` | Ask a quick question (no tools, no history pollution) |

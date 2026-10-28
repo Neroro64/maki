@@ -40,7 +40,7 @@ fn build_entries(infos: &[McpServerInfo]) -> (Vec<McpEntry>, Vec<bool>) {
                 }
                 McpServerStatus::NeedsAuth { .. } => {
                     format!(
-                        "{} \u{00b7} needs auth \u{00b7} run 'maki mcp auth {}'",
+                        "{} \u{00b7} needs auth \u{00b7} /mcp auth {}",
                         info.transport_kind, info.name
                     )
                 }
@@ -237,5 +237,26 @@ mod tests {
         );
         p.open();
         assert!(p.is_open());
+    }
+
+    #[test]
+    fn needs_auth_detail_points_at_the_auth_command() {
+        let infos = [McpServerInfo {
+            name: "github".into(),
+            transport_kind: "http",
+            tool_count: 0,
+            prompt_count: 0,
+            status: McpServerStatus::NeedsAuth { url: None },
+            config_path: PathBuf::new(),
+            url: Some("https://mcp.example.com/mcp".into()),
+            oauth: None,
+            ca_file: None,
+        }];
+        let (entries, enabled) = build_entries(&infos);
+        assert_eq!(
+            entries[0].detail_text,
+            "http \u{00b7} needs auth \u{00b7} /mcp auth github"
+        );
+        assert!(!enabled[0], "a server waiting for auth is not active");
     }
 }

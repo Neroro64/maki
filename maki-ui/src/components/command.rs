@@ -136,8 +136,8 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "/mcp",
-        description: "Configure MCP servers",
-        max_args: 0,
+        description: "MCP servers; `auth <server>` starts an OAuth login",
+        max_args: 2,
         bang: false,
         plugin_access: PluginAccess::Open,
     },

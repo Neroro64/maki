@@ -138,6 +138,9 @@ declare maki: {
     warn: @checked (msg: string) -> (),
     error: @checked (msg: string) -> (),
   },
+  mcp: {
+    servers: @checked () -> (any, string?),
+  },
   model: {
     get: @checked () -> (any, string?),
     available: @checked () -> (any, string?),

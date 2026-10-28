@@ -3215,14 +3215,16 @@ mod bundled_manifests {
     /// The built-ins `maki.ui.action` names in {source}, with the name lua
     /// spelled, so a drift report can point at the call.
     fn builtin_actions(source: &str) -> impl Iterator<Item = (&str, BuiltinAction)> {
-        source.match_indices(UI_ACTION_CALL).filter_map(|(start, _)| {
-            let rest = &source[start + UI_ACTION_CALL.len()..];
-            let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-            let name = &rest[1..];
-            let end = name.find(quote)?;
-            let builtin = name[..end].parse::<BuiltinAction>().ok()?;
-            Some((&name[..end], builtin))
-        })
+        source
+            .match_indices(UI_ACTION_CALL)
+            .filter_map(|(start, _)| {
+                let rest = &source[start + UI_ACTION_CALL.len()..];
+                let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+                let name = &rest[1..];
+                let end = name.find(quote)?;
+                let builtin = name[..end].parse::<BuiltinAction>().ok()?;
+                Some((&name[..end], builtin))
+            })
     }
 
     /// A `maki.ui.action` call naming a built-in that changes the input.

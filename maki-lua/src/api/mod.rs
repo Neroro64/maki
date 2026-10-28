@@ -13,6 +13,7 @@ pub(crate) mod interpreter;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
+pub(crate) mod mcp;
 pub(crate) mod model;
 pub(crate) mod net;
 pub(crate) mod options;
@@ -128,6 +129,7 @@ pub(crate) fn create_maki_global(
         "task",
         task::create_task_table(lua, ui_action_tx.clone(), permissions)?,
     )?;
+    maki.set("mcp", mcp::create_mcp_table(lua, ui_action_tx.clone())?)?;
     maki.set(
         "ui",
         ui::create_ui_table(

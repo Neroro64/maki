@@ -5,6 +5,7 @@
 
 local ListPicker = require("maki.list_picker")
 local Skills = require("maki.skills")
+local Mcp = require("tc.mcp")
 local Path = require("tc.path")
 
 local M = {}
@@ -196,9 +197,10 @@ local function ensure_popup()
   read_keys(popup)
 end
 
--- Lists the directory the token names, or the skills a `/skill:` token names,
--- and paints the rows. A caret that has left the token (no longer a path or a
--- skill mention) takes the popup down: the rows on screen answer a token the
+-- Lists the directory the token names, the skills a `/skill:` token names, or
+-- the servers a `/mcp auth` token names, and paints the rows. A caret that
+-- has left the token (no longer a path, a skill mention or a command
+-- argument) takes the popup down: the rows on screen answer a token the
 -- user is no longer typing.
 function M.refresh(st)
   local start, token = Path.parse(st.text, st.cursor)
@@ -206,6 +208,8 @@ function M.refresh(st)
   local skill_prefix = Path.skill_prefix(token)
   if skill_prefix then
     rows = Skills.rows(skill_prefix, opts.max_items)
+  elseif Mcp.is_auth_arg(st.text, start) then
+    rows = Mcp.rows(token, opts.max_items)
   elseif Path.is_path(token) then
     local root = tree_of(st.session_id)
     if not root then
