@@ -36,6 +36,7 @@ Type `/` in the input box to open the command palette.
 | `/packdel` | Remove undeclared packages (++all, or a name) |
 | `/memory` | View, edit, and delete memory files |
 | `/rename` | Rename the current session |
+| `/review` | Review changes vs HEAD, comment on diff lines, send fixes to maki |
 | `/sessions` | Browse and switch sessions |
 | `/skills` | Browse skills, view details, and disable them |
 | `/tasks` | Browse and search tasks |
@@ -123,6 +124,7 @@ Aliasing adds a name, so both stay in the palette. Any command works as a target
 
 - Needs `fs_read`, `fs_write`: `/memory`, `/skills`.
 - Needs `fs_read`, `fs_write`, `net`, `run`, `env`, `agent`, `session_read`, `session_write`, `session_settings`: `/tasks`.
+- Needs `run`, `session_write`: `/review`.
 - Needs `agent`: `/btw`.
 - Needs `agent`, `session_write`: `/compact`, custom commands, MCP prompts.
 - Needs `session_write`: `/new`, `/fork`, `/checkpoint`.

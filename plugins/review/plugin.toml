@@ -1,0 +1,3 @@
+[permissions]
+run = true
+session_write = true

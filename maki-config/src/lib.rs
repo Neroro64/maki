@@ -112,6 +112,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "read",
     "regolo",
     "requesty",
+    "review",
     "sessions",
     "skill",
     "synthetic",
