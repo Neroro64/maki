@@ -53,6 +53,8 @@ declare maki: {
   },
   browser: {
     open: @checked (opts: any) -> (any, string?),
+    viewport: @checked (opts: any) -> (boolean?, string?),
+    preview_status: @checked (opts: any) -> (number?, string?),
     snapshot: @checked (opts: any) -> (any, string?),
     click: @checked (opts: any) -> (boolean, string?),
     type: @checked (opts: any) -> (boolean, string?),
@@ -176,6 +178,8 @@ declare maki: {
   },
   session: {
     list: @checked () -> (any, string?),
+    index: @checked (opts: any) -> (string?, string?),
+    recall: @checked (opts: any) -> (string?, string?),
     live: @checked () -> (any, string?),
     current: @checked () -> (string?, string?),
     read: @checked (opts: any) -> (any, string?),

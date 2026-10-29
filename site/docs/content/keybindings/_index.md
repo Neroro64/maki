@@ -8,6 +8,7 @@ group = "Reference"
 # Keybindings
 
 On macOS, some bindings use Option or Fn keys instead (run `/help` for exact keybindings).
+On Windows Terminal, Maki enables Win32 input mode so `Ctrl+M` opens the model picker while `Enter` still submits. Multiline paste stays bracketed.
 
 ## General
 
@@ -106,6 +107,7 @@ Built-in plugins register these themselves, and your own plugins can add more wi
 | `Ctrl+P` | Browse sessions |
 | `Ctrl+X` | Open tasks |
 | `Alt+T` | Thinking effort |
+| `Alt+G` | Toggle design mode |
 
 ## Context Inheritance
 

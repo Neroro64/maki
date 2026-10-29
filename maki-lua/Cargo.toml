@@ -19,6 +19,7 @@ base64 = { workspace = true }
 image = { workspace = true, features = ["jpeg", "gif", "webp", "bmp"] }
 chromiumoxide = { workspace = true }
 crossterm = { workspace = true }
+tempfile = { workspace = true }
 enigo = { workspace = true }
 maki-agent = { workspace = true }
 maki-config = { workspace = true }
@@ -96,6 +97,9 @@ tree-sitter-make = { workspace = true }
 ashpd = { workspace = true }
 rustix = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 base64 = { workspace = true }
 criterion = { workspace = true }
@@ -105,7 +109,6 @@ jiff = { workspace = true }
 maki-agent = { workspace = true }
 maki-lua = { workspace = true, features = ["test-support"] }
 maki-providers = { workspace = true, features = ["test-support"] }
-tempfile = { workspace = true }
 test-case = { workspace = true }
 
 [[bench]]

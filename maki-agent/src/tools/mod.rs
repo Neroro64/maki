@@ -52,6 +52,13 @@ const COMPACT_DURATION: SpanPrinter = SpanPrinter::new()
     .spacing(Spacing::None);
 /// What `maki.task` calls the session's own chat.
 pub const MAIN_TASK_ID: &str = "main";
+const ADDITIONAL_BUILTIN_TOOLS: &[&str] = &[
+    "design_preview",
+    "design_preview_stop",
+    "design_viewports",
+    "design_note",
+    "session_read",
+];
 
 /// Who made a tool call. A resumed session rebuilds its state from the `ToolUse`
 /// blocks in history, and those hold the model's own calls only, so a nested
@@ -522,7 +529,9 @@ pub fn truncate_output(text: String, max_lines: usize, max_bytes: usize) -> Stri
 pub fn is_builtin_tool(name: &str) -> bool {
     let bundled_tool = maki_config::DEFAULT_BUILTINS.contains(&name)
         && !maki_config::PROVIDER_BUILTINS.contains(&name);
-    bundled_tool || maki_config::EDIT_SUB_TOOLS.contains(&name)
+    bundled_tool
+        || maki_config::EDIT_SUB_TOOLS.contains(&name)
+        || ADDITIONAL_BUILTIN_TOOLS.contains(&name)
 }
 
 pub fn all_builtin_tool_names() -> Vec<&'static str> {
@@ -530,6 +539,7 @@ pub fn all_builtin_tool_names() -> Vec<&'static str> {
         .iter()
         .filter(|name| !maki_config::PROVIDER_BUILTINS.contains(name))
         .chain(maki_config::EDIT_SUB_TOOLS.iter())
+        .chain(ADDITIONAL_BUILTIN_TOOLS.iter())
         .copied()
         .collect()
 }

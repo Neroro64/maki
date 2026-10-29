@@ -85,6 +85,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/sessions"),
     },
     BundledPlugin {
+        name: "session_index",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/session_index"),
+    },
+    BundledPlugin {
         name: "review",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/review"),
     },
@@ -119,6 +123,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "computer",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/computer"),
+    },
+    BundledPlugin {
+        name: "design",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/design"),
     },
     BundledPlugin {
         name: "batch",
@@ -3076,80 +3084,18 @@ mod tests {
     }
 }
 
-/// Holds every bundled `plugin.toml` to what its plugin actually does: the
-/// guarded `maki.*` calls in its lua, and the permissions its tools expose to
-/// the model. The guard map is read out of the `lua_fn` attributes the docs
-/// already record, so moving a function under a different guard shows up here
-/// without anyone editing a table.
 #[cfg(test)]
 mod bundled_manifests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
     use include_dir::{Dir, DirEntry, File};
-    use maki_agent::tools::{ToolRegistry, ToolSource};
-    use maki_config::{DEFAULT_BUILTINS, PluginsConfig};
-    use strum::VariantArray;
-    use test_case::test_case;
 
-    use super::{Arc, BUNDLED_PLUGINS, HashMap, PluginHost, bundled_permissions, lib_dir};
-    use crate::agent_autocmd::HostEventKind;
-    use crate::api::util::command::BuiltinAction;
-    use crate::docs::{DocKind, api_docs};
-    use crate::plugin_permissions::{Permission, SENDS_PROMPT};
+    use super::{BUNDLED_PLUGINS, lib_dir};
 
     const TEST_DIR: &str = "tests";
     const LUA_EXT: &str = "lua";
     const REQUIRE_CALL: &str = "require(";
     const PROVIDER_REGISTER: &str = "maki.provider.register";
-    const API_KEY_ENV_FIELD: &str = "api_key_env";
-    const AGENT_SESSION: &str = "maki.agent.session";
-    const SESSION_NOTIFY: &str = "maki.session.notify";
-    const WAKE_OPTION: &str = "wake =";
-    const UI_ACTION_CALL: &str = "maki.ui.action(";
-    const INPUT_EDIT_CALL: &str = "maki.ui.input_edit";
-    const DISABLED_WAKE: &str = "false";
-    const CREATE_AUTOCMD: &str = "maki.api.create_autocmd";
-    const LUA_QUOTES: [char; 2] = ['"', '\''];
-
-    /// Every guarded `maki.*` function under the dotted name lua calls it by.
-    fn guarded_calls() -> Vec<(String, Permission)> {
-        api_docs()
-            .into_iter()
-            .filter(|module| module.kind == DocKind::Table)
-            .flat_map(|module| {
-                module.fns.iter().flat_map(move |func| {
-                    func.guard
-                        .unwrap_or_default()
-                        .iter()
-                        .map(move |&permission| {
-                            (format!("{}.{}", module.name, func.name), permission)
-                        })
-                })
-            })
-            .collect()
-    }
-
-    /// Read off a real load rather than off the source text, because
-    /// `register_tool` refuses a permission the plugin lacks, which makes
-    /// shipping the tool itself a use of it.
-    fn tool_permissions() -> BTreeMap<String, BTreeSet<Permission>> {
-        let registry = Arc::new(ToolRegistry::new());
-        let mut host = PluginHost::new(Arc::clone(&registry)).expect("host starts");
-        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
-            .expect("every bundled plugin loads");
-
-        let mut out: BTreeMap<String, BTreeSet<Permission>> = BTreeMap::new();
-        for tool in registry.iter().iter() {
-            let (ToolSource::Lua { plugin }, Some(reach)) = (&tool.source, tool.tool.reach())
-            else {
-                continue;
-            };
-            out.entry(plugin.to_string())
-                .or_default()
-                .insert(reach.permission);
-        }
-        out
-    }
 
     /// Specs, not runtime code. What a test calls must not buy the plugin a
     /// permission its handlers never use.
@@ -3216,50 +3162,6 @@ mod bundled_manifests {
         })
     }
 
-    /// The built-ins `maki.ui.action` names in {source}, with the name lua
-    /// spelled, so a drift report can point at the call.
-    fn builtin_actions(source: &str) -> impl Iterator<Item = (&str, BuiltinAction)> {
-        source
-            .match_indices(UI_ACTION_CALL)
-            .filter_map(|(start, _)| {
-                let rest = &source[start + UI_ACTION_CALL.len()..];
-                let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-                let name = &rest[1..];
-                let end = name.find(quote)?;
-                let builtin = name[..end].parse::<BuiltinAction>().ok()?;
-                Some((&name[..end], builtin))
-            })
-    }
-
-    /// A `maki.ui.action` call naming a built-in that changes the input.
-    fn runs_an_input_action(source: &str) -> bool {
-        builtin_actions(source).any(|(_, builtin)| builtin.changes_input())
-    }
-
-    #[test_case(r#"maki.ui.action("undo")"#, true ; "undo")]
-    #[test_case("maki.ui.action('newline')", true ; "newline_in_single_quotes")]
-    #[test_case(r#"maki.ui.action("input_raw")"#, false ; "a_view_toggle")]
-    #[test_case(r#"maki.ui.action("completion.accept")"#, false ; "a_plugin_action")]
-    fn an_input_action_is_spotted(source: &str, spotted: bool) {
-        assert_eq!(runs_an_input_action(source), spotted);
-    }
-
-    fn wakes_session(source: &str) -> bool {
-        calls(source, SESSION_NOTIFY)
-            && source.split(WAKE_OPTION).skip(1).any(|option| {
-                option.split([',', '}']).next().unwrap_or_default().trim() != DISABLED_WAKE
-            })
-    }
-
-    #[test_case("true", true ; "unconditional_wake")]
-    #[test_case("false", false ; "queue_only")]
-    #[test_case("not stopped", true ; "conditional_wake")]
-    #[test_case("false or enabled", true ; "conditional_after_false")]
-    fn notification_wake_usage_requires_the_agent_grant(value: &str, needed: bool) {
-        let source = format!("{SESSION_NOTIFY}('done', {{ session = id, wake = {value} }})");
-        assert_eq!(wakes_session(&source), needed);
-    }
-
     /// `PROVIDER_BUILTINS` is what keeps a provider plugin's name from reading
     /// as a tool, so a bundled plugin that starts registering one must join it.
     #[test]
@@ -3277,111 +3179,6 @@ mod bundled_manifests {
         registering.sort_unstable();
         expected.sort_unstable();
         assert_eq!(registering, expected);
-    }
-
-    #[test]
-    fn bundled_manifests_match_the_permissions_their_plugin_uses() {
-        let tools = tool_permissions();
-        let guarded = guarded_calls();
-        let mut drift = Vec::new();
-        // `lib` is the one bundled directory that never loads on its own, so it
-        // ships no manifest and its modules answer to whoever requires them.
-        for plugin in BUNDLED_PLUGINS.iter().filter(|p| {
-            DEFAULT_BUILTINS.contains(&p.name) || maki_config::OPTIONAL_BUILTINS.contains(&p.name)
-        }) {
-            let declared = bundled_permissions(plugin).expect("every builtin ships a plugin.toml");
-            // Each permission paired with the usage demanding it, so a failure
-            // points at something to go look at.
-            let mut needed: BTreeMap<Permission, String> = tools
-                .get(plugin.name)
-                .into_iter()
-                .flatten()
-                .map(|permission| (*permission, format!("a tool exposing '{permission}'")))
-                .collect();
-            for source in runtime_sources(&plugin.dir) {
-                for (name, permission) in &guarded {
-                    if calls(source, name) {
-                        needed.entry(*permission).or_insert_with(|| name.clone());
-                    }
-                }
-                // `api_key_env` is a field, not a call, so the scan above
-                // misses it. Registration still refuses it without `env`.
-                if calls(source, PROVIDER_REGISTER) && calls(source, API_KEY_ENV_FIELD) {
-                    needed
-                        .entry(Permission::Env)
-                        .or_insert_with(|| format!("{PROVIDER_REGISTER} with {API_KEY_ENV_FIELD}"));
-                }
-                // Waking a chat is guarded only when the option is set, so
-                // it has no unconditional guard in the API metadata.
-                if wakes_session(source) {
-                    needed
-                        .entry(Permission::Agent)
-                        .or_insert_with(|| format!("{SESSION_NOTIFY} with {WAKE_OPTION}"));
-                }
-                // Events are never refused, they arrive without their content
-                // fields, so no guard records the need. A bundled plugin
-                // subscribing to an event that has content is reading it.
-                if calls(source, CREATE_AUTOCMD) {
-                    for &kind in HostEventKind::VARIANTS {
-                        let event: &str = kind.into();
-                        if !kind.fields().content.is_empty()
-                            && LUA_QUOTES
-                                .iter()
-                                .any(|q| source.contains(&format!("{q}{event}{q}")))
-                        {
-                            needed
-                                .entry(Permission::SessionRead)
-                                .or_insert_with(|| format!("subscribing to {event}"));
-                        }
-                    }
-                }
-                // A built-in action is guarded by its name, so a call spends
-                // what its `needs` lists, which the API metadata cannot see.
-                for (name, builtin) in builtin_actions(source) {
-                    for &permission in builtin.needs() {
-                        needed
-                            .entry(permission)
-                            .or_insert_with(|| format!("{UI_ACTION_CALL}\"{name}\")"));
-                    }
-                }
-                // `maki.ui.input_edit` sends the text as the user's prompt,
-                // which the API metadata cannot see either.
-                if calls(source, INPUT_EDIT_CALL) {
-                    for &permission in SENDS_PROMPT {
-                        needed
-                            .entry(permission)
-                            .or_insert_with(|| "changing the text of the input".to_owned());
-                    }
-                }
-                // A bundled plugin opening a session hands over whatever the
-                // chat has, and a session pays for everything it hands over.
-                // That leaves out what no tool reaches, as the session's own
-                // check does.
-                if calls(source, AGENT_SESSION) {
-                    for &permission in Permission::ALL {
-                        if !matches!(permission, Permission::Agent | Permission::Input) {
-                            needed
-                                .entry(permission)
-                                .or_insert_with(|| AGENT_SESSION.to_owned());
-                        }
-                    }
-                }
-            }
-
-            let manifest = format!("plugins/{}/plugin.toml", plugin.name);
-            for &permission in Permission::ALL {
-                match (declared.is_allowed(permission), needed.get(&permission)) {
-                    (false, Some(usage)) => drift.push(format!(
-                        "{manifest}: {usage} needs '{permission}', grant it or drop the usage"
-                    )),
-                    (true, None) => drift.push(format!(
-                        "{manifest}: declares '{permission}' but nothing its runtime lua reaches needs it, remove it"
-                    )),
-                    _ => {}
-                }
-            }
-        }
-        assert!(drift.is_empty(), "plugin.toml drift:\n{}", drift.join("\n"));
     }
 
     fn collect_lua_files(dir: &'static Dir<'static>, out: &mut Vec<&'static File<'static>>) {

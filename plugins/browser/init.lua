@@ -12,6 +12,7 @@ local ACTIONS = {
   screenshot = true,
   eval = true,
   status = true,
+  viewport = true,
   close = true,
 }
 
@@ -26,6 +27,8 @@ local function summarize(input)
     return "press " .. (input.key or "")
   elseif input.action == "scroll" then
     return "scroll " .. tostring(input.x or 0) .. "," .. tostring(input.y or 0)
+  elseif input.action == "viewport" then
+    return "viewport " .. tostring(input.width) .. "x" .. tostring(input.height)
   elseif input.action == "screenshot" then
     return "screenshot " .. (input.path or "")
   elseif input.action == "eval" then
@@ -48,22 +51,23 @@ end
 local description = [[Drive a Chrome browser over the DevTools protocol.
 
 Actions:
-- open: launch the browser (headless by default) and navigate to a URL.
+- open: launch the browser (headless by default) and navigate to a URL. Optional width/height set its CSS viewport before navigation.
 - snapshot: list interactive elements with indices; always snapshot before click/type.
 - click: click the element with the given index.
 - type: type text into an indexed element (focused first) or the focused one.
 - press: press a key like Enter, Escape, Tab.
 - scroll: scroll the page by x,y pixels.
 - screenshot: save a PNG of the page to a path; view it with view_image.
+- viewport: resize the current page with width/height in CSS pixels. Set mobile=true for mobile layout emulation. Re-snapshot after resizing.
 - eval: evaluate a JavaScript expression and return its JSON result.
 - status: report the current URL and title.
 - close: kill the browser process.
 
-The browser stays alive across calls for the whole session. Indices from a snapshot go stale after navigation — snapshot again.]]
+The browser stays alive across calls for the whole session, using its own temporary profile. Closing it waits for process exit and removes that profile. Indices from a snapshot go stale after navigation — snapshot again.]]
 
 maki.api.register_prompt_hint({
   slot = "tool_usage",
-  content = "- browser: snapshot first, then click/type by index; re-snapshot after navigation. Screenshots need view_image to inspect.",
+  content = "- browser: snapshot first, then click/type by index; re-snapshot after navigation or viewport changes. Set width/height when opening or use viewport to check responsive layouts. Screenshots are saved files; inspect them with view_image.",
 })
 
 maki.api.register_tool({
@@ -75,7 +79,7 @@ maki.api.register_tool({
     properties = {
       action = {
         type = "string",
-        description = "One of: open, snapshot, click, type, press, scroll, screenshot, eval, status, close",
+        description = "One of: open, snapshot, click, type, press, scroll, screenshot, viewport, eval, status, close",
         required = true,
       },
       url = { type = "string", description = "URL to open (action=open)" },
@@ -91,6 +95,19 @@ maki.api.register_tool({
       y = { type = "integer", description = "Vertical scroll pixels (action=scroll)" },
       source = { type = "string", description = "JavaScript expression (action=eval)" },
       path = { type = "string", description = "File to write the PNG to (action=screenshot)" },
+      width = {
+        type = "integer",
+        minimum = 1,
+        maximum = 16384,
+        description = "CSS viewport width, paired with height (action=open/viewport)",
+      },
+      height = {
+        type = "integer",
+        minimum = 1,
+        maximum = 16384,
+        description = "CSS viewport height, paired with width (action=open/viewport)",
+      },
+      mobile = { type = "boolean", description = "Emulate mobile layout (default false, action=open/viewport)" },
     },
   },
   permission = "net",
@@ -123,7 +140,7 @@ maki.api.register_tool({
     local action = input.action
     if not action or not ACTIONS[action] then
       return {
-        llm_output = "error: action must be one of open, snapshot, click, type, press, scroll, screenshot, eval, status, close",
+        llm_output = "error: action must be one of open, snapshot, click, type, press, scroll, screenshot, viewport, eval, status, close",
         is_error = true,
       }
     end
@@ -144,6 +161,9 @@ maki.api.register_tool({
       y = input.y,
       source = input.source,
       path = input.path,
+      width = input.width,
+      height = input.height,
+      mobile = input.mobile,
     }
     local r, err = maki.browser[action](opts)
     if not r and err then

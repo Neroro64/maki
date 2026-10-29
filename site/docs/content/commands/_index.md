@@ -34,6 +34,9 @@ Type `/` in the input box to open the command palette.
 | `/trust` | Trust this folder and load its shared project config |
 | `/packupdate` | Update packages (++lockfile, ! skips review) |
 | `/packdel` | Remove undeclared packages (++all, or a name) |
+| `/design` | Toggle the native UI/UX design workflow. Accepts on, off or toggle. |
+| `/design-note` | Append human design feedback and notify the current session. |
+| `/design-view` | Show the preview URL, saved screenshots, viewport matrix, notes and dev-server log. |
 | `/memory` | View, edit, and delete memory files |
 | `/rename` | Rename the current session |
 | `/review` | Review changes vs HEAD, comment on diff lines, send fixes to maki |
@@ -45,6 +48,16 @@ Type `/` in the input box to open the command palette.
 ## Sessions
 
 Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Maki flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete. Deleting the current session starts a fresh one and keeps the picker open.
+
+To find earlier conversations without resuming them, ask the agent to use `session_index` and `session_read`. Search defaults to this project. `scope = "all"` includes other projects. Results exclude thinking and tool-result bodies. See [Tools](/docs/tools/#session_index).
+
+## Design
+
+`/design` or `Alt+G` toggles the design workflow. `/design on` and `/design off` set it explicitly. It preserves your identity and tone customizations and changes the workflow through a context update.
+
+For websites, the agent starts or reuses a local dev server, opens the native browser, and inspects screenshots at mobile, tablet and desktop sizes. Chrome, Chromium or Brave must be installed. No companion plugin, Node browser driver or Playwright installation is required. Native applications use the computer tool and fresh screenshots. Windows capture uses the native desktop backend, including multiple monitors.
+
+Use `/design-note <text>` to save feedback and `/design-view` to inspect the preview URL, notes, screenshots and log paths. Artifacts live under `.maki/design/`. The `design_preview_stop` tool stops only servers Maki started. Existing external servers are left running.
 
 ## Modes and toggles
 
@@ -124,7 +137,8 @@ Aliasing adds a name, so both stay in the palette. Any command works as a target
 
 - Needs `fs_read`, `fs_write`: `/memory`, `/skills`.
 - Needs `fs_read`, `fs_write`, `net`, `run`, `env`, `agent`, `session_read`, `session_write`, `session_settings`: `/tasks`.
-- Needs `run`, `session_write`: `/review`.
+- Needs `fs_read`, `fs_write`, `net`, `run`, `session_write`: `/design`, `/design-note`, `/design-view`.
+- Needs `run`, `agent`, `session_write`: `/review`.
 - Needs `agent`: `/btw`.
 - Needs `agent`, `session_write`: `/compact`, custom commands, MCP prompts.
 - Needs `session_write`: `/new`, `/fork`, `/checkpoint`.

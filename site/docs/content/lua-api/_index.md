@@ -2354,7 +2354,57 @@ Requires the `net` [plugin permission](#plugin-permissions).
     auto-discovered (MAKI_BROWSER_BIN env, then brave/chromium names on PATH).
   - `timeout` (`integer`) seconds to wait. Default 30.
 
+  - width, height (integer): CSS viewport size, both required together (1..=16384).
+
+  - `mobile` (`boolean`) emulate a mobile viewport. Default false.
+
 **Returns:** (`table`, `string?`) Pair: `{ url, title }` on success, `(nil, err)`.
+
+---
+
+### `maki.browser.viewport()` {#maki-browser-viewport}
+
+```lua
+maki.browser.viewport({opts})
+```
+
+Resize the current browser viewport without navigating.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Fields: session (string, required), width and height
+
+  (integer CSS pixels, required, 1..=16384), mobile (boolean, default false),
+
+
+  timeout (integer seconds, default 30).
+
+
+**Returns:** (`boolean?`, `string?`) true, or nil and an error.
+
+---
+
+### `maki.browser.preview_status()` {#maki-browser-preview_status}
+
+```lua
+maki.browser.preview_status({opts})
+```
+
+Probe a local preview server without launching Chrome or using an external program.
+
+Only plain HTTP on localhost or a loopback IP is accepted. Localhost is
+pinned to 127.0.0.1, with ::1 as fallback. No proxy, redirects, TLS upgrade or private-host
+allowlist is used. A returned status proves an HTTP response, not page health.
+
+Requires the `net` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Fields: url (string, required), timeout (integer seconds, default 2).
+
+**Returns:** (`integer?`, `string?`) HTTP status, or nil and an error.
 
 ---
 
@@ -2534,7 +2584,7 @@ Requires the `net` [plugin permission](#plugin-permissions).
 maki.browser.close({opts})
 ```
 
-Close the session's browser and kill the process.
+Close the session's browser, await process exit, and remove its isolated profile.
 
 Requires the `net` [plugin permission](#plugin-permissions).
 
@@ -2550,8 +2600,8 @@ Requires the `net` [plugin permission](#plugin-permissions).
 
 Desktop control: `maki.computer.screenshot` captures the screen,
 `mouse`/`keyboard` drive pointer and keys, `position`/`display` report
-state, `clipboard` reads and writes the system clipboard. Needs a
-display server; every call fails cleanly without one.
+state, `clipboard` reads and writes the system clipboard. Requires an
+interactive desktop; calls fail cleanly when its backend is unavailable.
 
 ---
 
@@ -2561,7 +2611,7 @@ display server; every call fails cleanly without one.
 maki.computer.screenshot({opts})
 ```
 
-Capture the X11 root window (the whole desktop) to a PNG file.
+Capture the desktop to PNG: Windows virtual desktop, X11 root, or Unix portal.
 
 Requires the `run` [plugin permission](#plugin-permissions).
 
@@ -2571,7 +2621,7 @@ Requires the `run` [plugin permission](#plugin-permissions).
   - `path` (`string`) file to write. Default: a timestamped file under the
     maki state dir.
 
-**Returns:** (`table`, `string?`) Pair: `{ path, width, height }` on success, `(nil, err)`.
+**Returns:** (`table`, `string?`) Pair: `{ path, width, height, x, y }` on success, `(nil, err)`. x/y is the desktop origin of image pixel (0,0). Add it to image coordinates for mouse input.
 
 ---
 
@@ -5429,8 +5479,8 @@ Host session primitives. The interactive UI can run several sessions
 at once. These functions list, create, focus, rename, and delete them.
 
 Without a UI, most functions return `nil, "no interactive UI attached"`.
-`current`, `read`, `export`, `messages`, `notify` and `new` without
-`prompt` or `focus` still work. ACP has no focused session, so there
+`current`, `read`, `export`, `messages`, `index`, `recall`, `notify`,
+and `new` without `prompt` or `focus` still work. ACP has no focused session, so there
 `current` fails and `read`, `export` and `messages` need `session`.
 
 ---
@@ -5450,6 +5500,65 @@ background scan, so a slow disk never blocks the UI.
 
 ```lua
 local stored, err = maki.session.list()
+```
+
+---
+
+### `maki.session.index()` {#maki-session-index}
+
+```lua
+maki.session.index({opts?})
+```
+
+Searches stored sessions without opening or resuming them. Text stays fully
+searchable, whitespace is collapsed, thinking and images are excluded, tool
+calls show compact targets, and results show only `[ok]` or a short error.
+Returns at most 24 KiB. Normalized outlines are cached by file size and
+modification time, with an 8 MiB / 64-session memory budget.
+
+Reads current logs with the storage reader, including legacy sessions, and
+ignores incomplete trailing records. Archives and unsaved live messages are excluded.
+
+Requires the `session_read` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts?}` (`table?`) `query` (string?) case-insensitive literal text. Omit to list recent sessions. `scope` (string?) "cwd" (default) or "all". `limit` (integer?) max rows, capped at 100, default 20 for search or 30 for a list.
+
+**Returns:** (`string|nil`, `string|nil`) Bounded outline or error.
+
+**Example:**
+
+```lua
+local hits, err = maki.session.index({ query = "parser bug", scope = "all" })
+```
+
+---
+
+### `maki.session.recall()` {#maki-session-recall}
+
+```lua
+maki.session.recall({opts})
+```
+
+Expands the newest messages from a stored session, normalized like `index`.
+The id must match exactly or be a unique, case-sensitive prefix from the
+index. An ambiguous prefix is refused. Reads across projects and never
+focuses, resumes, claims or writes a session. Each message is capped at
+4 KiB and the whole answer at 24 KiB, retaining the newest messages first.
+
+Requires the `session_read` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) `id` (string) stored session id or unique prefix. `last` (integer?) newest message count, default 4, capped at 100.
+
+**Returns:** (`string|nil`, `string|nil`) Bounded normalized messages or error.
+
+**Example:**
+
+```lua
+local text, err = maki.session.recall({ id = "session-id", last = 6 })
 ```
 
 ---
@@ -5505,7 +5614,7 @@ background tab, or a stored session nothing has open.
 
 Metadata only, so it needs no permission. Not to be confused with the
 `session_read` permission, which guards transcript content
-(`maki.session.export`, `maki.session.messages`).
+(`maki.session.export`, `messages`, `index`, `recall`).
 
 The returned table:
 ```text
@@ -8452,8 +8561,9 @@ win:set_config({ title = "Updated!", width = "80%" })
 Win:set_cursor({row})
 ```
 
-Moves the highlighted cursor line to {row} (1-indexed). Only has a
-visible effect when the window was opened with `cursor_line = true`.
+Moves the cursor to {row} (1-indexed) and scrolls it into view without
+changing the buffer. With `cursor_line = true`, the selection style
+overrides span colors on that row, including syntax and diff backgrounds.
 
 **Parameters:**
 

@@ -162,6 +162,11 @@ pub fn generate() -> String {
         "Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Maki flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete. Deleting the current session starts a fresh one and keeps the picker open."
     )
     .unwrap();
+    writeln!(out, "\nTo find earlier conversations without resuming them, ask the agent to use `session_index` and `session_read`. Search defaults to this project. `scope = \"all\"` includes other projects. Results exclude thinking and tool-result bodies. See [Tools](/docs/tools/#session_index).").unwrap();
+    writeln!(out, "\n## Design\n").unwrap();
+    writeln!(out, "`/design` or `Alt+G` toggles the design workflow. `/design on` and `/design off` set it explicitly. It preserves your identity and tone customizations and changes the workflow through a context update.").unwrap();
+    writeln!(out, "\nFor websites, the agent starts or reuses a local dev server, opens the native browser, and inspects screenshots at mobile, tablet and desktop sizes. Chrome, Chromium or Brave must be installed. No companion plugin, Node browser driver or Playwright installation is required. Native applications use the computer tool and fresh screenshots. Windows capture uses the native desktop backend, including multiple monitors.").unwrap();
+    writeln!(out, "\nUse `/design-note <text>` to save feedback and `/design-view` to inspect the preview URL, notes, screenshots and log paths. Artifacts live under `.maki/design/`. The `design_preview_stop` tool stops only servers Maki started. Existing external servers are left running.").unwrap();
 
     writeln!(out).unwrap();
     writeln!(out, "## Modes and toggles").unwrap();

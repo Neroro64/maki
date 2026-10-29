@@ -186,7 +186,7 @@ impl ColorTransition {
 }
 
 pub struct Splash {
-    start: Instant,
+    start: Option<Instant>,
     field_offset: f32,
     animate: bool,
     tip_seed: usize,
@@ -205,12 +205,16 @@ impl Splash {
         getrandom::fill(&mut rng).ok();
         let tip_seed = u32::from_le_bytes([rng[4], rng[5], rng[6], rng[7]]) as usize;
         Self {
-            start: Instant::now(),
+            start: Some(Instant::now()),
             field_offset: (u64::from_le_bytes(rng) % 10_000) as f32,
             animate,
             tip_seed,
             latest_version: None,
         }
+    }
+
+    pub(crate) fn settle(&mut self) {
+        self.start = None;
     }
 
     /// The update check answers long after the splash is first painted, and
@@ -225,12 +229,12 @@ impl Splash {
         Dirty::YES
     }
 
-    /// The starfield drifts for as long as the splash is up. With it off the
-    /// only motion left is the entry fade, which ends, so the loop settles on
-    /// the start screen instead of burning a core on a still picture.
+    /// Settling removes the animation clock; disabling the starfield alone
+    /// still lets the entry fade finish.
     pub fn cadence(&self) -> Cadence {
         Cadence::when(
-            self.animate || self.start.elapsed().as_secs_f32() < FADE_DURATION,
+            self.start
+                .is_some_and(|start| self.animate || start.elapsed().as_secs_f32() < FADE_DURATION),
             Cadence::SMOOTH,
         )
     }
@@ -246,7 +250,9 @@ impl Splash {
             return;
         }
 
-        let t = self.start.elapsed().as_secs_f32();
+        let t = self
+            .start
+            .map_or(FADE_DURATION, |start| start.elapsed().as_secs_f32());
         let fade = if t >= FADE_DURATION {
             1.0
         } else {
@@ -259,7 +265,7 @@ impl Splash {
         let help_y = tag_y + 2;
         let tip_y = help_y + 2;
 
-        if self.animate {
+        if self.animate && self.start.is_some() {
             self.render_field(area, buf, t + self.field_offset, fade, accent);
         }
         self.render_logo(area, buf, t, fade, top_y, accent);
@@ -679,7 +685,9 @@ mod tests {
     fn splash_cadence(animate: bool, faded: bool) -> Cadence {
         let mut splash = Splash::new(animate);
         if faded {
-            splash.start -= Duration::from_secs_f32(FADE_DURATION);
+            splash.start = splash
+                .start
+                .map(|start| start - Duration::from_secs_f32(FADE_DURATION));
         }
         splash.cadence()
     }
@@ -732,7 +740,9 @@ status_dim = { fg = "magenta" }
         let mut splash = Splash::new(true);
         // At t=0 the entry fade has not started painting, so the assertion
         // below would hold no matter what the field did.
-        splash.start -= Duration::from_secs_f32(FADE_DURATION);
+        splash.start = splash
+            .start
+            .map(|start| start - Duration::from_secs_f32(FADE_DURATION));
         // A fixed offset makes the drawn field the same on every run.
         splash.field_offset = 0.0;
         let area = Rect::new(0, 0, 80, 20);

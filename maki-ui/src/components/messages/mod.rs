@@ -679,6 +679,10 @@ impl MessagesPanel {
         self.accent.set(color);
     }
 
+    pub(crate) fn settle_splash(&mut self) {
+        self.idle_splash.settle();
+    }
+
     pub fn handle_click(&mut self, row: u16, area: Rect) -> bool {
         if area.height == 0 {
             return false;

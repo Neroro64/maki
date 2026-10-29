@@ -1109,6 +1109,9 @@ impl App {
         }
         let source = mem::take(&mut self.input_writer).into_source(now.version);
         let cursor_only = now.version == self.announced_input.version;
+        if !cursor_only {
+            self.chats[self.active_chat].settle_splash();
+        }
         self.fire_input_changed(source, cursor_only);
         Dirty::NO
     }

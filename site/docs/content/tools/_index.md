@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 25 built-in tools in this reference (24 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 31 built-in tools in this reference (30 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -243,7 +243,26 @@ Read or replace the persistent context notebook for this session. Omit text to r
 |-----------|------|----------|-------------|
 | `text` | string | no | The whole new notebook. Omit to read the current one, pass "" to clear it |
 
-## Web
+### `session_index` {#session_index}
+
+Search stored chat sessions without opening or resuming them.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | no | Max rows, default 20 for search or 30 when listing. |
+| `query` | string | no | Literal text to find, case-insensitive. Omit to list recent sessions. |
+| `scope` | string | no | Project scope: cwd (default) or all. |
+
+### `session_read` {#session_read}
+
+Read the newest normalized messages of a stored session, without opening or resuming it.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Stored session id or unique prefix. |
+| `last` | integer | no | Newest message count, default 4. |
+
+## Web & Design
 
 ### `webfetch` {#webfetch}
 
@@ -270,14 +289,53 @@ Drive a Chrome browser over the DevTools protocol.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `action` | string | yes |  | One of: open, snapshot, click, type, press, scroll, screenshot, eval, status, close |
+| `action` | string | yes |  | One of: open, snapshot, click, type, press, scroll, screenshot, viewport, eval, status, close |
 | `executable` | string | no |  | Chrome/Chromium binary path (action=open, default auto-discovered) |
 | `headless` | boolean | no | true, action=open | Launch without a window |
+| `height` | integer | no |  | CSS viewport height, paired with width (action=open/viewport) |
 | `index` | integer | no |  | Element index from the latest snapshot (action=click/type) |
 | `key` | string | no |  | Key to press, e.g. Enter (action=press) |
+| `mobile` | boolean | no | false, action=open/viewport | Emulate mobile layout |
 | `path` | string | no |  | File to write the PNG to (action=screenshot) |
 | `source` | string | no |  | JavaScript expression (action=eval) |
 | `text` | string | no |  | Text to type (action=type) |
 | `url` | string | no |  | URL to open (action=open) |
+| `width` | integer | no |  | CSS viewport width, paired with height (action=open/viewport) |
 | `x` | integer | no |  | Horizontal scroll pixels (action=scroll) |
 | `y` | integer | no |  | Vertical scroll pixels (action=scroll) |
+
+### `design_preview` {#design_preview}
+
+Start or reuse a local website preview using native managed processes. Auto-detects npm dev/start/serve scripts, or accepts a shell command. Returns only after the loopback HTTP URL answers without a server error. The process survives tool calls and stops on cancellation during startup, design_preview_stop, session end or plugin reload. Existing external servers are reused but never stopped. Startup errors include .maki/design/preview.log. Pass the server's actual port or URL. No port flag is injected into framework commands. For desktop applications use computer screenshots and view_image instead.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `command` | string | no | Shell command to start the server. Default: detected npm script. |
+| `port` | integer | no | Port for the default URL. Does not change the command's listening port. |
+| `url` | string | no | Actual plain HTTP loopback URL to probe and open. Default: http://localhost:<preview_port>. |
+
+### `design_preview_stop` {#design_preview_stop}
+
+Stop the dev-server process tree started by design_preview. External servers are left running.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+
+### `design_viewports` {#design_viewports}
+
+Read the saved responsive viewport matrix and design notes. Defaults: mobile 390x844, tablet 834x1112, desktop 1440x900. Pass viewports to replace and save the matrix in .maki/design/viewports.json. For each viewport use browser action=viewport (width, height, mobile), screenshot to a file, and view_image to inspect it. For native applications inspect computer screenshots instead of treating web viewports as desktop verification.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | no | Managed viewport file path, supplied by the plugin. Omit. |
+| `viewports` | array | no | Optional replacement matrix saved for future iterations. |
+
+### `design_note` {#design_note}
+
+Append a design note with text and optional author, or omit text to read notes. Saved in .maki/design/notes.md across sessions. Human feedback remains available with design_viewports and /design-view.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `author` | string | no | Note author. Default: user. |
+| `path` | string | no | Managed notes file path, supplied by the plugin. Omit. |
+| `text` | string | no | Note to append. Omit to read notes. |

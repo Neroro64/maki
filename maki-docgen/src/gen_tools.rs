@@ -37,9 +37,28 @@ const SECTIONS: &[(&str, &[&str])] = &[
     ),
     (
         "Agent & Knowledge",
-        &["task", "todo_write", "memory", "skill", "context_notes"],
+        &[
+            "task",
+            "todo_write",
+            "memory",
+            "skill",
+            "context_notes",
+            "session_index",
+            "session_read",
+        ],
     ),
-    ("Web", &["webfetch", "websearch", "browser"]),
+    (
+        "Web & Design",
+        &[
+            "webfetch",
+            "websearch",
+            "browser",
+            "design_preview",
+            "design_preview_stop",
+            "design_viewports",
+            "design_note",
+        ],
+    ),
 ];
 
 struct ToolInfo {

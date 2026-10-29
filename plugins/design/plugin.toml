@@ -1,0 +1,6 @@
+[permissions]
+run = true
+net = true
+fs_read = true
+fs_write = true
+session_write = true

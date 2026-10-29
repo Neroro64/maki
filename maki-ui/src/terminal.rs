@@ -28,6 +28,10 @@ const POP_WINDOW_TITLE_SEQUENCE: &str = "\u{1b}[23;2t";
 /// Raw mode is already on when the tmux query runs, so a wedged tmux server
 /// must not be able to hang startup with Ctrl-C disabled.
 const TMUX_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(windows)]
+const ENABLE_WIN32_INPUT: &str = "\u{1b}[?9001h";
+#[cfg(windows)]
+const DISABLE_WIN32_INPUT: &str = "\u{1b}[?9001l";
 
 pub(crate) struct TerminalGuard;
 
@@ -298,6 +302,8 @@ impl TerminalGuard {
         let terminal = ratatui::init();
         write_mux_sequence(PUSH_WINDOW_TITLE_SEQUENCE);
         stdout().execute(EnableBracketedPaste)?;
+        #[cfg(windows)]
+        write_sequence(ENABLE_WIN32_INPUT)?;
         stdout().execute(EnableMouseCapture)?;
         enable_focus_change();
         push_keyboard_enhancement();
@@ -338,6 +344,8 @@ fn pop_terminal_modes() {
     write_mux_sequence(POP_WINDOW_TITLE_SEQUENCE);
     stdout().execute(crossterm::cursor::Show).ok();
     stdout().execute(PopKeyboardEnhancementFlags).ok();
+    #[cfg(windows)]
+    write_sequence(DISABLE_WIN32_INPUT).ok();
     disable_focus_change();
     stdout().execute(DisableMouseCapture).ok();
     stdout().execute(DisableBracketedPaste).ok();
@@ -348,6 +356,8 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) {
     write_mux_sequence(PUSH_WINDOW_TITLE_SEQUENCE);
     stdout().execute(EnterAlternateScreen).ok();
     stdout().execute(EnableBracketedPaste).ok();
+    #[cfg(windows)]
+    write_sequence(ENABLE_WIN32_INPUT).ok();
     stdout().execute(EnableMouseCapture).ok();
     enable_focus_change();
     terminal::enable_raw_mode().ok();

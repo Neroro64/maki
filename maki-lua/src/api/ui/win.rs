@@ -267,8 +267,9 @@ fn set_config(_lua: &Lua, this: &WinHandle, opts: Table) -> LuaResult<()> {
     Ok(())
 }
 
-/// Moves the highlighted cursor line to {row} (1-indexed). Only has a
-/// visible effect when the window was opened with `cursor_line = true`.
+/// Moves the cursor to {row} (1-indexed) and scrolls it into view without
+/// changing the buffer. With `cursor_line = true`, the selection style
+/// overrides span colors on that row, including syntax and diff backgrounds.
 ///
 /// @param row integer Target row, 1-indexed.
 /// @return

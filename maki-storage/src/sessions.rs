@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -508,6 +508,86 @@ pub struct SessionSummary {
     pub title: String,
     pub cwd: String,
     pub updated_at: u64,
+}
+
+/// A stored session and the file metadata that invalidates a read-only index.
+/// Enumerating these never creates directories, migrates logs or writes caches.
+pub struct SessionFile {
+    pub summary: SessionSummary,
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: SystemTime,
+}
+
+impl SessionFile {
+    pub fn read<M, U, T>(&self) -> Result<Session<M, U, T>, SessionError>
+    where
+        M: DeserializeOwned,
+        U: DeserializeOwned + Default,
+        T: DeserializeOwned,
+    {
+        load_session_at(&self.path)
+    }
+}
+
+/// Current logs only. Archives and subagent histories are not separate sessions.
+pub fn session_files(storage: &StateDir) -> Result<Vec<SessionFile>, StorageError> {
+    let dir = storage.path().join(SESSIONS_DIR);
+    let entries = match session_entries(&dir) {
+        Ok(entries) => entries,
+        Err(StorageError::Io(error)) if error.kind() == ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
+    let mut seen = HashSet::new();
+    let mut files = Vec::new();
+    for entry in entries {
+        let Some(id) = entry
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse().ok())
+        else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(path) = locate_session_file(&dir, id) else {
+            continue;
+        };
+        let header = if is_jsonl(&path) {
+            scan_jsonl_header(&path)
+        } else {
+            scan_legacy_header(&path)
+        };
+        let Some(header) = header.filter(|header| header.id == id) else {
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        files.push(SessionFile {
+            summary: SessionSummary {
+                id,
+                title: normalize_title(&header.title),
+                cwd: header.cwd,
+                updated_at: header.updated_at,
+            },
+            path,
+            size: metadata.len(),
+            modified,
+        });
+    }
+    files.sort_unstable_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.summary.id.cmp(&b.summary.id))
+    });
+    Ok(files)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

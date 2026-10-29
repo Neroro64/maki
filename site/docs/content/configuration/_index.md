@@ -296,6 +296,13 @@ maki.setup({
 |-------|------|---------|-----|-------------|
 | `max_items` | integer | `10` | 1 | Rows the completion popup shows at once. |
 
+### `plugins.design`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `preview_port` | integer | `3000` | 1 | Local HTTP port assumed by design_preview. Pass url or port to override. |
+| `preview_timeout` | integer | `20` | 1 | Seconds to wait for the local preview to answer HTTP before stopping the managed process. |
+
 ### `plugins.edit`
 
 | Field | Type | Default | Min | Description |

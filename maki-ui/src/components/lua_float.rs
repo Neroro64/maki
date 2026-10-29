@@ -644,6 +644,9 @@ impl FloatManager {
                 let mut line = snapshot_to_line(sline);
                 if win.config.cursor_line && top + win.scroll_offset + i == win.cursor {
                     line = line.style(t.item_selected);
+                    for span in &mut line.spans {
+                        span.style = span.style.patch(t.item_selected);
+                    }
                 }
                 line
             })
@@ -956,7 +959,11 @@ mod tests {
     use crate::repaint::expect::{OWED, QUIET};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use maki_agent::SnapshotSpan;
+    use maki_agent::types::{InlineStyle, SpanColor};
     use maki_lua::{Dimension, FloatConfigPatch};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Style;
     use test_case::test_case;
 
     const EXPECT_OPEN: &str = "expected manager to have open windows";
@@ -1026,6 +1033,66 @@ mod tests {
         let baked = snapshot_to_line(&line);
         assert_ne!(baked.spans[0].content, placeholder);
         assert_eq!(baked.spans[0].style, theme::style_by_name(expected_style));
+    }
+
+    #[test]
+    fn cursor_line_overrides_diff_tints_without_replacing_buffer_content() {
+        const TEXT: &str = "tinted code";
+        const WIDTH: u16 = 16;
+        const HEIGHT: u16 = 3;
+        let tint = SpanStyle::Inline(InlineStyle {
+            fg: Some(SpanColor::Rgb((171, 205, 239))),
+            bg: Some(SpanColor::Rgb((18, 52, 86))),
+            ..InlineStyle::default()
+        });
+        let line = SnapshotLine {
+            spans: vec![SnapshotSpan {
+                text: TEXT.into(),
+                style: tint.clone(),
+            }],
+        };
+        let buf = Arc::new(SharedBuf::new());
+        buf.append(line.clone());
+        buf.append(line);
+        let (event_tx, cmd_rx, _event_rx, cmd_tx) = make_channels();
+        let mut mgr = FloatManager::new();
+        mgr.open(
+            buf,
+            FloatConfig {
+                border: Border::None,
+                ..make_config()
+            },
+            false,
+            event_tx,
+            cmd_rx,
+        );
+        let cached = Arc::clone(&mgr.windows[0].cached_lines);
+        let theme = theme::current();
+        let plain = Style::new()
+            .bg(theme.background)
+            .patch(resolve_span_style(&tint));
+        let selected = plain.patch(theme.item_selected);
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+        let area = Rect::new(0, 0, WIDTH, HEIGHT);
+
+        for cursor in 0..2 {
+            cmd_tx.send(WinCommand::SetCursor(cursor)).unwrap();
+            let _ = mgr.tick();
+            terminal
+                .draw(|frame| mgr.render_window(frame, 0, area))
+                .unwrap();
+            let screen = terminal.backend().buffer();
+            for row in 0..2 {
+                let expected = if row == cursor { selected } else { plain };
+                for col in 0..TEXT.len() as u16 {
+                    let cell = &screen[(col, row as u16)];
+                    assert_eq!(Some(cell.fg), expected.fg);
+                    assert_eq!(Some(cell.bg), expected.bg);
+                    assert_eq!(cell.modifier, expected.add_modifier);
+                }
+            }
+            assert!(Arc::ptr_eq(&cached, &mgr.windows[0].cached_lines));
+        }
     }
 
     fn open_with_lines(

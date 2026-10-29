@@ -71,6 +71,7 @@ use test_case::test_case;
 
 const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const NATIVE_OUTPUT_CAP: u32 = 8192;
+const SPLASH_PROMPT: &str = "x";
 const ALL_LANDED: &str = "a drain that wrote everything reports nothing unsaved";
 const TASK_ID: &str = "task1";
 const PACKUPDATE: &str = "/packupdate";
@@ -3060,6 +3061,23 @@ fn settled_app_owes_no_frame_and_does_not_animate() {
 
     assert_eq!(app.cadence(), Cadence::IDLE);
     assert_eq!(app.tick(), Dirty::NO, "{QUIET}");
+}
+
+#[test_case(Msg::Key(key(KeyCode::Char('x'))); "typed_prompt")]
+#[test_case(Msg::Paste(SPLASH_PROMPT.into()); "pasted_prompt")]
+fn editing_first_prompt_settles_splash_animation(input: Msg) {
+    let mut app = test_app();
+    assert_eq!(app.cadence(), Cadence::SMOOTH);
+
+    app.update(input);
+    let _ = app.tick();
+    assert_eq!(app.input_box.buffer.value(), SPLASH_PROMPT);
+    assert_eq!(app.cadence(), Cadence::IDLE);
+
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    let _ = app.tick();
+    assert!(app.input_box.buffer.value().is_empty());
+    assert_eq!(app.cadence(), Cadence::IDLE);
 }
 
 /// Nothing wakes the loop when a background thread drops an answer into a

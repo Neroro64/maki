@@ -352,6 +352,10 @@ impl Chat {
         self.messages_panel.set_accent(color);
     }
 
+    pub(crate) fn settle_splash(&mut self) {
+        self.messages_panel.settle_splash();
+    }
+
     pub fn tick(&mut self) -> Dirty {
         self.messages_panel.tick()
     }

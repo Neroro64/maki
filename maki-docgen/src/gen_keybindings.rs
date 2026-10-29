@@ -32,6 +32,7 @@ const PLUGIN_BINDS: &[(&str, &str)] = &[
     ("`Ctrl+P`", "Browse sessions"),
     ("`Ctrl+X`", "Open tasks"),
     ("`Alt+T`", "Thinking effort"),
+    ("`Alt+G`", "Toggle design mode"),
 ];
 
 const MAIN_CONTEXTS: &[KeybindContext] = &[
@@ -161,6 +162,7 @@ pub fn generate() -> String {
     let mut out = String::from(FRONTMATTER);
     out.push_str("\n\n# Keybindings\n\n");
     out.push_str("On macOS, some bindings use Option or Fn keys instead (run `/help` for exact keybindings).\n");
+    out.push_str("On Windows Terminal, Maki enables Win32 input mode so `Ctrl+M` opens the model picker while `Enter` still submits. Multiline paste stays bracketed.\n");
 
     for &ctx in MAIN_CONTEXTS {
         write_section(&mut out, ctx);

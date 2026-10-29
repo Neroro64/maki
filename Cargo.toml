@@ -65,6 +65,7 @@ members = [
   "maki-storage",
   "maki-ui",
 ]
+exclude = ["vendor/crossterm"]
 resolver = "3"
 
 [workspace.package]
@@ -234,15 +235,14 @@ debug = false
 [profile.release]
 lto = true
 
-# crossterm 0.29.0 has no VT input on Windows, so bracketed paste never decodes and a
-# multiline paste submits at the first newline (#336). Pinned to the head of
-# crossterm-rs/crossterm#1030, which lives in refs/pull/1030/head on the upstream repo.
-# Remove once the PR ships in a crossterm release.
+# Based on crossterm-rs/crossterm#1030 at 94ed7154e35d24a2f643c61760e1eb05b8ca9e63.
+# Windows needs both its VT paste reader and Win32-input decoding to distinguish
+# Ctrl+M from Enter without losing multiline paste. Remove when both ship upstream.
 #
 # syntect 5.3.0 spins forever on a JavaScript line like `x /*`: two rules match
 # empty at the same byte and `set` each other back, which is neither the push nor
 # the pop its loop guard watches, so one such line pins a core at 100% for good.
 # Pinned to a v5.3.0 backport of trishume/syntect#706, remove once that ships.
 [patch.crates-io]
-crossterm = { git = "https://github.com/crossterm-rs/crossterm", rev = "94ed7154e35d24a2f643c61760e1eb05b8ca9e63" }
+crossterm = { path = "vendor/crossterm" }
 syntect = { git = "https://github.com/tontinton/syntect", rev = "01df275f6f25da670e5ba5b7128cb89d03795119" }
