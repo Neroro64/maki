@@ -79,8 +79,11 @@ use maki_lua::{
     PackPreparation, Permission, PlanActionOutcome, PlanMenu, PlanRowAction, PluginReach, WinView,
     is_reserved,
 };
+use maki_providers::model_registry;
 use maki_providers::models_cache::ModelList;
-use maki_providers::{ContentBlock, Message, Model, ThinkingConfig, TokenUsage, add_cost};
+use maki_providers::{
+    ContentBlock, Message, Model, ModelTier, ThinkingConfig, TokenUsage, add_cost,
+};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
 use maki_storage::model::persist_thinking;
@@ -101,6 +104,8 @@ use shell::ShellPrefix;
 use typeahead::{Hold, InputAt, KeyboardFocus, Pressed, Prompts, Sight, Turn, Typeahead};
 
 const CANCEL_MSG: &str = "Cancelled.";
+const MODEL_TIERS: [ModelTier; 3] = [ModelTier::Weak, ModelTier::Medium, ModelTier::Strong];
+const NO_OTHER_MODEL_TIER: &str = "No other model tier is available";
 const MAIN_CHAT: usize = 0;
 const EXIT_WORD: &str = "exit";
 const EXIT_COMMAND: &str = "/exit";
@@ -2056,6 +2061,12 @@ impl App {
         if key::MODEL_PICKER.matches(key) {
             return self.run_builtin(BuiltinAction::ModelPicker);
         }
+        if key::MODEL_NEXT.matches(key) {
+            return self.cycle_model(true);
+        }
+        if key::MODEL_PREVIOUS.matches(key) {
+            return self.cycle_model(false);
+        }
         if key::UNDO.matches(key) {
             if mode == InputMode::Insert && self.input_box.undo() {
                 self.input_changed(InputWriter::Anyone);
@@ -2115,6 +2126,28 @@ impl App {
             }
             InputAction::ContinueLine | InputAction::None => vec![],
         }
+    }
+
+    fn cycle_model(&mut self, forward: bool) -> Vec<Action> {
+        let model = &self.state.model;
+        let current_spec = self.state.session.model.as_str();
+        let current_tier =
+            model_registry::tier_for(current_spec, &model.provider, Some(model.tier));
+        let step = if forward { 1 } else { MODEL_TIERS.len() - 1 };
+        let start = MODEL_TIERS
+            .iter()
+            .position(|&tier| tier == current_tier)
+            .unwrap_or(if forward { MODEL_TIERS.len() - 1 } else { 0 });
+        for offset in 1..=MODEL_TIERS.len() {
+            let tier = MODEL_TIERS[(start + offset * step) % MODEL_TIERS.len()];
+            if let Some(spec) = model_registry::resolve_tier(Some(&model.provider), tier)
+                && spec != current_spec
+            {
+                return vec![Action::ChangeModel(spec)];
+            }
+        }
+        self.flash(NO_OTHER_MODEL_TIER.to_owned());
+        vec![]
     }
 
     fn handle_esc(&mut self, streaming: bool) -> Vec<Action> {

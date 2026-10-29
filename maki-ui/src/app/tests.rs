@@ -3123,6 +3123,31 @@ fn model_list_arriving_in_the_background_owes_a_frame() {
     });
 }
 
+#[test_case(ModelTier::Weak, kb::MODEL_NEXT.to_key_event(), ModelTier::Medium ; "next_from_weak")]
+#[test_case(ModelTier::Medium, kb::MODEL_NEXT.to_key_event(), ModelTier::Strong ; "next_from_medium")]
+#[test_case(ModelTier::Strong, kb::MODEL_NEXT.to_key_event(), ModelTier::Weak ; "next_wraps")]
+#[test_case(ModelTier::Strong, kb::MODEL_PREVIOUS.to_key_event(), ModelTier::Medium ; "previous_from_strong")]
+#[test_case(ModelTier::Medium, kb::MODEL_PREVIOUS.to_key_event(), ModelTier::Weak ; "previous_from_medium")]
+#[test_case(ModelTier::Weak, kb::MODEL_PREVIOUS.to_key_event(), ModelTier::Strong ; "previous_wraps")]
+fn model_tier_shortcuts_cycle_without_editing_input(
+    current: ModelTier,
+    shortcut: KeyEvent,
+    expected: ModelTier,
+) {
+    let mut app = test_app();
+    app.state
+        .update_model(&Model::from_tier("anthropic", current).unwrap());
+    with_text(&mut app);
+
+    let actions = app.update(Msg::Key(shortcut));
+
+    let [Action::ChangeModel(spec)] = actions.as_slice() else {
+        panic!("expected a model change");
+    };
+    assert_eq!(Model::from_spec(spec).unwrap().tier, expected);
+    assert_eq!(app.input_box.buffer.value(), TYPED_TEXT);
+}
+
 /// Tool output streams into a subagent's chat while the parent chat is the one
 /// on screen. Draining only the active chat would lose it, and the task picker
 /// and a later switch would show nothing.

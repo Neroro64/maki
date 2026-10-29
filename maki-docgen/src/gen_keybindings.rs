@@ -163,6 +163,14 @@ pub fn generate() -> String {
     out.push_str("\n\n# Keybindings\n\n");
     out.push_str("On macOS, some bindings use Option or Fn keys instead (run `/help` for exact keybindings).\n");
     out.push_str("On Windows Terminal, Maki enables Win32 input mode so `Ctrl+M` opens the model picker while `Enter` still submits. Multiline paste stays bracketed.\n");
+    out.push_str(
+        "\n`Ctrl+]` cycles through weak, medium, and strong models and wraps back to weak. \
+         `Ctrl+[` cycles in reverse. Both use the tier assignments from `/model`, \
+         preferring the current provider for unassigned tiers. Missing tiers and \
+         tiers using the current model are skipped. `Ctrl+[` requires a terminal \
+         that distinguishes it from `Esc`, such as Windows Terminal or a terminal \
+         supporting the Kitty keyboard protocol.\n",
+    );
 
     for &ctx in MAIN_CONTEXTS {
         write_section(&mut out, ctx);

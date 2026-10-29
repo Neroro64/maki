@@ -10,6 +10,8 @@ group = "Reference"
 On macOS, some bindings use Option or Fn keys instead (run `/help` for exact keybindings).
 On Windows Terminal, Maki enables Win32 input mode so `Ctrl+M` opens the model picker while `Enter` still submits. Multiline paste stays bracketed.
 
+`Ctrl+]` cycles through weak, medium, and strong models and wraps back to weak. `Ctrl+[` cycles in reverse. Both use the tier assignments from `/model`, preferring the current provider for unassigned tiers. Missing tiers and tiers using the current model are skipped. `Ctrl+[` requires a terminal that distinguishes it from `Esc`, such as Windows Terminal or a terminal supporting the Kitty keyboard protocol.
+
 ## General
 
 | Key | Action |
@@ -21,6 +23,8 @@ On Windows Terminal, Maki enables Win32 input mode so `Ctrl+M` opens the model p
 | `Ctrl+O` | Open plan in editor |
 | `Ctrl+T` | Toggle plan panel |
 | `Ctrl+M` | Model picker |
+| `Ctrl+[` | Cycle model tier backward (strong, medium, weak) |
+| `Ctrl+]` | Cycle model tier forward (weak, medium, strong) |
 
 ## Editing
 
