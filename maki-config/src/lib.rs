@@ -108,6 +108,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "computer",
     "context_notes",
     "deepseek",
+    "design",
     "edit",
     "glob",
     "grep",
@@ -122,6 +123,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "regolo",
     "requesty",
     "review",
+    "session_index",
     "sessions",
     "skill",
     "synthetic",
@@ -150,7 +152,7 @@ pub const PROVIDER_BUILTINS: &[&str] = &[
 
 /// The [`DEFAULT_BUILTINS`] that only add UI or commands and register no tool,
 /// so their names stay free for MCP servers and are not valid tool names.
-pub const NON_TOOL_BUILTINS: &[&str] = &["completion", "sessions", "thinking"];
+pub const NON_TOOL_BUILTINS: &[&str] = &["completion", "review", "sessions", "tabcomplete", "thinking"];
 
 /// Tools the edit plugin provides alongside `edit`, toggled through its options.
 pub const EDIT_SUB_TOOLS: &[&str] = &["edit_lines", "insert_lines", "multiedit"];

@@ -43,14 +43,15 @@ end
 local description = [[Control the desktop: mouse, keyboard, screenshots, clipboard.
 
 Actions:
-- screenshot: capture the whole screen to a PNG; view it with view_image.
+- screenshot: capture the whole desktop to a PNG; view it with view_image. Add the reported origin to image coordinates for mouse input.
 - mouse: action=move|click|press|release|scroll with x,y, button (left/right/middle), amount, axis.
 - keyboard: text to type, or key as a name/combo (enter, escape, tab, up, ctrl+c, f1).
 - position: report the mouse pointer position.
 - display: report the screen size.
 - clipboard: get text (default), get image with path, set text, or set image from image_path.
 
-Needs a display server (X11/XWayland); calls fail cleanly without one. Screenshot before acting blind, and after acting to verify.]]
+Needs an interactive desktop. Screenshots use native Windows capture, X11/XWayland, or the Unix desktop portal. Calls fail cleanly when no backend is available. Screenshot before acting blind, and after acting to verify.
+]]
 
 maki.api.register_prompt_hint({
   slot = "tool_usage",
@@ -119,7 +120,19 @@ maki.api.register_tool({
       if not r then
         return { llm_output = "error: " .. err, is_error = true }
       end
-      return { llm_output = "saved " .. r.path .. " (" .. r.width .. "x" .. r.height .. ")" }
+      return {
+        llm_output = "saved "
+          .. r.path
+          .. " ("
+          .. r.width
+          .. "x"
+          .. r.height
+          .. ", origin "
+          .. r.x
+          .. ","
+          .. r.y
+          .. ")",
+      }
     elseif action == "mouse" then
       local r, err = maki.computer.mouse({
         action = input.mouse_action,

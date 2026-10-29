@@ -771,6 +771,10 @@ impl MessagesPanel {
         self.accent.set(color);
     }
 
+    pub(crate) fn settle_splash(&mut self) {
+        self.idle_splash.settle();
+    }
+
     /// {col} is the screen column, for the right-aligned move hint.
     pub fn handle_click(&mut self, row: u16, col: u16, area: Rect) -> ClickOutcome {
         self.tool_target_at(row, col, area)

@@ -46,6 +46,10 @@ const PROGRAM_STATUS_ID_MAX_LEN: usize = 32;
 const PROGRAM_STATUS_ID_PUNCTUATION: &str = "_.+-";
 const TMUX_PANE_VAR: &str = "TMUX_PANE";
 const SCREEN_WINDOW_VAR: &str = "WINDOW";
+#[cfg(windows)]
+const ENABLE_WIN32_INPUT: &str = "\u{1b}[?9001h";
+#[cfg(windows)]
+const DISABLE_WIN32_INPUT: &str = "\u{1b}[?9001l";
 
 pub(crate) struct TerminalGuard;
 
@@ -463,6 +467,8 @@ impl TerminalGuard {
         }));
         write_mux_sequence(PUSH_WINDOW_TITLE_SEQUENCE);
         stdout().execute(EnableBracketedPaste)?;
+        #[cfg(windows)]
+        write_sequence(ENABLE_WIN32_INPUT)?;
         stdout().execute(EnableMouseCapture)?;
         enable_focus_change();
         push_keyboard_enhancement();
@@ -533,6 +539,8 @@ fn pop_terminal_modes() {
     }
     stdout().execute(Show).ok();
     stdout().execute(PopKeyboardEnhancementFlags).ok();
+    #[cfg(windows)]
+    write_sequence(DISABLE_WIN32_INPUT).ok();
     disable_focus_change();
     stdout().execute(DisableMouseCapture).ok();
     stdout().execute(DisableBracketedPaste).ok();
@@ -543,6 +551,8 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) {
     write_mux_sequence(PUSH_WINDOW_TITLE_SEQUENCE);
     stdout().execute(EnterAlternateScreen).ok();
     stdout().execute(EnableBracketedPaste).ok();
+    #[cfg(windows)]
+    write_sequence(ENABLE_WIN32_INPUT).ok();
     stdout().execute(EnableMouseCapture).ok();
     enable_focus_change();
     terminal::enable_raw_mode().ok();

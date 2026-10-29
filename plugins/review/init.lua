@@ -10,14 +10,16 @@
 --   * <Tab> cycles the left panels; <CR>/l focuses the diff, h/<Esc> goes back.
 --     In the diff: `c` comments the current line, `v` selects a range first,
 --     `d` deletes a comment.
---   * `s` submits all comments to a new focused maki session that fixes them.
+--   * `s` submits all comments to a new focused maki session that fixes them;
+--     failed submissions keep the comments and the review open for retry.
 --
 -- After every turn, a status flash reminds you when files changed.
 --
 -- Rendering notes:
---   * The cursor row is drawn manually (padded to full width and restyled)
---     instead of relying on the host's `cursor_line`, because span
---     backgrounds (diff tints) patch over the native highlight.
+--   * Native `cursor_line` draws the diff cursor over syntax and diff tints;
+--     ordinary navigation only moves that cursor, without rebuilding buffers.
+--   * While editing, only nearby diff context is rendered. Typing updates
+--     the right pane without rebuilding the file, commit or comment lists.
 --   * Only the Files window is ever focused; it receives all keys. The
 --     "active pane" is plugin state, indicated by border style.
 
@@ -132,8 +134,7 @@ local function git_changes()
     if status then
       local path = rest:match("\t(.+)$") or rest -- renames: keep new path
       seen[path] = #changes + 1
-      changes[#changes + 1] =
-        { path = path, status = status:sub(1, 1), adds = 0, dels = 0 }
+      changes[#changes + 1] = { path = path, status = status:sub(1, 1), adds = 0, dels = 0 }
     end
   end
 
@@ -156,8 +157,7 @@ local function git_changes()
   local untracked = run("git ls-files --others --exclude-standard") or ""
   for path in untracked:gmatch("[^\n]+") do
     if not seen[path] then
-      changes[#changes + 1] =
-        { path = path, status = "?", adds = 0, dels = 0, untracked = true }
+      changes[#changes + 1] = { path = path, status = "?", adds = 0, dels = 0, untracked = true }
     end
   end
 
@@ -169,8 +169,7 @@ end
 
 -- Returns array of { sha, subject, when } or nil, err.
 local function git_log()
-  local out, err =
-    run("git log --no-color -n 200 --pretty=format:'%h%x09%s%x09%ar'")
+  local out, err = run("git log --no-color -n 200 --pretty=format:'%h%x09%s%x09%ar'")
   if not out then
     return nil, err
   end
@@ -187,8 +186,7 @@ end
 -- Files changed by one commit; same shape as git_changes, plus .commit.
 local function git_commit_changes(sha)
   local changes, seen = {}, {}
-  local ns, err =
-    run("git diff-tree -r --root --no-commit-id --name-status " .. sha)
+  local ns, err = run("git diff-tree -r --root --no-commit-id --name-status " .. sha)
   if not ns then
     return nil, err
   end
@@ -206,8 +204,7 @@ local function git_commit_changes(sha)
       }
     end
   end
-  local numstat =
-    run("git diff-tree -r --root --no-commit-id --numstat " .. sha) or ""
+  local numstat = run("git diff-tree -r --root --no-commit-id --numstat " .. sha) or ""
   for line in numstat:gmatch("[^\n]+") do
     local adds, dels, path = line:match("^(%S+)\t(%S+)\t(.+)$")
     if path then
@@ -274,10 +271,7 @@ end
 local function get_diff(change)
   local cmd
   if change.commit then
-    cmd = "git show --no-color --format= "
-      .. change.commit
-      .. " -- "
-      .. sh_quote(change.path)
+    cmd = "git show --no-color --format= " .. change.commit .. " -- " .. sh_quote(change.path)
   elseif change.untracked then
     cmd = "git diff --no-color --no-index -- /dev/null " .. sh_quote(change.path)
   else
@@ -306,12 +300,7 @@ local function highlight_dlines(path, dlines)
   if #code == 0 then
     return nil
   end
-  local ok, styled = pcall(
-    maki.ui.highlight,
-    table.concat(code, "\n"),
-    lang,
-    { independent = true }
-  )
+  local ok, styled = pcall(maki.ui.highlight, table.concat(code, "\n"), lang, { independent = true })
   if not ok or type(styled) ~= "table" or #styled ~= #code then
     return nil
   end
@@ -410,7 +399,7 @@ local function build_prompt()
     "Address every comment: apply the requested fix directly on the current working tree.",
     "If a comment is a question, answer it and apply any change the answer implies.",
     "Line numbers refer to the file content on the commented side of the diff",
-    "(\"removed\" lines refer to the pre-change file).",
+    '("removed" lines refer to the pre-change file).',
     "",
   }
   for _, file in ipairs(order) do
@@ -435,26 +424,27 @@ local function build_prompt()
   return table.concat(p, "\n")
 end
 
-local function submit(state)
+local function close_windows(state)
+  for _, w in ipairs({ "fwin", "cwin", "mwin", "rwin" }) do
+    if state[w] then
+      state[w]:close()
+    end
+  end
+end
+
+local function submit()
   if #comments == 0 then
     maki.ui.flash("No review comments yet — press c on a diff line first")
     return false
   end
   local n = #comments
   local prompt = build_prompt()
-  local _, err = maki.session.new({ prompt = prompt, focus = true })
-  if err then
-    maki.ui.flash("Failed to start session: " .. err)
+  local ok, id, err = pcall(maki.session.new, { prompt = prompt, focus = true })
+  if not ok or not id then
+    maki.ui.flash("Failed to start session: " .. tostring(ok and err or id))
     return false
   end
   comments = {}
-  if state then
-    for _, w in ipairs({ "fwin", "cwin", "mwin", "rwin" }) do
-      if state[w] then
-        state[w]:close()
-      end
-    end
-  end
   maki.ui.flash("Sent " .. n .. " comment(s) to a new session")
   return true
 end
@@ -561,8 +551,7 @@ end
 
 --- rendering ---------------------------------------------------------------
 
-local STATUS_STYLE =
-  { M = "warning", A = "diff_new", D = "diff_old", R = "accent", ["?"] = "diff_new" }
+local STATUS_STYLE = { M = "warning", A = "diff_new", D = "diff_old", R = "accent", ["?"] = "diff_new" }
 
 -- Shortens a path from the left to fit `max` columns.
 local function fit_path(path, max)
@@ -662,11 +651,7 @@ local function render_change_list(state, buf, changes, cursor, active, empty_msg
     end
     local badge = n > 0 and (COMMENT_MARK .. n .. " ") or ""
     local prefix = " " .. string.rep("  ", depth) .. ch.status .. " "
-    local avail = width
-      - display_len(prefix)
-      - display_len(right)
-      - display_len(badge)
-      - 2
+    local avail = width - display_len(prefix) - display_len(right) - display_len(badge) - 2
     local spans = {
       { prefix, STATUS_STYLE[ch.status] or "item" },
       { fit_path(f.name, math.max(avail, 8)), "item" },
@@ -689,11 +674,7 @@ local function render_change_list(state, buf, changes, cursor, active, empty_msg
     local right = isc and (nfiles .. " files") or ""
     local badge = ncoms > 0 and (COMMENT_MARK .. ncoms .. " ") or ""
     local prefix = " " .. string.rep("  ", depth) .. (isc and "▸ " or "▾ ")
-    local avail = width
-      - display_len(prefix)
-      - display_len(right)
-      - display_len(badge)
-      - 2
+    local avail = width - display_len(prefix) - display_len(right) - display_len(badge) - 2
     local spans = {
       { prefix, "accent" },
       { fit_path(d.name .. "/", math.max(avail, 8)), "item" },
@@ -835,8 +816,7 @@ local function render_diff(state)
   local dlines = state.dlines
   if not dlines then
     lines[#lines + 1] = { { "", "" } }
-    lines[#lines + 1] =
-      { { "  " .. (state.diff_err or "No diff to show."), "dim" } }
+    lines[#lines + 1] = { { "  " .. (state.diff_err or "No diff to show."), "dim" } }
     state.rbuf:set_lines(lines)
     return row_map, nil
   end
@@ -848,16 +828,19 @@ local function render_diff(state)
   end
 
   local editor_row = nil
-  local active = state.pane == "diff"
 
-  for i, dl in ipairs(dlines) do
+  local first, last = 1, #dlines
+  if state.centry then
+    local context = math.max(math.floor(state.rheight / 2), 1)
+    first = math.max(state.centry.at - context, 1)
+    last = math.min(state.centry.at + context, #dlines)
+  end
+  for i = first, last do
+    local dl = dlines[i]
     if dl.kind == "hunk" then
       local spans = { { " " .. dl.text, "accent" } }
       lines[#lines + 1] = spans
       row_map[#lines] = i
-      if active and #lines == state.dcursor and not state.centry then
-        lines[#lines] = pad_spans(restyle(spans, "selected"), width, "selected")
-      end
       continue
     end
 
@@ -865,9 +848,7 @@ local function render_diff(state)
     local c = comment_at(ch, dl)
     local ln = dl.kind == "del" and dl.old_ln or dl.new_ln
     local sign = dl.kind == "add" and "+" or dl.kind == "del" and "-" or " "
-    local base = dl.kind == "add" and "diff_new"
-      or dl.kind == "del" and "diff_old"
-      or "item"
+    local base = dl.kind == "add" and "diff_new" or dl.kind == "del" and "diff_old" or "item"
 
     -- Code text: syntax-highlighted spans when available.
     local text_spans
@@ -902,9 +883,6 @@ local function render_diff(state)
 
     lines[#lines + 1] = spans
     row_map[#lines] = i
-    if active and #lines == state.dcursor and not state.centry then
-      lines[#lines] = pad_spans(restyle(spans, "selected"), width, "selected")
-    end
 
     -- Inline comment editor, right below the anchor line.
     if state.centry and state.centry.at == i then
@@ -913,11 +891,10 @@ local function render_diff(state)
         { "Comment (" .. state.centry.label .. ")", "accent" },
         { "  <CR>: save  <Esc>: cancel", "dim" },
       }
-      local r =
-        state.centry.input:render("    │ ", 6, math.max(width - 8, 20))
+      local r = state.centry.input:render("    │ ", 6, math.max(width - 8, 20))
+      editor_row = #lines + r.cursor_row
       for _, l in ipairs(r.lines) do
         lines[#lines + 1] = l
-        editor_row = #lines
       end
       lines[#lines + 1] = { { "    └", "accent" } }
     end
@@ -948,6 +925,11 @@ local function render_diff(state)
 
   state.rbuf:set_lines(lines)
   return row_map, editor_row
+end
+
+local function redraw_editor(state)
+  local _, editor_row = render_diff(state)
+  state.rwin:set_cursor(editor_row)
 end
 
 -- Right pane: summary of the commit under the cursor (commit list view).
@@ -1040,15 +1022,7 @@ end
 local function redraw(state)
   -- Left column: files, commits, comments (stacked).
   state.frow_map = render_clamped(state, function(s)
-    return render_change_list(
-      s,
-      s.fbuf,
-      s.wchanges,
-      s.fcursor,
-      s.pane == "files",
-      NO_CHANGES,
-      s.fcollapsed
-    )
+    return render_change_list(s, s.fbuf, s.wchanges, s.fcursor, s.pane == "files", NO_CHANGES, s.fcollapsed)
   end, "fcursor", state.fbuf)
 
   local crender = render_commit_list
@@ -1067,8 +1041,7 @@ local function redraw(state)
   end
   state.crow_map = render_clamped(state, crender, "ccursor", state.cbuf)
 
-  state.mrow_map =
-    render_clamped(state, render_comment_list, "mcursor", state.mbuf)
+  state.mrow_map = render_clamped(state, render_comment_list, "mcursor", state.mbuf)
 
   -- Right pane: driven by the panel that last had focus (state.src).
   local drow_map, editor_row = {}, nil
@@ -1079,9 +1052,11 @@ local function redraw(state)
   else
     drow_map, editor_row = render_diff(state)
   end
-  state.drow_map = drow_map
+  if not state.centry then
+    state.drow_map = drow_map
+  end
 
-  if state.change and not state.drow_map[state.dcursor] then
+  if not state.centry and state.change and not state.drow_map[state.dcursor] then
     for r = state.dcursor, 1, -1 do
       if drow_map[r] then
         state.dcursor = r
@@ -1103,16 +1078,11 @@ local function redraw(state)
     })
   end
 
-  panel_cfg(
-    state.fwin,
-    " Files (" .. #state.wchanges .. ") ",
-    state.pane == "files" and not state.centry,
-    {
-      { "<CR>", "diff" },
-      { "s", "submit " .. #comments },
-      { "<Esc>", "close" },
-    }
-  )
+  panel_cfg(state.fwin, " Files (" .. #state.wchanges .. ") ", state.pane == "files" and not state.centry, {
+    { "<CR>", "diff" },
+    { "s", "submit " .. #comments },
+    { "<Esc>", "close" },
+  })
 
   local ctitle, cfooter
   if state.commit then
@@ -1122,27 +1092,16 @@ local function redraw(state)
     ctitle = " Commits "
     cfooter = { { "<CR>", "open" }, { "<Esc>", "close" } }
   end
-  panel_cfg(
-    state.cwin,
-    ctitle,
-    state.pane == "commits" and not state.centry,
-    cfooter
-  )
+  panel_cfg(state.cwin, ctitle, state.pane == "commits" and not state.centry, cfooter)
 
-  panel_cfg(
-    state.mwin,
-    " Comments (" .. #comments .. ") ",
-    state.pane == "comments" and not state.centry,
-    {
-      { "d", "delete" },
-      { "s", "submit " .. #comments },
-    }
-  )
+  panel_cfg(state.mwin, " Comments (" .. #comments .. ") ", state.pane == "comments" and not state.centry, {
+    { "d", "delete" },
+    { "s", "submit " .. #comments },
+  })
 
   local rtitle = " Diff "
   if state.src == "commits" and not state.commit then
-    rtitle = state.sel_commit and (" Commit " .. state.sel_commit.sha .. " ")
-      or " Commit "
+    rtitle = state.sel_commit and (" Commit " .. state.sel_commit.sha .. " ") or " Commit "
   elseif state.src == "comments" then
     rtitle = " Comment "
   elseif state.change then
@@ -1156,16 +1115,15 @@ local function redraw(state)
   end
   state.rwin:set_config({
     title = rtitle,
+    cursor_line = state.pane == "diff" and not state.centry,
     border = diff_active and "double" or "rounded",
-    footer = state.centry
-        and { { "<CR>", "save" }, { "<Esc>", "cancel" } }
-      or (diff_active and {
-        { "c", "comment" },
-        { "v", state.vstart and "cancel select" or "select" },
-        { "d", "delete" },
-        { "s", "submit " .. #comments },
-        { "<Esc>", "back" },
-      } or { { "<CR>", "diff" } }),
+    footer = state.centry and { { "<CR>", "save" }, { "<Esc>", "cancel" } } or (diff_active and {
+      { "c", "comment" },
+      { "v", state.vstart and "cancel select" or "select" },
+      { "d", "delete" },
+      { "s", "submit " .. #comments },
+      { "<Esc>", "back" },
+    } or { { "<CR>", "diff" } }),
   })
 
   state.fwin:set_cursor(state.fcursor)
@@ -1194,8 +1152,7 @@ local function load_preview(state)
     local cm = state.commits[state.crow_map and state.crow_map[state.ccursor]]
     state.sel_commit = cm
     if cm and not state.cache["info:" .. cm.sha] then
-      state.cache["info:" .. cm.sha] =
-        run("git show --no-color --format=medium --stat " .. cm.sha) or ""
+      state.cache["info:" .. cm.sha] = run("git show --no-color --format=medium --stat " .. cm.sha) or ""
     end
     return
   end
@@ -1253,8 +1210,7 @@ local function refresh(state)
   state.wchanges = git_changes() or state.wchanges
   state.commits = git_log() or state.commits
   if state.commit then
-    state.commit_changes =
-      git_commit_changes(state.commit.sha) or state.commit_changes
+    state.commit_changes = git_commit_changes(state.commit.sha) or state.commit_changes
   end
   redraw(state) -- rebuild row maps before reloading the preview
   load_preview(state)
@@ -1372,8 +1328,9 @@ local function set_active_cursor(state, r)
       state.dcursor = r
       if state.vstart then
         state.vcur = state.drow_map[r]
+        state.drow_map = render_diff(state)
       end
-      redraw(state)
+      state.rwin:set_cursor(r)
     end
     return
   end
@@ -1474,8 +1431,7 @@ local function save_comment(state)
   if e.existing_idx then
     comments[e.existing_idx].text = text
   else
-    comments[#comments + 1] =
-      make_comment(state.change, state.dlines, e.from, e.to, text)
+    comments[#comments + 1] = make_comment(state.change, state.dlines, e.from, e.to, text)
   end
   redraw(state)
 end
@@ -1523,11 +1479,7 @@ end
 -- Opens (or reopens) all panes. Only the Files window takes focus and
 -- receives keys; the other windows are display-only.
 local function open_windows(state)
-  for _, w in ipairs({ "fwin", "cwin", "mwin", "rwin" }) do
-    if state[w] then
-      state[w]:close()
-    end
-  end
+  close_windows(state)
   local L = layout()
   state.rwin = maki.ui.open_win(state.rbuf, {
     title = " Diff ",
@@ -1576,34 +1528,32 @@ end
 
 --- main loop ---------------------------------------------------------------
 
-local function open_review()
+local function open_review(state)
   local changes, err = git_changes()
   if not changes then
     maki.ui.flash(tostring(err))
     return
   end
 
-  local state = {
-    fbuf = maki.ui.buf(),
-    cbuf = maki.ui.buf(),
-    mbuf = maki.ui.buf(),
-    rbuf = maki.ui.buf(),
-    pane = "files",
-    src = "files",
-    wchanges = changes,
-    commits = git_log() or {},
-    fcursor = 1,
-    ccursor = 1,
-    mcursor = 1,
-    dcursor = 1,
-    frow_map = {},
-    crow_map = {},
-    mrow_map = {},
-    drow_map = {},
-    fcollapsed = {},
-    ccollapsed = {},
-    cache = {},
-  }
+  state.fbuf = maki.ui.buf()
+  state.cbuf = maki.ui.buf()
+  state.mbuf = maki.ui.buf()
+  state.rbuf = maki.ui.buf()
+  state.pane = "files"
+  state.src = "files"
+  state.wchanges = changes
+  state.commits = git_log() or {}
+  state.fcursor = 1
+  state.ccursor = 1
+  state.mcursor = 1
+  state.dcursor = 1
+  state.frow_map = {}
+  state.crow_map = {}
+  state.mrow_map = {}
+  state.drow_map = {}
+  state.fcollapsed = {}
+  state.ccollapsed = {}
+  state.cache = {}
   open_windows(state)
   redraw(state) -- build row maps before the first preview
   for r = 1, state.fbuf:len() do
@@ -1635,7 +1585,7 @@ local function open_review()
 
     if ev.type == "paste" and state.centry then
       state.centry.input:insert_text(ev.text)
-      redraw(state)
+      redraw_editor(state)
       continue
     end
 
@@ -1653,7 +1603,7 @@ local function open_review()
         redraw(state)
       else
         if state.centry.input:handle_key(key) ~= TextInput.Result.IGNORED then
-          redraw(state)
+          redraw_editor(state)
         end
       end
       continue
@@ -1674,7 +1624,7 @@ local function open_review()
     elseif key == "<Tab>" then
       set_pane(state, state.pane == "diff" and state.src or PANE_NEXT[state.pane])
     elseif key == "s" then
-      if submit(state) then
+      if submit() then
         return
       end
       redraw(state)
@@ -1702,8 +1652,7 @@ local function open_review()
       elseif key == "h" or key == "<Left>" then
         local cursor, row_map = active_view(state)
         local sel = row_map[cursor]
-        local set = state.pane == "commits" and state.ccollapsed
-          or state.fcollapsed
+        local set = state.pane == "commits" and state.ccollapsed or state.fcollapsed
         if
           (state.pane == "files" or (state.pane == "commits" and state.commit))
           and type(sel) == "table"
@@ -1744,18 +1693,14 @@ local function open_review()
       end
     end
   end
-
-  for _, w in ipairs({ "fwin", "cwin", "mwin", "rwin" }) do
-    if state[w] then
-      state[w]:close()
-    end
-  end
 end
 
 --- registration ------------------------------------------------------------
 
 local function open_review_safe()
-  local ok, err = pcall(open_review)
+  local state = {}
+  local ok, err = pcall(open_review, state)
+  close_windows(state)
   if not ok then
     maki.log.error("review crashed: " .. tostring(err))
     maki.ui.flash("review error: " .. tostring(err))
@@ -1773,9 +1718,7 @@ local last_sig = nil
 maki.api.create_autocmd("TurnEnd", {
   callback = function()
     maki.async.run(function()
-      local out = run(
-        "git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null"
-      )
+      local out = run("git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null")
       if not out then
         return
       end

@@ -86,6 +86,8 @@ From a repo:
 maki
 ```
 
+Typing or pasting into the first prompt stops the start-screen animation. It stays still if you clear the prompt.
+
 Type what you want done, press Enter, watch it work. Worth knowing on day one:
 
 - **Permissions.** File edits inside the repo run freely. `bash` and web tools ask first: `y` allows once, `s` for the session, `a` for the project. Deny rules always win; `/yolo` skips the prompts. Details in [Permissions](/docs/permissions/).

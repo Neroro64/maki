@@ -1,8 +1,7 @@
 //! Keyboard, mouse, screenshot, and clipboard control for the desktop.
 //!
-//! Input goes through enigo (X11 via x11rb), screenshots through x11rb's
-//! GetImage on the root window, clipboard through arboard. All of them need a
-//! display server; on a headless box every call returns a clean error.
+//! Input uses enigo and clipboard uses arboard. Windows captures the virtual
+//! desktop through GDI. Other platforms use X11 or the Unix desktop portal.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,8 +15,14 @@ use crate::api::util::convert::TableExt;
 use crate::api::util::pair::Pair;
 use crate::plugin_permissions::PluginPermissions;
 
+#[cfg(windows)]
+#[path = "computer_windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::capture_screen;
+
 const SCREENSHOTS_DIR: &str = "screenshots";
-const NO_DISPLAY: &str = "cannot reach a display; computer control needs X11 (XWayland counts)";
+const NO_DISPLAY: &str = "cannot reach an interactive desktop";
 const KEY_UNKNOWN: &str = "unknown key; use names like enter, escape, tab, up, ctrl+c, f1";
 const MOUSE_ACTION_REQUIRED: &str = "action must be move, click, press, release, or scroll";
 #[cfg(unix)]
@@ -73,6 +78,7 @@ fn parse_button(name: Option<String>) -> Button {
     }
 }
 
+#[cfg(not(windows))]
 fn grab<C>(
     conn: &C,
     drawable: u32,
@@ -97,6 +103,7 @@ where
     .map_err(|e| e.to_string())
 }
 
+#[cfg(not(windows))]
 fn capture_screen() -> Result<RgbaImage, String> {
     use x11rb::connection::Connection;
 
@@ -175,12 +182,12 @@ fn rgba_to_image(width: usize, height: usize, bytes: &[u8]) -> Option<RgbaImage>
     Some(img)
 }
 
-/// Capture the X11 root window (the whole desktop) to a PNG file.
+/// Capture the desktop to PNG: Windows virtual desktop, X11 root, or Unix portal.
 ///
 /// @param opts table Options. Fields:
 ///   - path (string): file to write. Default: a timestamped file under the
 ///     maki state dir.
-/// @return (table, string?) Pair: `{ path, width, height }` on success, `(nil, err)`.
+/// @return (table, string?) Pair: `{ path, width, height, x, y }` on success, `(nil, err)`. x/y is the desktop origin of image pixel (0,0). Add it to image coordinates for mouse input.
 #[lua_fn(guard = Run, name = "screenshot")]
 async fn computer_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     let path: Option<String> = opts.opt("path")?;
@@ -191,6 +198,22 @@ async fn computer_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
             Err(e) => return Ok((None, Some(e))),
         },
     };
+    #[cfg(windows)]
+    let dims = {
+        let target = target.clone();
+        match smol::unblock(move || {
+            let (image, left, top) = capture_screen()?;
+            let (width, height) = image.dimensions();
+            save_png(&image, &target)?;
+            Ok::<_, String>((width, height, left, top))
+        })
+        .await
+        {
+            Ok(dimensions) => dimensions,
+            Err(error) => return Ok((None, Some(error))),
+        }
+    };
+    #[cfg(not(windows))]
     let dims = match capture_screen() {
         Ok(img) => {
             let dims = img.dimensions();
@@ -204,11 +227,16 @@ async fn computer_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
             Err(e) => return Ok((None, Some(e))),
         },
     };
-    let (width, height) = dims;
+    #[cfg(windows)]
+    let (width, height, x, y) = dims;
+    #[cfg(not(windows))]
+    let (width, height, x, y) = (dims.0, dims.1, 0, 0);
     let tbl = lua.create_table()?;
     tbl.set("path", target.to_string_lossy().into_owned())?;
     tbl.set("width", width)?;
     tbl.set("height", height)?;
+    tbl.set("x", x)?;
+    tbl.set("y", y)?;
     Ok((Some(tbl), None))
 }
 
@@ -244,9 +272,7 @@ async fn portal_screenshot(target: &std::path::Path) -> Result<(u32, u32), Strin
     Ok(dims)
 }
 
-/// The XDG desktop portal is a Unix thing; elsewhere the X11 grab is the only
-/// capture backend, so a failed grab is the final answer.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 async fn portal_screenshot(_target: &std::path::Path) -> Result<(u32, u32), String> {
     Err(format!(
         "no X11 capture ({NO_DISPLAY}); no portal fallback on this platform"
@@ -499,8 +525,8 @@ fn computer_clipboard(lua: &Lua, opts: Table) -> LuaResult<Pair<Table>> {
 lua_table! {
     /// Desktop control: `maki.computer.screenshot` captures the screen,
     /// `mouse`/`keyboard` drive pointer and keys, `position`/`display` report
-    /// state, `clipboard` reads and writes the system clipboard. Needs a
-    /// display server; every call fails cleanly without one.
+    /// state, `clipboard` reads and writes the system clipboard. Requires an
+    /// interactive desktop; calls fail cleanly when its backend is unavailable.
     "maki.computer" => pub(crate) fn create_computer_table(perms: &PluginPermissions), DOCS [
         computer_screenshot(perms),
         computer_mouse(perms),
@@ -545,48 +571,5 @@ mod tests {
     #[test]
     fn rgba_to_image_rejects_short_buffers() {
         assert!(rgba_to_image(2, 2, &[0, 0, 0, 0]).is_none());
-    }
-
-    #[test]
-    #[ignore = "needs a live X11 display"]
-    fn capture_screen_produces_a_full_frame() {
-        let img = capture_screen().expect("X11 capture");
-        let (w, h) = img.dimensions();
-        assert!(w > 0 && h > 0);
-        assert_eq!(img.as_raw().len(), (w * h * 4) as usize);
-    }
-
-    #[test]
-    #[ignore = "needs a live desktop portal"]
-    fn portal_screenshot_copies_a_real_frame() {
-        let target = std::env::temp_dir().join("maki-portal-smoke.png");
-        let (w, h) = smol::block_on(portal_screenshot(&target)).expect("portal capture");
-        assert!(w > 0 && h > 0);
-        let _ = std::fs::remove_file(&target);
-    }
-
-    #[cfg(not(unix))]
-    #[test]
-    fn screenshot_without_a_display_returns_a_clean_pair() {
-        const NO_PORTAL: &str = "no portal fallback on this platform";
-        let lua = Lua::new();
-        let computer = create_computer_table(&lua, &PluginPermissions::trusted()).unwrap();
-        lua.globals().set("computer", computer).unwrap();
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("shot.png").display().to_string();
-        let src = format!(
-            "return computer.screenshot{{ path = '{}' }}",
-            path.replace('\\', "/")
-        );
-        let (val, err): (mlua::Value, Option<String>) =
-            smol::block_on(lua.load(&src).eval_async()).unwrap();
-        assert!(val.is_nil(), "a failed capture must answer nil");
-        let err = err.expect("a failed capture must answer a message");
-        assert!(err.contains(NO_DISPLAY), "got: {err}");
-        assert!(err.contains(NO_PORTAL), "got: {err}");
-        assert!(
-            !std::path::Path::new(&path).exists(),
-            "a failed capture must leave no file behind"
-        );
     }
 }

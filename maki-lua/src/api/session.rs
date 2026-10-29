@@ -6,8 +6,11 @@
 //! document `maki session export` prints. The one difference is an image
 //! block's `source`, which is a `maki.image.Image` sharing the payload.
 
+#[path = "session_index.rs"]
+mod session_index;
+
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use maki_agent::agent::{SessionExport, live_header, live_history, live_snapshot};
 use maki_agent::session::{StoredSession, store_new};
@@ -32,6 +35,7 @@ use crate::api::util::pair::{Pair, err_pair, pair, try_pair};
 use crate::plugin_permissions::{Permission, PluginPermissions, require};
 use crate::runtime::Lineage;
 use crate::session_snapshot::SessionSnapshot;
+use session_index::{MAX_ROWS, SessionIndex};
 
 /// Answers `maki.session.read` for a driver that has no UI to ask. Takes the
 /// optional session id from Lua and returns a serialized
@@ -45,6 +49,7 @@ const BLANK_NOTIFY_ERR: &str = "text must not be blank";
 const SESSION_REQUIRED_ERR: &str = "session is required";
 const NOT_LIVE_ERR: &str = "session not live";
 const NO_FOCUSED_ERR: &str = "no focused session";
+const INVALID_RECALL_SCOPE: &str = "scope must be cwd or all";
 const EMPTY_ARRAY_ERR: &str =
     "expected an array, got an empty table (copy with maki.deepcopy to keep it a list)";
 /// Tables built between two yields, so a long history never holds the
@@ -160,6 +165,106 @@ async fn list(lua: Lua, #[ctx] tx: Option<UnboundedSender<UiAction>>) -> LuaResu
     roundtrip(lua, tx, SessionRequest::List).await
 }
 
+/// The Lua thread's shared session outline cache: built by the first
+/// `index`/`recall` call and reused by every later one, so normalized
+/// outlines stay warm across calls and only stale files are re-read.
+/// Lives in app data so all plugins share one cache; the mutex serializes
+/// the off-thread scans that fill it.
+fn recall_cache(lua: &Lua) -> Arc<Mutex<SessionIndex>> {
+    if let Some(cache) = lua.app_data_ref::<Arc<Mutex<SessionIndex>>>() {
+        return Arc::clone(&cache);
+    }
+    let cache = Arc::new(Mutex::new(SessionIndex::default()));
+    lua.set_app_data(Arc::clone(&cache));
+    cache
+}
+
+/// Searches stored sessions without opening or resuming them. Text stays fully
+/// searchable, whitespace is collapsed, thinking and images are excluded, tool
+/// calls show compact targets, and results show only `[ok]` or a short error.
+/// Returns at most 24 KiB. Normalized outlines are cached by file size and
+/// modification time, with an 8 MiB / 64-session memory budget.
+///
+/// Reads current logs with the storage reader, including legacy sessions, and
+/// ignores incomplete trailing records. Archives and unsaved live messages are excluded.
+///
+/// @param opts table? `query` (string?) case-insensitive literal text. Omit to list recent sessions. `scope` (string?) "cwd" (default) or "all". `limit` (integer?) max rows, capped at 100, default 20 for search or 30 for a list.
+/// @return (string|nil, string|nil) Bounded outline or error.
+/// @example
+/// local hits, err = maki.session.index({ query = "parser bug", scope = "all" })
+#[lua_fn(guard = SessionRead)]
+async fn index(lua: Lua, opts: Option<Table>) -> LuaResult<Pair<String>> {
+    let opts = match opts {
+        Some(opts) => opts,
+        None => lua.create_table()?,
+    };
+    let query = opts.get::<Option<String>>("query")?.unwrap_or_default();
+    let scope = opts.get::<Option<String>>("scope")?;
+    let cwd = match scope.as_deref().unwrap_or("cwd") {
+        "cwd" => match headless_cwd(&lua) {
+            Ok(cwd) => Some(cwd),
+            Err(error) => return Ok(err_pair(error)),
+        },
+        "all" => None,
+        _ => return Ok(err_pair(INVALID_RECALL_SCOPE)),
+    };
+    let limit = opts
+        .get::<Option<usize>>("limit")?
+        .unwrap_or(if query.trim().is_empty() { 30 } else { 20 })
+        .clamp(1, MAX_ROWS);
+    let storage = match state_dir(&lua) {
+        Ok(storage) => storage,
+        Err(error) => return Ok(err_pair(error)),
+    };
+    let cache = recall_cache(&lua);
+    Ok(pair(
+        spawn_blocking(move || {
+            cache.lock().map_err(|error| error.to_string())?.search(
+                &storage,
+                cwd.as_deref(),
+                &query,
+                limit,
+            )
+        })
+        .await
+        .map_err(mlua::Error::external)?,
+    ))
+}
+
+/// Expands the newest messages from a stored session, normalized like `index`.
+/// The id must match exactly or be a unique, case-sensitive prefix from the
+/// index. An ambiguous prefix is refused. Reads across projects and never
+/// focuses, resumes, claims or writes a session. Each message is capped at
+/// 4 KiB and the whole answer at 24 KiB, retaining the newest messages first.
+///
+/// @param opts table `id` (string) stored session id or unique prefix. `last` (integer?) newest message count, default 4, capped at 100.
+/// @return (string|nil, string|nil) Bounded normalized messages or error.
+/// @example
+/// local text, err = maki.session.recall({ id = "session-id", last = 6 })
+#[lua_fn(guard = SessionRead)]
+async fn recall(lua: Lua, opts: Table) -> LuaResult<Pair<String>> {
+    let id = opts.get::<String>("id")?;
+    let last = opts
+        .get::<Option<usize>>("last")?
+        .unwrap_or(4)
+        .clamp(1, MAX_ROWS);
+    let storage = match state_dir(&lua) {
+        Ok(storage) => storage,
+        Err(error) => return Ok(err_pair(error)),
+    };
+    let cache = recall_cache(&lua);
+    Ok(pair(
+        spawn_blocking(move || {
+            cache
+                .lock()
+                .map_err(|error| error.to_string())?
+                .read(&storage, &id, last)
+        })
+        .await
+        .map_err(mlua::Error::external)?,
+    ))
+}
+
 /// Lists the sessions currently running in this UI. Status is "working",
 /// "needs_input", or "idle". Background work a turn moved out keeps the
 /// session "working" until its result is in, with no "idle" in between.
@@ -189,7 +294,7 @@ async fn unhosted_snapshot(lua: &Lua, raw: &str) -> Result<JsonValue, String> {
 ///
 /// Metadata only, so it needs no permission. Not to be confused with the
 /// `session_read` permission, which guards transcript content
-/// (`maki.session.export`, `maki.session.messages`).
+/// (`maki.session.export`, `messages`, `index`, `recall`).
 ///
 /// The returned table:
 /// ```text
@@ -1314,9 +1419,9 @@ lua_table! {
     ///
     /// Without a UI, most functions return `nil, "no interactive UI attached"`.
     /// `current`, `read`, `export`, `messages`, `windows`, `subagents`,
-    /// `notify` and `new` without `prompt` or `focus` still work. ACP has no
-    /// focused session, so there `current` fails and the read functions need
-    /// `session`. Hook and event payloads carry it as `session_id`.
+    /// `index`, `recall`, `notify` and `new` without `prompt` or `focus` still
+    /// work. ACP has no focused session, so there `current` fails and the read
+    /// functions need `session`. Hook and event payloads carry it as `session_id`.
     "maki.session" => pub(crate) fn create_session_table(
         tx: Option<UnboundedSender<UiAction>>,
         perms: &PluginPermissions,
@@ -1324,10 +1429,11 @@ lua_table! {
         plugin: Arc<str>,
     ),
     DOCS [
-        list(tx), live(tx), current(tx), read(tx), export(perms, tx), messages(perms, tx),
-        windows(perms, tx), subagents(perms, tx), focus(tx), delete(perms, tx),
-        new(perms, tx, grants), prompt(perms, tx), notify(perms, grants), set_mode(perms, tx),
-        request_compact(perms), set_title(perms, tx), data_dir(plugin, tx), notes(tx),
+        list(tx), index(perms), recall(perms), live(tx), current(tx), read(tx),
+        export(perms, tx), messages(perms, tx), windows(perms, tx), subagents(perms, tx),
+        focus(tx), delete(perms, tx), new(perms, tx, grants), prompt(perms, tx),
+        notify(perms, grants), set_mode(perms, tx), request_compact(perms), set_title(perms, tx),
+        data_dir(plugin, tx), notes(tx),
     ]
 }
 
@@ -2882,5 +2988,40 @@ mod tests {
             include_str!("../../../plugins/sessions/init.lua"),
         );
         lua
+    }
+
+    #[tokio::test]
+    async fn recall_apis_read_native_sessions_without_a_ui() {
+        let (lua, _dir) = headless();
+        let id: String = eval(
+            &lua,
+            "return assert(session.new({ messages = one_message }))",
+        )
+        .await;
+        let hits: String = eval(&lua, "return assert(session.index({ query = 'HI' }))").await;
+        assert!(hits.contains(&id));
+        let read: String = eval(
+            &lua,
+            &format!("return assert(session.recall({{ id = '{id}', last = 1 }}))"),
+        )
+        .await;
+        assert!(read.contains("user\nhi"));
+        let (_, error): (Value, String) =
+            eval(&lua, "return session.index({ scope = 'invalid' })").await;
+        assert_eq!(error, INVALID_RECALL_SCOPE);
+    }
+
+    #[test_case("return session.index()" ; "index")]
+    #[test_case("return session.recall({ id = 'prefix' })" ; "recall")]
+    #[tokio::test]
+    async fn recall_apis_require_session_read_permission(code: &str) {
+        let (lua, _dir) = headless_granted(PluginPermissions::from_approved(["session_write"]));
+        let result: LuaResult<Value> = lua.load(code).eval_async().await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&denied_error(Permission::SessionRead).to_string())
+        );
     }
 }

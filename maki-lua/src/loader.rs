@@ -111,6 +111,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/sessions"),
     },
     BundledPlugin {
+        name: "session_index",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/session_index"),
+    },
+    BundledPlugin {
         name: "review",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/review"),
     },
@@ -141,6 +145,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "computer",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/computer"),
+    },
+    BundledPlugin {
+        name: "design",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/design"),
     },
     BundledPlugin {
         name: "batch",

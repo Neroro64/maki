@@ -5,6 +5,7 @@ use maki_lua::PluginHost;
 use test_case::test_case;
 
 #[test_case("completion", include_str!("../../plugins/completion/tests/spec.lua") ; "completion_plugin_spec")]
+#[test_case("design", include_str!("../../plugins/design/tests/spec.lua") ; "design_plugin_spec")]
 #[test_case("edit", include_str!("../../plugins/edit/tests/spec.lua") ; "edit_plugin_spec")]
 #[test_case("index", include_str!("../../plugins/index/tests/spec.lua") ; "index_plugin_spec")]
 #[test_case("lib", include_str!("../../plugins/lib/tests/spec.lua") ; "lib_spec")]

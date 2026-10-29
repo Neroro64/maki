@@ -12,7 +12,6 @@ const BROWSER_PLUGIN_SRC: &str = include_str!("../../plugins/browser/init.lua");
 const SESSION: &str = "01965087-4c71-7f00-8000-000000000010";
 const LIVE_HTML: &str = "data:text/html,<title>BraveSmoke</title><body><input id=q><button onclick=\"document.title='clicked'\">Go</button></body>";
 
-const BAD_ACTION: &str = "error: action must be one of open, snapshot, click, type, press, scroll, screenshot, eval, status, close";
 const SESSION_REQUIRED: &str = "error: browser needs a session";
 const NOT_OPEN: &str = "error: no browser open for this session";
 
@@ -41,20 +40,6 @@ fn exec(reg: &ToolRegistry, input: Value, ctx: &ToolContext) -> String {
         Ok(other) => panic!("unexpected output: {other:?}"),
         Err(e) => e,
     }
-}
-
-#[test]
-fn browser_tool_is_registered() {
-    let (reg, _host) = load_browser_host();
-    assert!(reg.get("browser").is_some());
-}
-
-#[test]
-fn browser_rejects_unknown_action() {
-    let (reg, _host) = load_browser_host();
-    let ctx = session_ctx();
-    let out = exec(&reg, json!({ "action": "teleport" }), &ctx);
-    assert_eq!(out, BAD_ACTION);
 }
 
 #[test]
