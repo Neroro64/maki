@@ -81,6 +81,16 @@ pub mod key {
     pub const OPEN_EDITOR: Bind = ctrl_bind!("O");
     pub const PLAN_TOGGLE: Bind = ctrl_bind!("T");
     pub const MODEL_PICKER: Bind = ctrl_bind!("M");
+    pub const MODEL_PREVIOUS: Bind = Bind {
+        code: KeyCode::Char('['),
+        modifiers: KeyModifiers::CONTROL,
+        label: mod_key!("["),
+    };
+    pub const MODEL_NEXT: Bind = Bind {
+        code: KeyCode::Char(']'),
+        modifiers: KeyModifiers::CONTROL,
+        label: mod_key!("]"),
+    };
     pub const REFRESH: Bind = ctrl_bind!("R");
     pub const SUSPEND: Bind = ctrl_bind!("Z");
     pub const DELETE: Bind = ctrl_bind!("D");
@@ -272,6 +282,16 @@ pub const KEYBINDS: &[Keybind] = &[
     single(key::OPEN_EDITOR.label, "Open plan in editor", Ctx::General),
     single(key::PLAN_TOGGLE.label, "Toggle plan panel", Ctx::General),
     single(key::MODEL_PICKER.label, "Model picker", Ctx::General),
+    single(
+        key::MODEL_PREVIOUS.label,
+        "Cycle model tier backward (strong, medium, weak)",
+        Ctx::General,
+    ),
+    single(
+        key::MODEL_NEXT.label,
+        "Cycle model tier forward (weak, medium, strong)",
+        Ctx::General,
+    ),
     single(key::SUSPEND.label, "Suspend process", Ctx::General).on(Platform::UnixOnly),
     single("Enter", "Submit prompt", Ctx::Editing),
     kb(
