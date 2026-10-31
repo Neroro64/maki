@@ -134,6 +134,10 @@ impl StreamingContent {
         self.typewriter.is_empty()
     }
 
+    pub fn text(&self) -> &str {
+        self.typewriter.buffer()
+    }
+
     /// Counts everything streamed so far, revealed or not.
     pub fn line_count(&self) -> usize {
         thinking::line_count(self.typewriter.buffer())

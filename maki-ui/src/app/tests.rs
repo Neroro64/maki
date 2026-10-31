@@ -4833,6 +4833,7 @@ fn only_these(permissions: &[Permission]) -> PluginReach {
 #[test_case("/compact", &[Permission::Agent, Permission::SessionWrite] ; "compact")]
 #[test_case("/user:fix the tests", &[Permission::Agent, Permission::SessionWrite] ; "custom_command")]
 #[test_case(RUNNING_PLUGIN_COMMAND, &[Permission::Run] ; "plugin_command")]
+#[test_case("/copy", &[Permission::SessionRead] ; "copy_reads_session")]
 fn run_cmdline_needs_what_the_command_reaches(cmdline: &str, needed: &[Permission]) {
     let mut app = test_app();
     app.command_palette = CommandPalette::new(

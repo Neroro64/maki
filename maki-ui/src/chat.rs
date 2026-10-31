@@ -520,6 +520,10 @@ impl Chat {
         self.messages_panel.tool_done(event);
     }
 
+    pub(crate) fn assistant_outputs(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.messages_panel.assistant_outputs()
+    }
+
     #[cfg(test)]
     pub fn message_count(&self) -> usize {
         self.messages_panel.message_count()

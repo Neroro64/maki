@@ -288,6 +288,7 @@ impl App {
         }
 
         render_if_open!(self.rewind_picker);
+        render_if_open!(self.copy_picker);
         render_if_open!(self.theme_picker);
         render_if_open!(self.model_picker);
         render_if_open!(self.login_picker);
@@ -484,6 +485,8 @@ impl App {
             contexts.push(KeybindContext::QueueFocus);
         } else if self.rewind_picker.is_open() {
             contexts.push(KeybindContext::RewindPicker);
+        } else if self.copy_picker.is_open() {
+            contexts.push(KeybindContext::Picker);
         } else if self.theme_picker.is_open() {
             contexts.push(KeybindContext::ThemePicker);
         } else if self.model_picker.is_open() {

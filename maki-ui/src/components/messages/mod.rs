@@ -33,6 +33,7 @@ use maki_config::{ClockFormat, ThinkingLines, ToolOutputLines, UiConfig};
 use ratatui_image::picker::Picker;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::iter::once;
 use std::mem;
 use std::sync::Arc;
 use std::time::Instant;
@@ -534,6 +535,18 @@ impl MessagesPanel {
         entry.output = !entry.output;
         self.rebuild_expanded_tool(&tool_id);
         true
+    }
+
+    pub(crate) fn assistant_outputs(&self) -> impl DoubleEndedIterator<Item = &str> {
+        self.messages
+            .iter()
+            .filter(|message| {
+                message.role == DisplayRole::Assistant
+                    && (message.images.is_empty() || message.text != IMAGE_PLACEHOLDER)
+            })
+            .map(|message| message.text.as_str())
+            .chain(once(self.streaming_text.text()))
+            .filter(|text| !text.trim().is_empty())
     }
 
     #[cfg(test)]

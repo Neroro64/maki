@@ -18,6 +18,7 @@ Type `/` in the input box to open the command palette.
 | `/fork` | Fork this session and switch to the copy |
 | `/checkpoint` | Toggle git-based checkpoints for this session |
 | `/help` | Show keybindings |
+| `/copy` | Select an agent response to copy to the clipboard |
 | `/usage` | Show token usage breakdown |
 | `/queue` | Remove items from queue |
 | `/model` | Switch model |
@@ -50,6 +51,12 @@ Type `/` in the input box to open the command palette.
 Sessions run concurrently. `/new` starts a fresh session while the old one keeps working in the background, and `/sessions` shows the live status of each (working, needs input, idle) so you can jump between them. When a background session finishes or needs input, Maki flashes a note in the status bar. `/rename` renames the current session; in the session picker, `Ctrl+N` / `Ctrl+R` / `Ctrl+D` create, rename, and delete. Deleting the current session starts a fresh one and keeps the picker open.
 
 To find earlier conversations without resuming them, ask the agent to use `session_index` and `session_read`. Search defaults to this project. `scope = "all"` includes other projects. Results exclude thinking and tool-result bodies. See [Tools](/docs/tools/#session_index).
+
+## Copying agent output
+
+`/copy` opens a searchable list of text responses in the current chat, newest first. Use the arrow keys to select a response, or type or paste to filter its preview. Press `Enter` to copy the full text, including Markdown and code fences. `Esc` or `Ctrl+C` closes without copying.
+
+User messages, thinking, tool output, and image-only responses are excluded. For a response still streaming, copying uses the text received so far. The command uses the same native clipboard and terminal OSC52 fallback as text selection.
 
 ## Design
 
@@ -141,6 +148,7 @@ Aliasing adds a name, so both stay in the palette. Any command works as a target
 - Needs `run`, `agent`, `session_write`: `/review`.
 - Needs `agent`: `/btw`.
 - Needs `agent`, `session_write`: `/compact`, custom commands, MCP prompts.
+- Needs `session_read`: `/copy`.
 - Needs `session_write`: `/new`, `/fork`, `/checkpoint`.
 - Needs `session_write`, `session_settings`: `/rename`, `/sessions`.
 - Needs `session_settings`: `/model`, `/cd`, `/fast`, `/workflow`, `/thinking`.

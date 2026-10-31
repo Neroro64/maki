@@ -6,6 +6,7 @@
 
 mod btw;
 pub(crate) mod checkpoint;
+mod copy;
 mod image_paste;
 pub(crate) mod mode;
 mod mouse;
@@ -42,6 +43,7 @@ use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission, sent_text};
 use crate::components::keybindings::key;
+use crate::components::list_picker::ListPicker;
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
@@ -93,6 +95,7 @@ use crate::storage_writer::StorageWriter;
 use ratatui::layout::{Position, Rect};
 
 pub(crate) use crate::agent::QueuedMessage;
+use copy::{COPY_FOOTER, CopyEntry};
 pub(crate) use mode::{Mode, PlanState, PlanTrigger};
 #[cfg(test)]
 use mouse::EDGE_SCROLL_LINES;
@@ -521,6 +524,7 @@ pub struct App {
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
     pub(super) rewind_picker: RewindPicker,
+    pub(super) copy_picker: ListPicker<CopyEntry>,
     pub(super) alert_modal: AlertModal,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
@@ -666,6 +670,7 @@ impl App {
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             rewind_picker: RewindPicker::new(),
+            copy_picker: ListPicker::new().with_footer(COPY_FOOTER),
             alert_modal: AlertModal::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
@@ -826,6 +831,7 @@ impl App {
         if idx == self.active_chat {
             return;
         }
+        self.copy_picker.close();
         let draft = mem::take(&mut self.chats[idx].draft);
         self.chats[self.active_chat].draft = self.input_box.swap_draft(draft);
         self.active_chat = idx;
@@ -1297,6 +1303,7 @@ impl App {
             };
         }
         try_picker!(self.rewind_picker);
+        try_picker!(self.copy_picker);
         try_picker!(self.model_picker);
         try_picker!(self.file_picker);
         let zone = self.zone_at(row, column)?.zone;
@@ -1473,6 +1480,11 @@ impl App {
                 }
                 _ => {}
             }
+            return Some(vec![]);
+        }
+
+        if self.copy_picker.is_open() {
+            self.handle_copy_picker_key(key);
             return Some(vec![]);
         }
 
@@ -2704,6 +2716,10 @@ impl App {
                 self.toggle_prompt(self.help_modal.is_open(), |app| app.help_modal.toggle());
                 vec![]
             }
+            "/copy" => {
+                self.open_copy_picker();
+                vec![]
+            }
             "/usage" => {
                 self.toggle_prompt(self.usage_modal.is_open(), |app| app.usage_modal.toggle());
                 if self.usage_modal.is_open() {
@@ -2966,7 +2982,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 14] {
+    fn overlays(&self) -> [&dyn Overlay; 15] {
         [
             &self.alert_modal,
             &self.help_modal,
@@ -2976,6 +2992,7 @@ impl App {
             &self.search_modal,
             &self.file_picker,
             &self.rewind_picker,
+            &self.copy_picker,
             &self.theme_picker,
             &self.model_picker,
             &self.login_picker,
@@ -2985,7 +3002,7 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 15] {
         [
             &mut self.alert_modal,
             &mut self.help_modal,
@@ -2995,6 +3012,7 @@ impl App {
             &mut self.search_modal,
             &mut self.file_picker,
             &mut self.rewind_picker,
+            &mut self.copy_picker,
             &mut self.theme_picker,
             &mut self.model_picker,
             &mut self.login_picker,
@@ -3367,6 +3385,7 @@ impl App {
             return;
         }
         try_picker!(self.rewind_picker);
+        try_picker!(self.copy_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.model_picker);
         try_picker!(self.login_picker);
