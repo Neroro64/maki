@@ -60,6 +60,10 @@ impl App {
                 vec![Action::Compact(instructions)]
             }
             "/help" => self.run_builtin(BuiltinAction::Help),
+            "/copy" => {
+                self.open_copy_picker();
+                vec![]
+            }
             "/usage" => {
                 self.toggle_prompt(self.usage_modal.is_open(), |app| app.usage_modal.toggle());
                 if self.usage_modal.is_open() {

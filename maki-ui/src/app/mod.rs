@@ -8,6 +8,7 @@ mod agent_events;
 mod btw;
 pub(crate) mod checkpoint;
 mod commands;
+mod copy;
 mod image_paste;
 pub(crate) mod mode;
 mod mouse;
@@ -44,6 +45,7 @@ use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Placeholder, Submission, sent_text};
 use crate::components::keybindings::key;
+use crate::components::list_picker::ListPicker;
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
 use crate::components::mcp_picker::{McpPicker, McpPickerAction};
@@ -93,6 +95,7 @@ use strum::{EnumIter, IntoEnumIterator};
 use tokio::sync::oneshot;
 
 pub(crate) use crate::agent::QueuedMessage;
+use copy::{COPY_FOOTER, CopyEntry};
 use image_paste::PastedContent;
 #[cfg(test)]
 use image_paste::READING_CLIPBOARD_MSG;
@@ -241,6 +244,7 @@ enum KeyboardOwner {
     Search,
     FilePicker,
     Queue,
+    CopyPicker,
     RewindPicker,
     ThemePicker,
     ModelPicker,
@@ -528,6 +532,7 @@ pub struct App {
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
     pub(super) rewind_picker: RewindPicker,
+    pub(super) copy_picker: ListPicker<CopyEntry>,
     pub(super) alert_modal: AlertModal,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
@@ -687,6 +692,7 @@ impl App {
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             rewind_picker: RewindPicker::new(),
+            copy_picker: ListPicker::new().with_footer(COPY_FOOTER),
             alert_modal: AlertModal::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
@@ -883,6 +889,7 @@ impl App {
         if idx == self.active_chat {
             return;
         }
+        self.copy_picker.close();
         let draft = mem::take(&mut self.chats[idx].draft);
         self.chats[self.active_chat].draft = self.input_box.swap_draft(draft);
         self.active_chat = idx;
@@ -1387,6 +1394,7 @@ impl App {
             };
         }
         try_picker!(self.rewind_picker);
+        try_picker!(self.copy_picker);
         try_picker!(self.model_picker);
         try_picker!(self.file_picker);
         let zone = self.zone_at(row, column)?.zone;
@@ -1572,6 +1580,10 @@ impl App {
                     }
                     _ => {}
                 }
+                Some(vec![])
+            }
+            KeyboardOwner::CopyPicker => {
+                self.handle_copy_picker_key(key);
                 Some(vec![])
             }
             KeyboardOwner::RewindPicker => Some(match self.rewind_picker.handle_key(key) {
@@ -2548,6 +2560,7 @@ impl App {
             KeyboardOwner::FocusedWindow => &self.float_mgr,
             KeyboardOwner::Search => &self.search_modal,
             KeyboardOwner::FilePicker => &self.file_picker,
+            KeyboardOwner::CopyPicker => &self.copy_picker,
             KeyboardOwner::RewindPicker => &self.rewind_picker,
             KeyboardOwner::ThemePicker => &self.theme_picker,
             KeyboardOwner::ModelPicker => &self.model_picker,
@@ -2568,6 +2581,7 @@ impl App {
             KeyboardOwner::FocusedWindow => &mut self.float_mgr,
             KeyboardOwner::Search => &mut self.search_modal,
             KeyboardOwner::FilePicker => &mut self.file_picker,
+            KeyboardOwner::CopyPicker => &mut self.copy_picker,
             KeyboardOwner::RewindPicker => &mut self.rewind_picker,
             KeyboardOwner::ThemePicker => &mut self.theme_picker,
             KeyboardOwner::ModelPicker => &mut self.model_picker,
@@ -2795,6 +2809,7 @@ impl App {
                 self.refresh_search_matches();
             }
             KeyboardOwner::FilePicker => self.file_picker.handle_paste(text),
+            KeyboardOwner::CopyPicker => self.copy_picker.handle_paste(text),
             KeyboardOwner::RewindPicker => self.rewind_picker.handle_paste(text),
             KeyboardOwner::ThemePicker => self.theme_picker.handle_paste(text),
             KeyboardOwner::ModelPicker => self.model_picker.handle_paste(text),

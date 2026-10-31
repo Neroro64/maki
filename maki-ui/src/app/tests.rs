@@ -5500,6 +5500,7 @@ fn only_these(permissions: &[Permission]) -> PluginReach {
 #[test_case("/compact", &[Permission::Agent, Permission::SessionWrite] ; "compact")]
 #[test_case("/user:fix the tests", &[Permission::Agent, Permission::SessionWrite] ; "custom_command")]
 #[test_case(RUNNING_PLUGIN_COMMAND, &[Permission::Run] ; "plugin_command")]
+#[test_case("/copy", &[Permission::SessionRead] ; "copy_reads_session")]
 fn run_cmdline_needs_what_the_command_reaches(cmdline: &str, needed: &[Permission]) {
     let mut app = test_app();
     app.command_palette = CommandPalette::new(
@@ -13471,6 +13472,12 @@ fn open_file_picker(app: &mut App) {
     app.file_picker.open(env!("CARGO_MANIFEST_DIR"));
 }
 
+fn open_copy(app: &mut App) {
+    app.main_chat()
+        .load_messages(vec![DisplayMessage::new(DisplayRole::Assistant, "response".into())]);
+    app.open_copy_picker();
+}
+
 /// Exhaustive on purpose: a new owner does not build until it can be opened.
 fn open_owner(app: &mut App, owner: KeyboardOwner) {
     match owner {
@@ -13485,6 +13492,7 @@ fn open_owner(app: &mut App, owner: KeyboardOwner) {
         KeyboardOwner::Search => open_search(app),
         KeyboardOwner::FilePicker => open_file_picker(app),
         KeyboardOwner::Queue => focus_queue(app),
+        KeyboardOwner::CopyPicker => open_copy(app),
         KeyboardOwner::RewindPicker => open_rewind(app),
         KeyboardOwner::ThemePicker => open_theme(app),
         KeyboardOwner::ModelPicker => open_model_picker(app),
@@ -13505,6 +13513,7 @@ fn open_owner(app: &mut App, owner: KeyboardOwner) {
 #[test_case(KeyboardOwner::Search ; "search")]
 #[test_case(KeyboardOwner::FilePicker ; "file_picker")]
 #[test_case(KeyboardOwner::Queue ; "queue")]
+#[test_case(KeyboardOwner::CopyPicker ; "copy_picker")]
 #[test_case(KeyboardOwner::RewindPicker ; "rewind_picker")]
 #[test_case(KeyboardOwner::ThemePicker ; "theme_picker")]
 #[test_case(KeyboardOwner::ModelPicker ; "model_picker")]
@@ -13545,7 +13554,8 @@ fn each_owner_alone_holds_the_keyboard(owner: KeyboardOwner) {
 #[test_case(KeyboardOwner::FocusedWindow, KeyboardOwner::Search ; "focused_window_over_search")]
 #[test_case(KeyboardOwner::Search, KeyboardOwner::FilePicker ; "search_over_file_picker")]
 #[test_case(KeyboardOwner::FilePicker, KeyboardOwner::Queue ; "file_picker_over_queue")]
-#[test_case(KeyboardOwner::Queue, KeyboardOwner::RewindPicker ; "queue_over_rewind_picker")]
+#[test_case(KeyboardOwner::Queue, KeyboardOwner::CopyPicker ; "queue_over_copy_picker")]
+#[test_case(KeyboardOwner::CopyPicker, KeyboardOwner::RewindPicker ; "copy_picker_over_rewind_picker")]
 #[test_case(KeyboardOwner::RewindPicker, KeyboardOwner::ThemePicker ; "rewind_picker_over_theme_picker")]
 #[test_case(KeyboardOwner::ThemePicker, KeyboardOwner::ModelPicker ; "theme_picker_over_model_picker")]
 #[test_case(KeyboardOwner::ModelPicker, KeyboardOwner::LoginPicker ; "model_picker_over_login_picker")]
@@ -13600,6 +13610,7 @@ const OWNER_LEAKED_A_KEY: &str = "a key the holder of the keyboard answers must 
 #[test_case(KeyboardOwner::Search ; "search")]
 #[test_case(KeyboardOwner::FilePicker ; "file_picker")]
 #[test_case(KeyboardOwner::Queue ; "queue")]
+#[test_case(KeyboardOwner::CopyPicker ; "copy_picker")]
 #[test_case(KeyboardOwner::RewindPicker ; "rewind_picker")]
 #[test_case(KeyboardOwner::ThemePicker ; "theme_picker")]
 #[test_case(KeyboardOwner::ModelPicker ; "model_picker")]

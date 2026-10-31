@@ -56,6 +56,7 @@ impl App {
             KeyboardOwner::FocusedWindow => self.float_mgr.focused_caret(),
             KeyboardOwner::Search
             | KeyboardOwner::FilePicker
+            | KeyboardOwner::CopyPicker
             | KeyboardOwner::RewindPicker
             | KeyboardOwner::ThemePicker
             | KeyboardOwner::ModelPicker
@@ -337,6 +338,12 @@ impl App {
             record(
                 KeyboardOwner::FilePicker,
                 self.file_picker.view(frame, full),
+            );
+        }
+        if self.copy_picker.is_open() {
+            record(
+                KeyboardOwner::CopyPicker,
+                self.copy_picker.view(frame, full),
             );
         }
         if self.rewind_picker.is_open() {

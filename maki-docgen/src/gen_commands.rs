@@ -163,6 +163,9 @@ pub fn generate() -> String {
     )
     .unwrap();
     writeln!(out, "\nTo find earlier conversations without resuming them, ask the agent to use `session_index` and `session_read`. Search defaults to this project. `scope = \"all\"` includes other projects. Results exclude thinking and tool-result bodies. See [Tools](/docs/tools/#session_index).").unwrap();
+    writeln!(out, "\n## Copying agent output\n").unwrap();
+    writeln!(out, "`/copy` opens a searchable list of text responses in the current chat, newest first. Use the arrow keys to select a response, or type or paste to filter its preview. Press `Enter` to copy the full text, including Markdown and code fences. `Esc` or `Ctrl+C` closes without copying.").unwrap();
+    writeln!(out, "\nUser messages, thinking, tool output, and image-only responses are excluded. For a response still streaming, copying uses the text received so far. The command uses the same native clipboard and terminal OSC52 fallback as text selection.").unwrap();
     writeln!(out, "\n## Design\n").unwrap();
     writeln!(out, "`/design` or `Alt+G` toggles the design workflow. `/design on` and `/design off` set it explicitly. It preserves your identity and tone customizations and changes the workflow through a context update.").unwrap();
     writeln!(out, "\nFor websites, the agent starts or reuses a local dev server, opens the native browser, and inspects screenshots at mobile, tablet and desktop sizes. Chrome, Chromium or Brave must be installed. No companion plugin, Node browser driver or Playwright installation is required. Native applications use the computer tool and fresh screenshots. Windows capture uses the native desktop backend, including multiple monitors.").unwrap();

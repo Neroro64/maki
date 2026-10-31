@@ -107,6 +107,13 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         plugin_access: PluginAccess::Open,
     },
     BuiltinCommand {
+        name: "/copy",
+        description: "Select an agent response to copy to the clipboard",
+        max_args: 0,
+        bang: false,
+        plugin_access: PluginAccess::Needs(&[Permission::SessionRead]),
+    },
+    BuiltinCommand {
         name: "/usage",
         description: "Show token usage breakdown",
         max_args: 0,
