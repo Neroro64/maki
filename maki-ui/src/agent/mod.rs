@@ -91,6 +91,10 @@ impl AgentHandles {
     pub(crate) fn apply_to_app(&self, app: &mut App) {
         app.answer_tx = Some(self.answer_tx.clone());
         app.shared_history = Some(Arc::clone(&self.history));
+        app.file_access = self
+            .mailbox
+            .seed()
+            .map(|seed| Arc::clone(&seed.file_access));
         app.queue.set_shared(self.queue.clone());
         let restore_tx =
             maki_agent::EventSender::new(self.agent_tx.clone(), crate::app::RESTORE_RUN_ID);

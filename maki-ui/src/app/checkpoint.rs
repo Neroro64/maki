@@ -9,6 +9,7 @@ use std::env;
 use std::path::PathBuf;
 
 use maki_storage::checkpoint::{Checkpoints, StoredCheckpoint, session_subdir};
+use maki_storage::snapshot::Snapshots;
 
 use super::App;
 
@@ -51,9 +52,18 @@ impl App {
 
     fn spawn_checkpoint(&self, messages_len: usize) {
         let mut checkpoints = self.checkpoints();
+        let cwd = PathBuf::from(&self.state.session.cwd);
+        let session = self.state.session.id.to_string();
         let tx = self.checkpoint_tx.clone();
         smol::spawn(async move {
-            let event = match smol::unblock(move || checkpoints.commit(messages_len)).await {
+            let result = smol::unblock(move || {
+                if Snapshots::discover(&cwd, &session)?.is_some() {
+                    return Ok(None);
+                }
+                checkpoints.commit(messages_len)
+            })
+            .await;
+            let event = match result {
                 Ok(Some(sha)) => CheckpointEvent::Committed { messages_len, sha },
                 Ok(None) => return,
                 Err(e) => CheckpointEvent::Failed {

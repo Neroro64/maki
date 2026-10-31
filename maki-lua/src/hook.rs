@@ -14,10 +14,12 @@ use maki_agent::tools::hook::{Authority, HookCall, HookStage, ToolHook, Verdict}
 use maki_agent::tools::registry::BoxFuture;
 use serde_json::{Value, json};
 
-use crate::api::slot::{ANY_TOOL, LayerCost, LayeredTools, PERMISSION_PROMPT_SLOT, host_slot_name};
+use crate::api::slot::{
+    AGENT_STOP_SLOT, ANY_TOOL, LayerCost, LayeredTools, PERMISSION_PROMPT_SLOT, host_slot_name,
+};
 use crate::api::util::ctx::LuaCtx;
 use crate::plugin_permissions::Permission;
-use crate::runtime::{HookRun, PromptRun, Request};
+use crate::runtime::{HookRun, PromptRun, Request, hook_failure};
 
 /// Every `agent.*` slot steers what the agent does next: the prompt it
 /// answers, whether it stops, what it remembers after a compaction. No
@@ -54,17 +56,32 @@ fn deadline_ms(deadline: Instant) -> u64 {
 }
 
 impl SlotHook {
-    /// A runtime that is gone, or one that drops the request on the way
-    /// down, leaves the value as it found it. A missing opinion is not a
-    /// failure of whatever asked for it.
+    /// A missing runtime is a missing opinion, except for a completion gate:
+    /// stop must answer successfully before its caller may finish.
     fn send(&self, run: HookRun) -> BoxFuture<'_, Verdict> {
+        let stop = run.slots.iter().any(|slot| slot == AGENT_STOP_SLOT);
+        let deadline = run.deadline;
         let (reply, answer) = flume::bounded(1);
         let request = Request::RunHook { run, reply };
         Box::pin(async move {
-            if self.tx.send_async(request).await.is_err() {
-                return Verdict::Unchanged;
+            let send = async {
+                if self.tx.send_async(request).await.is_err() {
+                    return hook_failure(stop, "plugin runtime is gone");
+                }
+                answer
+                    .recv_async()
+                    .await
+                    .unwrap_or_else(|_| hook_failure(stop, "plugin runtime dropped the stop reply"))
+            };
+            if stop {
+                futures_lite::future::or(send, async {
+                    smol::Timer::at(deadline).await;
+                    hook_failure(true, "deadline exceeded")
+                })
+                .await
+            } else {
+                send.await
             }
-            answer.recv_async().await.unwrap_or(Verdict::Unchanged)
         })
     }
 }
@@ -164,5 +181,84 @@ impl AgentHook for SlotHook {
             }),
             may_ask: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::time::Duration;
+
+    use maki_agent::CancelToken;
+    use test_case::test_case;
+
+    use super::{AgentCall, AgentHook, AgentSlot, Arc, Instant, SlotHook, Verdict, json};
+
+    const MODEL: &str = "test/model";
+    const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+    const WARNING: &str = "[DIFF INTEGRITY WARNING]";
+
+    #[test_case(AgentSlot::Stop, true ; "stop_send_closed")]
+    #[test_case(AgentSlot::Stop, false ; "stop_reply_closed")]
+    #[test_case(AgentSlot::UserMessage, true ; "other_slot_send_closed")]
+    #[test_case(AgentSlot::UserMessage, false ; "other_slot_reply_closed")]
+    fn broken_hook_transport_only_denies_stop(slot: AgentSlot, close_request: bool) {
+        smol::block_on(async {
+            let (tx, rx) = flume::unbounded();
+            let hook = SlotHook {
+                tx,
+                layered: Arc::default(),
+            };
+            let cancel = CancelToken::none();
+            let call = AgentCall {
+                session_id: None,
+                task_id: None,
+                model: MODEL,
+                context_size: 0,
+                context_window: 0,
+                cancel: &cancel,
+                deadline: Instant::now() + HOOK_TIMEOUT,
+            };
+            let verdict = if close_request {
+                drop(rx);
+                AgentHook::run(&hook, slot, json!({}), &call).await
+            } else {
+                futures_lite::future::or(AgentHook::run(&hook, slot, json!({}), &call), async {
+                    drop(rx.recv_async().await.unwrap());
+                    pending::<Verdict>().await
+                })
+                .await
+            };
+            if slot == AgentSlot::Stop {
+                assert!(matches!(verdict, Verdict::Denied(warning)
+                    if warning.contains(WARNING)));
+            } else {
+                assert!(matches!(verdict, Verdict::Unchanged));
+            }
+        });
+    }
+
+    #[test]
+    fn unanswered_stop_transport_denies_at_deadline() {
+        smol::block_on(async {
+            let (tx, _rx) = flume::unbounded();
+            let hook = SlotHook {
+                tx,
+                layered: Arc::default(),
+            };
+            let cancel = CancelToken::none();
+            let call = AgentCall {
+                session_id: None,
+                task_id: None,
+                model: MODEL,
+                context_size: 0,
+                context_window: 0,
+                cancel: &cancel,
+                deadline: Instant::now(),
+            };
+            let verdict = AgentHook::run(&hook, AgentSlot::Stop, json!({}), &call).await;
+            assert!(matches!(verdict, Verdict::Denied(warning)
+                if warning.contains(WARNING)));
+        });
     }
 }

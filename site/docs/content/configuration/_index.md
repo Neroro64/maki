@@ -132,7 +132,7 @@ How many lines of output to show per tool in the UI. All values are `usize` with
 | `post_compaction_instructions` | String | `none` | - | Extra instructions the agent receives after any compaction (e.g. re-read plan.md) |
 | `stale_read_check` | bool | `true` | - | Require re-reading a file that changed on disk before editing it |
 | `rtk` | bool | `true` | - | Rewrite the model's bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed |
-| `checkpoint` | bool | `false` | - | Commit working-tree changes to a temp git at the end of each turn so rewind restores project state |
+| `checkpoint` | bool | `false` | - | Save turn-end filesystem checkpoints outside Git repositories; Git projects use hidden per-turn snapshot refs automatically |
 | `context_notes` | bool | `false` | - | Give the agent a context_notes notebook that survives compaction, with reminders near the compaction threshold |
 | `shell` | string | `auto` | - | Shell for string commands on Windows (`jobstart`, UI `!`): `auto` (Git Bash if installed, else `cmd.exe`), `cmd`, or a path to an executable |
 
@@ -333,6 +333,20 @@ maki.setup({
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
 | `max_file_size_mb` | integer | `2` | 1 | Refuse to index files larger than this many MB. |
+
+### `plugins.lsp_speculate`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `command` | string | `""` | - | Override the LSP command for every file; quote argv with shell-words syntax, never shell syntax. |
+| `go_command` | string | `"gopls"` | - | Go LSP command, shell-words quoted; executed directly without a shell. |
+| `javascript_command` | string | `"typescript-language-server --stdio"` | - | JavaScript/JSX LSP command (not raw tsserver). |
+| `language_id` | string | `""` | - | Override the LSP language id; empty infers it from the file extension. |
+| `python_command` | string | `"pyright-langserver --stdio"` | - | Python LSP command, shell-words quoted; executed directly without a shell. |
+| `root` | string | `""` | - | Workspace root; empty uses the nearest .git ancestor or file directory. |
+| `rust_command` | string | `"rust-analyzer"` | - | Rust LSP command, shell-words quoted; executed directly without a shell. |
+| `timeout_ms` | integer | `30000` | 1 | Total speculation deadline in milliseconds. |
+| `typescript_command` | string | `"typescript-language-server --stdio"` | - | TypeScript/TSX LSP command (not raw tsserver). |
 
 ### `plugins.pwsh`
 

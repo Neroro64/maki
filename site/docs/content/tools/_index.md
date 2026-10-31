@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 31 built-in tools in this reference (30 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 32 built-in tools in this reference (31 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 ## File Operations
 
@@ -122,6 +122,17 @@ Return a compact overview of a source file: imports, type definitions, function 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | yes | Absolute path to the file |
+
+### `lsp_speculate` {#lsp_speculate}
+
+Diagnose a candidate line replacement with a real language server, entirely in memory. Never writes the file.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `end_line` | integer | yes | Last source line to replace (inclusive, 1-based). |
+| `file_path` | string | yes | Existing source file, absolute, cwd-relative, or ~/ path. |
+| `replacement_text` | string | yes | Whole-line candidate replacement; empty deletes the range. |
+| `start_line` | integer | yes | First source line to replace (inclusive, 1-based). |
 
 ### `view_image` {#view_image}
 

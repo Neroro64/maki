@@ -1,0 +1,11 @@
+[permissions]
+fs_read = true
+fs_write = true
+run = true
+agent = true
+session_read = true
+session_write = true
+env = true
+session_settings = true
+input = true
+net = true

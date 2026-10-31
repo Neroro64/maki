@@ -25,6 +25,7 @@ const INSTRUCTION_FILES: &[&str] = &[
 
 const LOCAL_INSTRUCTION_FILE: &str = "AGENTS.local.md";
 const GLOBAL_INSTRUCTION_FILE: &str = "AGENTS.md";
+const REFLECTION_RULES_FILE: &str = ".maki/rules.md";
 
 /// Instruction files the model has seen this session. Startup inserts the
 /// root files; a subdirectory file is inserted by the dispatcher only once its
@@ -193,6 +194,11 @@ fn collect_instruction_files(
                 format!("Local instructions ({})", canonical.display()),
                 content,
             ));
+        }
+        if let Some((canonical, content)) =
+            read_instruction(&dir.join(REFLECTION_RULES_FILE), loaded)
+        {
+            out.push((format!("Learned rules ({})", canonical.display()), content));
         }
     }
 

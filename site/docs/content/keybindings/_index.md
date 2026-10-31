@@ -88,6 +88,8 @@ Some pickers add extra bindings on top of the defaults:
 
 | Context | Key | Action |
 |---------|-----|--------|
+| Rewind Picker | `Enter` | Rewind chat and code to the selected prompt |
+| Rewind Picker | `Tab` | Rewind chat only to the selected prompt |
 | Rewind Picker | `Ctrl+F` | Fork up to the selected prompt and switch to it |
 | Queue | `Enter` | Remove item |
 | Commands | `Tab` | Complete command |

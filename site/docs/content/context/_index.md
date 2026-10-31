@@ -148,7 +148,31 @@ maki.setup({
 })
 ```
 
-An empty `files` list skips every project instruction file, and `AGENTS.local.md` still loads. An `overrides` entry matches by `path` (a glob against the project root) or by `remote` (a glob against the project's git remotes, normalized to `host/path`); an entry with neither matches every project. The first matching entry wins, and one that sets no `files` still ends the search. See [configuration](/docs/configuration/#instructions).
+An empty `files` list skips the configured project instruction files. `AGENTS.local.md` and learned `.maki/rules.md` still load. An `overrides` entry matches by `path` (a glob against the project root) or by `remote` (a glob against the project's git remotes, normalized to `host/path`); an entry with neither matches every project. The first matching entry wins, and one that sets no `files` still ends the search. See [configuration](/docs/configuration/#instructions).
+
+## Learning from corrections
+
+Run `/reflect` after correcting a mistake and applying its working fix. Optional
+arguments describe the correction, for example `/reflect use std::path::Path,
+not std::bad::Path`. A rewind preserves a compact discarded trajectory for the
+same session, so a later reflection can include the rejected attempt.
+
+The configured weak model tier sees bounded failure, correction, and final-source
+snippets. It proposes one operational rule or a regex/tree-sitter guard. Maki
+rejects unsupported patterns, ungrounded examples, platitudes, and over-budget
+rules before saving. A guard must match the failed example and accept the fix.
+
+Behavioral rules append to `.maki/rules.md` and reach the current session through
+an append-only notice. Later sessions load them beside project instructions.
+Each rule is limited to 40 words and 240 UTF-8 bytes. The file has a total budget
+of 512 estimated tokens.
+
+Guards live in `.maki/guards.lua` as versioned JSON inside a Lua string literal.
+The file is parsed as data, never executed. Built-in edit and write paths reject
+new matches before changing files, including after concurrent AST reconciliation.
+Unchanged baseline matches do not block unrelated edits. Invalid stored policy
+fails closed. Shell commands and direct plugin filesystem calls do not use this
+pre-write seam.
 
 ## Four places to put knowledge
 
@@ -223,6 +247,24 @@ The `@` popup searches the file index. `Tab` completes the path you are typing, 
 
 While the popup is up it takes these keys, so `Tab` inserts a row rather than toggling mode. The popup closes when you move the caret out of the token, edit the input, switch sessions, or switch the focused task. The plugin is on by default, and its options are under `plugins.tabcomplete` in [configuration](/docs/configuration/).
 
+## Rewinding chat and code
+
+Press `Esc` twice while idle to select an earlier prompt. `Enter` restores chat
+and code. `Tab` restores chat only. The selected prompt returns to the input
+for revision.
+
+Before a file-writing or shell tool runs, Maki saves the working tree under
+`refs/maki/snapshots/<session-id>/<turn-id>` in the project repository. These
+commits do not move `HEAD` or enter branch history. A full rewind restores the
+original Git index as well as file contents, preserving staged changes and
+pre-existing untracked files. It removes recorded session-created files and
+prunes later snapshot refs. It does not run a blanket `git clean`.
+
+Restoration waits for active file mutations. Tasks from the discarded timeline
+cannot write afterward. A failed restoration leaves the chat unchanged. Outside
+a Git repository, filesystem rewind requires the existing checkpoint option.
+
+
 ## When the window fills
 
 Long sessions eventually approach the model's context limit. Maki reserves a slice of the window (`agent.compaction_buffer`, default 20%) and before running out it summarizes the older turns and continues from the summary. `/compact` triggers it early, `/compact keep the repro steps` steers that one summary, `/usage` shows where the tokens went, and `agent.compaction_instructions` steers every summary.
@@ -257,5 +299,24 @@ With `background = true` the tool answers right away and the parent keeps workin
 To stop a task, open `/tasks`, select it, and press Ctrl+S. The parent still gets the result on its next turn, but the notice does not wake it.
 
 Background and blocking tasks share `plugins.task.max_concurrent`. A background task cannot ask for permission, so its tools need [allow rules](/docs/permissions/) or YOLO. Plan mode still blocks its file writes. Closing the chat or reloading plugins stops the chat's background tasks. Headless, SDK, and ACP runs have no live chat to deliver to, so there the call blocks as usual.
+
+### Concurrent edits
+
+Task subagents acquire qualified AST symbol locks before built-in edits. Two
+tasks can change different functions or methods in one file. Maki reconciles
+their cached read baselines by symbol, so line-count changes in one function do
+not redirect another task's numbered edit. A conflicting edit reports the
+holder, task intent, symbol, and path before writing.
+
+Locks last until the task completes, stops, or is rewound. Structural changes,
+ambiguous declarations, and unsupported languages conservatively lock the whole
+file. Whole-file writes retain strict stale-read checks. Main-agent edits check
+active task claims but do not retain their own symbol locks. These claims cover
+the built-in edit and write tools, not arbitrary shell commands or external
+editors.
+
+The [diff integrity gate](/docs/hooks/#diff-integrity-gate) checks changed code
+before a main agent finishes or a task returns its summary. It requires fixes
+or current-diff justifications for removed checks and new suppressions.
 
 Related: [Token Economy](/docs/token-economy/) for why all this frugality exists, [Configuration](/docs/configuration/) for the knobs.

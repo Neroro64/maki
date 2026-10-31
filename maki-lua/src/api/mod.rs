@@ -13,6 +13,7 @@ pub(crate) mod interpreter;
 pub(crate) mod json;
 pub(crate) mod keymap;
 pub(crate) mod log;
+pub(crate) mod lsp;
 pub(crate) mod mcp;
 pub(crate) mod model;
 pub(crate) mod net;
@@ -21,6 +22,7 @@ pub(crate) mod pack;
 pub(crate) mod plan;
 pub(crate) mod provider;
 pub(crate) mod pwsh;
+pub(crate) mod regex;
 pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod split;
@@ -93,6 +95,7 @@ pub(crate) fn create_maki_global(
         fs::create_fs_table(lua, permissions, Arc::clone(&plugin))?,
     )?;
     maki.set("log", log::create_log_table(lua, Arc::clone(&plugin))?)?;
+    maki.set("lsp", lsp::create_lsp_table(lua, permissions)?)?;
     maki.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
     maki.set("uv", uv::create_uv_table(lua, permissions)?)?;
     maki.set("base64", base64::create_base64_table(lua)?)?;
@@ -150,6 +153,7 @@ pub(crate) fn create_maki_global(
         )?,
     )?;
     split::split__register(&maki, lua)?;
+    regex::add_regex(&maki, lua)?;
     top::add_top_methods(&maki, lua, Arc::clone(&plugin))?;
     maki.set("NIL", Value::NULL)?;
     maki.set(
@@ -172,7 +176,7 @@ pub(crate) fn create_maki_global(
     )?;
     maki.set(
         "agent",
-        agent::create_agent_table(lua, Arc::clone(&plugin), permissions.clone())?,
+        agent::create_agent_table(lua, Arc::clone(&plugin), permissions, permissions.clone())?,
     )?;
     maki.set(
         "keymap",

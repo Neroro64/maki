@@ -14,7 +14,9 @@ pub mod registry;
 pub mod schema;
 
 pub use deadline::Deadline;
-pub use file_access::{FileAccess, FileKey};
+pub use file_access::{
+    DiffSnapshot, FileAccess, FileKey, SymbolLease, SymbolLock, SymbolLockTable,
+};
 pub use hook::{Authority, HookCall, HookStage, ToolHook, Verdict};
 pub use registry::{
     BoxFuture, ExecFuture, HeaderFuture, HeaderResult, ParseError, PermissionScopes,

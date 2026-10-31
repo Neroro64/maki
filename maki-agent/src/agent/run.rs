@@ -311,6 +311,13 @@ impl<'h> Agent<'h> {
             source,
         } = input;
         self.rollback_len = self.history.len();
+        if self.task_id.is_none()
+            && self.background_for.is_none()
+            && let Some(session) = &self.session_id
+        {
+            self.file_access
+                .begin_snapshot_turn(session.as_str(), self.rollback_len);
+        }
         self.carry_from = self.history.len();
         self.stop_continuations = 0;
         self.mode = mode;
@@ -451,6 +458,7 @@ impl<'h> Agent<'h> {
             // one.
             self.sync_model();
             if self.turns_exhausted() {
+                self.keep_going(DoneReason::MaxTurns).await?;
                 return Ok(DoneReason::MaxTurns);
             }
             self.notes
@@ -761,42 +769,70 @@ impl<'h> Agent<'h> {
     }
 
     /// True when a layer kept the run going, with its message now last in
-    /// history. A run out of turns is not asked, because its continuation
-    /// would just sit there unanswered.
+    /// history. Even exhausted runs consult Stop: a required continuation or
+    /// denial must not turn unresolved warnings into a successful completion.
     async fn keep_going(&mut self, reason: DoneReason) -> Result<bool, AgentError> {
-        if self.stop_continuations >= MAX_STOP_CONTINUATIONS || self.turns_exhausted() {
-            return Ok(false);
+        if self.cancel.is_cancelled() {
+            return Err(AgentError::Cancelled);
         }
         let reason = match reason {
             DoneReason::MaxTokens => STOP_MAX_TOKENS,
             _ => STOP_FINISHED,
         };
-        let last_message = self
-            .history
-            .as_slice()
-            .last()
-            .filter(|m| matches!(m.role, Role::Assistant))
-            .and_then(Message::first_text_content)
-            .unwrap_or_default();
         let verdict = self
             .hooks()
-            .fire(AgentSlot::Stop, || {
-                json!({
+            .fire_fallible(AgentSlot::Stop, || async {
+                let file_access = Arc::clone(&self.file_access);
+                let diff_snapshot =
+                    smol::unblock(move || serde_json::to_value(file_access.diff_snapshot()))
+                        .await?;
+                let last_message = self
+                    .history
+                    .as_slice()
+                    .last()
+                    .filter(|m| matches!(m.role, Role::Assistant))
+                    .and_then(Message::first_text_content)
+                    .unwrap_or_default();
+                let user_request = self
+                    .history
+                    .as_slice()
+                    .iter()
+                    .rev()
+                    .filter(|m| matches!(m.role, Role::User) && !m.is_from_host())
+                    .find_map(Message::user_text)
+                    .unwrap_or_default();
+                Ok(json!({
                     "reason": reason,
                     "last_message": last_message,
                     "num_turns": self.num_turns,
-                })
+                    "user_request": user_request,
+                    "diff_snapshot": diff_snapshot,
+                }))
             })
             .await;
         if self.cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
-        let Verdict::Replaced(value) = verdict else {
-            return Ok(false);
+        let value = match verdict {
+            Verdict::Denied(reason) => return Err(self.stop_error(reason)),
+            Verdict::Replaced(value) => value,
+            Verdict::Unchanged | Verdict::Ask { .. } => return Ok(false),
         };
+        let required = value.get("required").and_then(Value::as_bool) == Some(true);
         let Some(message) = compaction::continue_text(&value) else {
-            return Ok(false);
+            return if required {
+                Err(self.stop_error("required continuation has no message".into()))
+            } else {
+                Ok(false)
+            };
         };
+        if self.stop_continuations >= MAX_STOP_CONTINUATIONS || self.turns_exhausted() {
+            return if required {
+                Err(self.stop_error(message.to_owned()))
+            } else {
+                Ok(false)
+            };
+        }
         self.stop_continuations += 1;
         info!(
             continuations = self.stop_continuations,
@@ -805,6 +841,16 @@ impl<'h> Agent<'h> {
         self.steer(SteerKind::Continued, message.to_owned())?;
         self.history.push(Message::synthetic(message.to_owned()));
         Ok(true)
+    }
+
+    fn stop_error(&self, reason: String) -> AgentError {
+        let warning =
+            format!("[DIFF INTEGRITY WARNING] Completion blocked by agent.stop: {reason}");
+        warn!(warning, "agent.stop blocked completion");
+        AgentError::Tool {
+            tool: AgentSlot::Stop.name().into(),
+            message: warning,
+        }
     }
 
     /// The gauge is a chars/4 floor, so a prompt can overflow with the
@@ -1136,6 +1182,13 @@ impl<'h> Agent<'h> {
                         .await?;
                     let message = kept.map(|text| interrupt_message(text, input.images));
                     if message.is_some() {
+                        if self.task_id.is_none()
+                            && self.background_for.is_none()
+                            && let Some(session) = &self.session_id
+                        {
+                            self.file_access
+                                .begin_snapshot_turn(session.as_str(), self.history.len());
+                        }
                         self.mode = input.mode;
                         // The user spoke, so `agent.stop` gets its full
                         // allowance back.
@@ -3916,34 +3969,148 @@ mod tests {
         });
     }
 
-    /// A layer that always says "continue" is exactly what both bounds are
-    /// for. The mock holds one turn past what the bound allows, so a missing
-    /// bound panics instead of looping.
-    #[test_case(None, MAX_STOP_CONTINUATIONS ; "capped_in_a_row")]
-    #[test_case(Some(1), 0 ; "not_asked_on_the_last_turn")]
-    fn stop_continuations_are_bounded(max_turns: Option<u32>, allowed: u32) {
+    #[test_case(Some(0), 0, StopReason::EndTurn ; "max_turn_fast_exit")]
+    #[test_case(Some(1), 1, StopReason::EndTurn ; "last_allowed_turn")]
+    #[test_case(Some(1), 1, StopReason::MaxTokens ; "truncated_last_turn")]
+    #[test_case(None, MAX_STOP_CONTINUATIONS + 1, StopReason::EndTurn ; "continuation_cap")]
+    fn required_stop_warnings_cannot_be_bypassed(
+        max_turns: Option<u32>,
+        turns: u32,
+        stop_reason: StopReason,
+    ) {
         smol::block_on(async {
-            let allowed = allowed as usize;
             let mut history = History::new(Vec::new());
             let (mut agent, event_rx) = make_agent(
+                MockProvider::new((0..turns).map(|_| text_response(stop_reason)).collect()),
+                &mut history,
+            );
+            agent.config.max_turns = max_turns;
+            let seen = script(
+                &agent.registry,
+                answer_only(
+                    AgentSlot::Stop,
+                    json!({ FIELD_CONTINUE: KEEP_GOING, "required": true }),
+                ),
+            );
+
+            let error = agent.run(default_input()).await.unwrap_err();
+            assert!(
+                matches!(error, AgentError::Tool { message: ref warning, .. }
+                if warning.contains("[DIFF INTEGRITY WARNING]") && warning.contains(KEEP_GOING))
+            );
+            assert!(
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(slot, _)| *slot == AgentSlot::Stop)
+            );
+            drop(agent);
+            let events = drain_events(&event_rx);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.event, AgentEvent::Done { .. }))
+            );
+            assert_continued(&events, &history, turns.saturating_sub(1) as usize);
+        });
+    }
+
+    #[test_case(None, 1 ; "normal_finish")]
+    #[test_case(Some(1), 1 ; "last_allowed_turn")]
+    #[test_case(Some(0), 0 ; "max_turn_fast_exit")]
+    fn denied_stop_is_an_error_not_completion(max_turns: Option<u32>, turns: u32) {
+        smol::block_on(async {
+            let mut history = History::new(Vec::new());
+            let (mut agent, _events) = make_agent(
                 MockProvider::new(
-                    (0..=allowed)
+                    (0..turns)
                         .map(|_| text_response(StopReason::EndTurn))
                         .collect(),
                 ),
                 &mut history,
             );
             agent.config.max_turns = max_turns;
-            script(
-                &agent.registry,
-                answer_only(AgentSlot::Stop, json!({ FIELD_CONTINUE: KEEP_GOING })),
+            script(&agent.registry, |slot, _| {
+                if slot == AgentSlot::Stop {
+                    Verdict::Denied(KEEP_GOING.into())
+                } else {
+                    Verdict::Unchanged
+                }
+            });
+            assert!(
+                matches!(agent.run(default_input()).await, Err(AgentError::Tool { message: warning, .. })
+                if warning.contains(KEEP_GOING))
             );
+        });
+    }
 
-            let reason = agent.run(default_input()).await.unwrap();
-            drop(agent);
-
+    #[test_case(2 ; "resolved_on_last_turn")]
+    #[test_case(MAX_STOP_CONTINUATIONS + 1 ; "resolved_at_continuation_cap")]
+    fn required_stop_can_finish_when_resolved_without_rewriting_requests(resolved_at: u32) {
+        smol::block_on(async {
+            const REQUEST: &str = "Fix the child task assertion; do not remove it.";
+            let provider = MockProvider::new(
+                (0..resolved_at)
+                    .map(|_| text_response(StopReason::EndTurn))
+                    .collect(),
+            );
+            let requests = Arc::clone(&provider.requests);
+            let mut history = History::new(vec![Message::user("parent request".into())]);
+            let (mut agent, event_rx) = make_agent(provider, &mut history);
+            agent.task_id = Some("child".into());
+            agent.config.max_turns = Some(resolved_at);
+            let seen = script(&agent.registry, move |slot, value| {
+                if slot == AgentSlot::Stop
+                    && value["num_turns"].as_u64().unwrap() < u64::from(resolved_at)
+                {
+                    Verdict::Replaced(json!({ FIELD_CONTINUE: KEEP_GOING, "required": true }))
+                } else {
+                    Verdict::Unchanged
+                }
+            });
+            let reason = agent
+                .run(AgentInput {
+                    message: REQUEST.into(),
+                    ..default_input()
+                })
+                .await
+                .unwrap();
             assert_eq!(reason, DoneReason::EndTurn);
-            assert_continued(&drain_events(&event_rx), &history, allowed);
+            for (_, value) in seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(slot, _)| *slot == AgentSlot::Stop)
+            {
+                assert_eq!(value["user_request"], REQUEST);
+            }
+            let requests = requests.lock().unwrap();
+            for pair in requests.windows(2) {
+                assert_append_only(&pair[0], &pair[1]);
+            }
+            drop(agent);
+            assert_continued(&drain_events(&event_rx), &history, resolved_at as usize - 1);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unserializable_stop_path_fails_closed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        smol::block_on(async {
+            let mut history = History::new(Vec::new());
+            let (agent, _events) = make_agent(MockProvider::new(Vec::new()), &mut history);
+            script(&agent.registry, |_, _| Verdict::Unchanged);
+            let verdict = agent
+                .hooks()
+                .fire_fallible(AgentSlot::Stop, || async {
+                    serde_json::to_value(std::path::PathBuf::from(OsString::from_vec(vec![0xff])))
+                })
+                .await;
+            assert!(matches!(verdict, Verdict::Denied(warning)
+                if warning.contains("[DIFF INTEGRITY WARNING]") && warning.contains("serialized")));
         });
     }
 

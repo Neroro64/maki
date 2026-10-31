@@ -579,6 +579,18 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
+        label: KeyLabel::Single("Enter"),
+        description: "Rewind chat and code to the selected prompt",
+        context: KeybindContext::RewindPicker,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single("Tab"),
+        description: "Rewind chat only to the selected prompt",
+        context: KeybindContext::RewindPicker,
+        platform: Platform::All,
+    },
+    Keybind {
         label: KeyLabel::Single(key::FORK.label),
         description: "Fork up to the selected prompt and switch to it",
         context: KeybindContext::RewindPicker,

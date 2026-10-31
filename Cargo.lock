@@ -3600,6 +3600,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shell-words",
+ "similar",
  "smol",
  "strum 0.28.0",
  "tempfile",

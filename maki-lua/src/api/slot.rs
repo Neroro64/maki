@@ -29,6 +29,9 @@ const HOST_PREFIXES: [&str; 4] = [HOST_PREFIX, UI_PREFIX, AGENT_PREFIX, PERMISSI
 /// `tool.*.input` wraps every call, whichever tool it names.
 pub(crate) const ANY_TOOL: &str = "*";
 
+/// Completion gates must survive neither a broken layer nor a swallowed `prev` error.
+pub(crate) const AGENT_STOP_SLOT: &str = "agent.stop";
+
 /// Fired where the permission prompt would show. The default is the prompt
 /// itself, so a layer either answers for the user or passes the call on.
 pub(crate) const PERMISSION_PROMPT_SLOT: &str = "permission.prompt";
@@ -374,6 +377,9 @@ fn make_prev(chain: &Chain, rest: usize, state: &PrevCell) -> LuaResult<Function
 /// - called `prev`: the rest already ran, so return the stored outcome
 ///   rather than re-running it
 ///
+/// `agent.stop` is a completion precondition: any layer error propagates,
+/// including an error from `prev` that an outer layer caught.
+///
 /// Errors from the default propagate unwrapped: the default is the owner's
 /// own function, same as any local call.
 fn invoke_chain(
@@ -389,9 +395,20 @@ fn invoke_chain(
         let prev = make_prev(&chain, idx - 1, &state)?;
         let mut layer_args = args.clone();
         layer_args.push_front(Value::Function(prev));
-        let result =
-            call_swallowing::<MultiValue>(&layer.func, layer_args, &chain.name, &layer.plugin)
-                .await;
+        let result = if chain.name.as_ref() == AGENT_STOP_SLOT {
+            let result = layer.func.call_async::<MultiValue>(layer_args).await;
+            let prior = take_state(&state, PrevState::Expired);
+            if let PrevState::Done(Err(error)) = prior {
+                return Err(error);
+            }
+            let returned = result?;
+            if let Some(observe) = &chain.observe {
+                observe(&layer.plugin, &returned);
+            }
+            return Ok(returned);
+        } else {
+            call_swallowing::<MultiValue>(&layer.func, layer_args, &chain.name, &layer.plugin).await
+        };
         match (result, take_state(&state, PrevState::Expired)) {
             (Some(r), _) => {
                 if let Some(observe) = &chain.observe {
@@ -682,8 +699,8 @@ pub(crate) fn parse_capability(
 /// is queued and attached when the slot is declared.
 ///
 /// A layer may park, and one that throws is skipped: the chain continues
-/// as if it had returned `prev(...)` untouched, so a broken layer never
-/// takes the seam down with it.
+/// as if it had returned `prev(...)` untouched. `agent.stop` is the exception:
+/// errors block completion, even after `prev` ran or its error was caught.
 ///
 /// Layers wrap in registration order, so the last one registered runs
 /// first and sees the value before the others do.

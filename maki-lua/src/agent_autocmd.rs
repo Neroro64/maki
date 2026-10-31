@@ -4,10 +4,10 @@
 //! way maki was started. `maki-acp` drives the agent from its own loop and
 //! does not call this yet, so plugins loaded under ACP get no turn events.
 
-use std::fmt::Display;
+use std::fmt::{Arguments, Display, Error as FmtError, Result as FmtResult, Write};
 
 use maki_agent::{AgentEvent, DoneReason, Envelope};
-use maki_providers::TokenUsage;
+use maki_providers::{ContentBlock, Message, Role, TokenUsage};
 use serde::Serialize;
 use serde_json::Value;
 use strum::{EnumDiscriminants, EnumString, IntoStaticStr, VariantArray};
@@ -15,6 +15,9 @@ use strum::{EnumDiscriminants, EnumString, IntoStaticStr, VariantArray};
 use crate::EventHandle;
 
 const SESSION_ID: &str = "session_id";
+const MAX_TRAJECTORY_BYTES: usize = 12 * 1024;
+const MAX_TRAJECTORY_BLOCKS: usize = 24;
+const MAX_TRAJECTORY_BLOCK_BYTES: usize = MAX_TRAJECTORY_BYTES / MAX_TRAJECTORY_BLOCKS - 1;
 
 /// Every event the host fires, one variant each, and [`EventHandle::fire`]
 /// takes nothing else. Each field lands in the payload, so
@@ -65,6 +68,10 @@ pub enum HostEvent<'a> {
     },
     PlanReady {
         path: &'a str,
+    },
+    Rewind {
+        turn_index: usize,
+        trajectory: &'a str,
     },
     SessionReset {},
     SessionEnd {
@@ -194,6 +201,7 @@ impl HostEventKind {
             ),
             Self::TurnError => (&[], &["message"]),
             Self::PlanReady => (&[], &["path"]),
+            Self::Rewind => (&["trajectory"], &["turn_index"]),
             Self::SessionReset => (&[], &[]),
             Self::SessionEnd => (&[], &["reason", "deadline_ms"]),
             Self::SessionFocusChanged => (&[], &["previous_session_id"]),
@@ -309,6 +317,89 @@ fn turn_end_reason(reason: DoneReason) -> Option<&'static str> {
     }
 }
 
+struct TrajectoryWriter<'a> {
+    text: &'a mut String,
+    limit: usize,
+}
+
+impl Write for TrajectoryWriter<'_> {
+    fn write_str(&mut self, text: &str) -> FmtResult {
+        let remaining = self.limit.saturating_sub(self.text.len());
+        if text.len() <= remaining {
+            self.text.push_str(text);
+            return Ok(());
+        }
+        self.text
+            .push_str(&text[..text.floor_char_boundary(remaining)]);
+        Err(FmtError)
+    }
+}
+
+fn append_trajectory(text: &mut String, args: Arguments<'_>) {
+    let limit = (text.len() + MAX_TRAJECTORY_BLOCK_BYTES).min(MAX_TRAJECTORY_BYTES - 1);
+    let _ = TrajectoryWriter { text, limit }.write_fmt(args);
+    text.push('\n');
+}
+
+/// Compact recent tool failures, corrections and fixes without exposing thinking or images.
+pub fn compact_trajectory(messages: &[Message]) -> String {
+    let blocks: Vec<_> = messages
+        .iter()
+        .rev()
+        .flat_map(|message| {
+            message
+                .content
+                .iter()
+                .rev()
+                .map(move |block| (&message.role, block))
+        })
+        .filter(|(_, block)| {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. }
+            )
+        })
+        .take(MAX_TRAJECTORY_BLOCKS)
+        .collect();
+    let mut out = String::with_capacity(MAX_TRAJECTORY_BYTES);
+    for (role, block) in blocks.into_iter().rev() {
+        if out.len() >= MAX_TRAJECTORY_BYTES - 1 {
+            break;
+        }
+        match block {
+            ContentBlock::Text { text } => {
+                let speaker = if *role == Role::User {
+                    "user"
+                } else {
+                    "assistant"
+                };
+                append_trajectory(&mut out, format_args!("{speaker}: {text}"));
+            }
+            ContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
+                append_trajectory(&mut out, format_args!("tool {id} {name} input: {input}"));
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
+                let status = if *is_error { "[error]" } else { "[ok]" };
+                append_trajectory(
+                    &mut out,
+                    format_args!("tool_result {tool_use_id} {status}: {content}"),
+                );
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -325,6 +416,78 @@ mod tests {
     const TOOL_TEXT: &str = "ok";
     const TOOL_COMMAND: &str = "cargo test";
     const TOOL_MILLIS: u64 = 42;
+    const FAILED_IMPORT: &str = "unresolved import legacy::danger";
+    const IMPORT_CORRECTION: &str = "Replace legacy::danger with safe::checked.";
+    const WORKING_IMPORT: &str = "use safe::checked;";
+    const PRIVATE_THINKING: &str = "private reasoning and signature";
+
+    #[test_case("old output"; "ascii")]
+    #[test_case("古い出力"; "unicode")]
+    fn rewind_trajectory_keeps_failure_correction_and_fix_without_private_blocks(text: &str) {
+        let mut messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: text.repeat(MAX_TRAJECTORY_BYTES)
+                }],
+                ..Default::default()
+            };
+            MAX_TRAJECTORY_BLOCKS
+        ];
+        messages.extend([
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: PRIVATE_THINKING.into(),
+                        signature: Some(PRIVATE_THINKING.into()),
+                    },
+                    ContentBlock::tool_use(
+                        "bad-import",
+                        "edit",
+                        json!({ "new_string": "use legacy::danger;" }),
+                    ),
+                ],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result("bad-import", FAILED_IMPORT, true)],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: IMPORT_CORRECTION.into(),
+                }],
+                ..Default::default()
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use(
+                    "fixed-import",
+                    "edit",
+                    json!({ "new_string": WORKING_IMPORT }),
+                )],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(
+                    "fixed-import",
+                    WORKING_IMPORT,
+                    false,
+                )],
+                ..Default::default()
+            },
+        ]);
+        let trajectory = compact_trajectory(&messages);
+        assert!(trajectory.contains(FAILED_IMPORT));
+        assert!(trajectory.contains(IMPORT_CORRECTION));
+        assert!(trajectory.contains(WORKING_IMPORT));
+        assert!(!trajectory.contains(PRIVATE_THINKING));
+        assert!(trajectory.len() <= MAX_TRAJECTORY_BYTES);
+    }
 
     fn fired(event: &AgentEvent) -> Option<(&'static str, Value)> {
         host_event_for(event, false).map(|e| (e.name(), e.payload(Some(&SESSION))))
@@ -480,6 +643,10 @@ mod tests {
                 message: SAMPLE_TEXT,
             },
             HostEventKind::PlanReady => HostEvent::PlanReady { path: SAMPLE_TEXT },
+            HostEventKind::Rewind => HostEvent::Rewind {
+                turn_index: 0,
+                trajectory: SAMPLE_TEXT,
+            },
             HostEventKind::SessionReset => HostEvent::SessionReset {},
             HostEventKind::SessionEnd => HostEvent::SessionEnd {
                 reason: SAMPLE_TEXT,

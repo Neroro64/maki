@@ -90,9 +90,9 @@ pub struct HookCall<'a> {
     pub deadline: Instant,
 }
 
-/// How a hook answered. `Unchanged` also covers every way a hook can fail: a
-/// hook is an opinion about a call, never a precondition for making it, so a
-/// broken one costs exactly what no hook costs.
+/// How a hook answered. Tool hook failures pass through as `Unchanged`:
+/// a broken opinion costs what no hook costs. Agent Stop is a completion gate
+/// instead, so its failures produce `Denied`.
 #[derive(Debug)]
 pub enum Verdict {
     Unchanged,

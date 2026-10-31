@@ -2,8 +2,9 @@
 //! message arriving, a run about to stop, a compaction about to start. They
 //! keep the contract of [`crate::tools::hook`], so a plugin author only learns
 //! one: a table replaces the value, nothing leaves it alone, and `nil, reason`
-//! stops where stopping makes sense.
+//! stops where stopping makes sense. Stop alone fails closed on hook errors.
 
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 use maki_providers::Model;
@@ -16,13 +17,13 @@ use crate::tools::hook::Verdict;
 use crate::tools::registry::BoxFuture;
 
 /// A layer may shell out before it decides, but the user is waiting on every
-/// one of these. Past this the loop moves on without it.
+/// one of these. Past this other slots pass through; Stop blocks completion.
 const AGENT_CHAIN_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum AgentSlot {
     UserMessage,
-    /// The model ended its turn without calling a tool.
+    /// Before completion, including exits caused by the turn budget.
     Stop,
     CompactBefore,
     /// Picks which tool results the summarizer reads collapsed.
@@ -80,10 +81,20 @@ impl AgentHooks<'_> {
         self.registry.agent_hook().is_some_and(|h| h.wraps(slot))
     }
 
-    /// `value` is only built when a layer is there to read it. A cancelled or
-    /// absent chain answers [`Verdict::Unchanged`], because a layer is an
-    /// opinion about the run and never a precondition for it.
+    /// `value` is only built when a layer is there to read it. Cancellation
+    /// answers unchanged here; the loop preserves it as cancellation.
     pub async fn fire(&self, slot: AgentSlot, value: impl FnOnce() -> Value) -> Verdict {
+        self.fire_fallible(slot, || async move { Ok(value()) })
+            .await
+    }
+
+    /// A frozen Stop descriptor can contain paths that JSON cannot serialize.
+    /// Such failures must block completion, without building an unwrapped slot.
+    pub async fn fire_fallible<F: Future<Output = serde_json::Result<Value>>>(
+        &self,
+        slot: AgentSlot,
+        value: impl FnOnce() -> F,
+    ) -> Verdict {
         let Some(hook) = self.registry.agent_hook().filter(|h| h.wraps(slot)) else {
             return Verdict::Unchanged;
         };
@@ -97,10 +108,30 @@ impl AgentHooks<'_> {
             cancel: self.cancel,
             deadline: Instant::now() + AGENT_CHAIN_MAX,
         };
-        self.cancel
-            .race(hook.run(slot, value(), &call))
-            .await
-            .unwrap_or(Verdict::Unchanged)
+        let invoke = async {
+            let value = match value().await {
+                Ok(value) => value,
+                Err(error) if slot == AgentSlot::Stop => {
+                    return Verdict::Denied(format!(
+                        "[DIFF INTEGRITY WARNING] agent.stop value could not be serialized: {error}"
+                    ));
+                }
+                Err(_) => return Verdict::Unchanged,
+            };
+            hook.run(slot, value, &call).await
+        };
+        let run = async {
+            if slot == AgentSlot::Stop {
+                futures_lite::future::or(invoke, async {
+                    smol::Timer::at(call.deadline).await;
+                    Verdict::Denied("[DIFF INTEGRITY WARNING] agent.stop deadline exceeded".into())
+                })
+                .await
+            } else {
+                invoke.await
+            }
+        };
+        self.cancel.race(run).await.unwrap_or(Verdict::Unchanged)
     }
 }
 

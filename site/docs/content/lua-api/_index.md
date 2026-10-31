@@ -132,6 +132,7 @@ The rules:
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
+| [`maki.fs.WriteLock`](#maki-fs-WriteLock) | A process-wide cooperating write permit. |
 | [`maki.image`](#maki-image) | Small building blocks for working with images: probe metadata, decode |
 | [`maki.image.Image`](#maki-image-Image) | An image you can inspect, resize, and re-encode. |
 | [`maki.interpreter`](#maki-interpreter) | Run Python code in a memory-safe, time-limited sandbox. |
@@ -139,6 +140,7 @@ The rules:
 | [`maki.json.SchemaValidator`](#maki-json-SchemaValidator) | A compiled JSON Schema validator. |
 | [`maki.keymap`](#maki-keymap) | Key mappings, modeled after `vim.keymap`. |
 | [`maki.log`](#maki-log) | Structured logging for plugins. |
+| [`maki.lsp`](#maki-lsp) | In-memory language-server diagnostics for speculative line replacements. |
 | [`maki.mcp`](#maki-mcp) | Read-only views over the MCP servers this session runs with. |
 | [`maki.model`](#maki-model) | The model behind the focused session. |
 | [`maki.net`](#maki-net) | HTTP and plain TCP for plugins. |
@@ -148,6 +150,7 @@ The rules:
 | [`maki.provider.auth`](#maki-provider-auth) | Credential storage for the providers this plugin registered. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.Timer`](#maki-Timer) | Handle returned by `maki.defer_fn`. |
+| [`maki.Regex`](#maki-Regex) | A compiled Rust regular expression returned by `maki.regex`. |
 | [`maki.task`](#maki-task) | The subagents of the focused session and their transcripts. |
 | [`maki.text`](#maki-text) | Text utilities: format conversion and the fuzzy matcher the built-in |
 | [`maki.treesitter`](#maki-treesitter) | Tree-sitter parsing and query API. |
@@ -392,6 +395,32 @@ maki.NIL
 local t = maki.json.decode('{"a": null}')
 assert(t.a == maki.NIL)
 print(maki.json.encode(t)) -- {"a":null}
+```
+
+---
+
+### `maki.regex()` {#maki-regex}
+
+```lua
+maki.regex({pattern})
+```
+
+Compile a Rust regular expression off the Lua thread. Patterns are limited
+to 4096 bytes and compiled programs to 1 MiB. Uses Rust regex syntax, not
+Vim or Lua patterns; invalid patterns return an error before use.
+
+**Parameters:**
+
+- `{pattern}` (`string`) Rust regular expression.
+
+**Returns:** ([`maki.Regex?`](#maki-Regex), `string?`) Compiled expression, or nil plus an error.
+
+**Example:**
+
+```lua
+local re, err = maki.regex("\\\\bunsafe\\\\b")
+if not re then return end
+local first, last = re:match_str("unsafe fn run() {}")
 ```
 
 
@@ -1218,8 +1247,8 @@ You can call this before the owner runs `declare_slot`. The layer
 is queued and attached when the slot is declared.
 
 A layer may park, and one that throws is skipped: the chain continues
-as if it had returned `prev(...)` untouched, so a broken layer never
-takes the seam down with it.
+as if it had returned `prev(...)` untouched. `agent.stop` is the exception:
+errors block completion, even after `prev` ran or its error was caught.
 
 Layers wrap in registration order, so the last one registered runs
 first and sees the value before the others do.
@@ -1668,6 +1697,74 @@ local out, err = maki.agent.call_tool(ctx, "bash", {
 })
 if err then error(err) end
 print(out)
+```
+
+---
+
+### `maki.agent.lock_symbols()` {#maki-agent-lock_symbols}
+
+```lua
+maki.agent.lock_symbols({ctx}, {path}, {symbols})
+```
+
+Claim qualified declaration names before committing a targeted edit.
+Claims remain held until the subagent session closes, cancels, or rewinds.
+The main agent checks subagent claims without retaining its own.
+
+Requires the `fs_write` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{ctx}` (`LuaCtx`) Agent context.
+- `{path}` (`string`) File path.
+- `{symbols}` (`string[]`) Qualified symbol names, or `"<file>"` for the whole file.
+
+**Returns:** (`boolean?`, `string?`) `(true, nil)` or `(nil, err)` on conflict.
+
+---
+
+### `maki.agent.edit_snapshot()` {#maki-agent-edit_snapshot}
+
+```lua
+maki.agent.edit_snapshot({ctx}, {path})
+```
+
+Return a task's cached read source only when the file changed since that read.
+Main-agent reads and uncached files return `(nil, nil)`.
+
+Requires the `fs_read` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{ctx}` (`LuaCtx`) Agent context.
+- `{path}` (`string`) File path.
+
+**Returns:** (`string?`, `string?`) Cached source, or `(nil, err)` on failure.
+
+---
+
+### `maki.agent.rewind_trajectory()` {#maki-agent-rewind_trajectory}
+
+```lua
+maki.agent.rewind_trajectory({opts})
+```
+
+Read the latest compact discarded trajectory of a live chat session.
+Rewind publishes it before the chat changes. Session end clears it.
+Contains no thinking or images and is bounded to 12 KiB.
+
+Requires the `session_read` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) `session` (string) Live chat session id.
+
+**Returns:** (`string?`, `string?`) Latest trajectory, nil if none, or nil plus an error.
+
+**Example:**
+
+```lua
+local failed, err = maki.agent.rewind_trajectory({ session = sid })
 ```
 
 ---
@@ -2975,7 +3072,7 @@ Requires the `run` [plugin permission](#plugin-permissions).
 - `{timeout_ms?}` (`integer?`) Maximum wait in milliseconds (default 30000).
 
 **Returns:** (`table?`, `string?`) `{ stdout, stderr, exit_code, truncated }`, or
-  nil plus an error on timeout or an unknown job.
+  nil plus an error on timeout, unreadable/non-UTF-8 output, or an unknown job.
 
 **Example:**
 
@@ -2997,6 +3094,7 @@ maki.fn.jobinfo({job_id})
 
 Snapshot a job this plugin can see. Live jobs report tails collected
 so far; session-owned jobs still answer after they exit.
+`read_error` describes failed output capture, including non-UTF-8 output.
 
 Requires the `run` [plugin permission](#plugin-permissions).
 
@@ -3005,7 +3103,7 @@ Requires the `run` [plugin permission](#plugin-permissions).
 - `{job_id}` (`integer`) Job id returned by `jobstart`.
 
 **Returns:** (`table|nil`, `string|nil`) `{ id, command, name, pid, session, status,
-  exit_code, elapsed_secs, stdout_lines, stderr_lines }`, or nil and
+  exit_code, elapsed_secs, read_error, stdout_lines, stderr_lines }`, or nil and
   an error. `status` is `"running"` or `"exited"`.
 
 **Example:**
@@ -3034,7 +3132,7 @@ Requires the `run` [plugin permission](#plugin-permissions).
 - `{session?}` (`string?`) Session id filter.
 
 **Returns:** (`table`) array of `{ id, command, name, pid, session, status,
-  exit_code, elapsed_secs }`.
+  exit_code, elapsed_secs, read_error }`.
 
 **Example:**
 
@@ -3685,6 +3783,34 @@ if err then print("atomic write failed: " .. err) end
 
 ---
 
+### `maki.fs.write_lock()` {#maki-fs-write_lock}
+
+```lua
+maki.fs.write_lock({path})
+```
+
+Serialize cooperating writes to a normalized path across plugin instances
+in this process. Does not access or modify that file. The lock is released
+by `:release()` or garbage collection. Acquisition honors task cancellation.
+
+Requires the `fs_write` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{path}` (`string`) Shared write identity.
+
+**Returns:** ([`maki.fs.WriteLock?`](#maki-fs-WriteLock), `string?`) Held permit, or nil plus an error.
+
+**Example:**
+
+```lua
+local permit, err = maki.fs.write_lock(root)
+if not permit then return end
+permit:release()
+```
+
+---
+
 ### `maki.fs.rm()` {#maki-fs-rm}
 
 ```lua
@@ -3876,6 +4002,29 @@ for _, item in ipairs(res.items) do
   print(item.path, r and item.path:sub(r[1], r[2]))
 end
 if not res.complete then print("still scanning, ask again") end
+```
+
+
+## maki.fs.WriteLock {#maki-fs-WriteLock}
+
+A process-wide cooperating write permit.
+
+---
+
+### `WriteLock:release()` {#WriteLock-release}
+
+```lua
+WriteLock:release()
+```
+
+Release the held write lock. Repeated calls are harmless.
+
+**Returns:** (`true?`, `string?`) Always true.
+
+**Example:**
+
+```lua
+permit:release()
 ```
 
 
@@ -4648,6 +4797,61 @@ Emit an ERROR-level log message. Use for failures that need attention.
 
 ```lua
 maki.log.error("failed to connect to API")
+```
+
+
+## maki.lsp {#maki-lsp}
+
+In-memory language-server diagnostics for speculative line replacements.
+Default adapters: rust-analyzer, pyright-langserver --stdio,
+typescript-language-server --stdio, and gopls. Servers must be installed.
+
+---
+
+### `maki.lsp.speculate()` {#maki-lsp-speculate}
+
+```lua
+maki.lsp.speculate({opts})
+```
+
+Ask a language server to diagnose a replacement without writing the file.
+The inclusive, 1-based range is replaced only in the server's open document.
+The disk source is restored and the document closed after every trial.
+Concurrent trials sharing a server are serialized.
+
+Unrelated baseline diagnostics are excluded. Errors and warnings touching the
+replacement or newly reported elsewhere in the workspace are retained. Messages are the
+original language-server messages, not model judgments. A timeout, unsupported
+server, or failed request returns an error, never a clean result.
+
+Requires the `fs_read` and `run` [plugin permissions](#plugin-permissions).
+
+**Parameters:**
+
+- `{opts}` (`table`) Options. Fields:
+  - `file_path` (`string`) existing file, relative to cwd or absolute; ~/ is supported.
+  - `start_line` (`integer`) first line to replace, inclusive and 1-based.
+  - `end_line` (`integer`) last line to replace, inclusive and 1-based.
+  - `replacement_text` (`string`) candidate text; an empty string removes the range.
+  - `root` (`string?`) workspace directory; defaults to the nearest .git ancestor or file directory.
+  - `language_id` (`string?`) LSP language id; inferred for Rust, Python, JS/TS, and Go.
+  - `command` (`table|string?`) argv array or shell-words-quoted command; executed directly, never through a shell.
+  - `timeout` (`integer?`) total deadline in milliseconds, default 30000.
+
+**Returns:** (`table?`, `string?`) `{ file_path, diagnostics, clean }` or `(nil, err)`.
+  Diagnostics contain file_path, 1-based line and end_line, severity, message,
+  and optional source and code. clean means no retained errors or warnings.
+
+**Example:**
+
+```lua
+-- Inside the code_execution tool, try candidates without intermediate writes:
+-- for candidate in candidates:
+--     result = json.loads(await lsp_speculate(file_path="src/main.rs",
+--         start_line=3, end_line=3, replacement_text=candidate))
+--     if result["clean"]:
+--         print(candidate)
+--         break
 ```
 
 
@@ -6053,6 +6257,57 @@ h:stop()
 ```
 
 
+## maki.Regex {#maki-Regex}
+
+A compiled Rust regular expression returned by `maki.regex`.
+
+---
+
+### `Regex:match_str()` {#Regex-match_str}
+
+```lua
+Regex:match_str({text})
+```
+
+Find the first match. Offsets are zero-based bytes; the end is exclusive.
+Text is limited to 2 MiB.
+
+**Parameters:**
+
+- `{text}` (`string`) Text to search.
+
+**Returns:** (`integer?`, `integer?`) Start and end offsets, or nil, nil when absent.
+
+**Example:**
+
+```lua
+local first, last = re:match_str("unsafe fn run() {}")
+```
+
+---
+
+### `Regex:ranges()` {#Regex-ranges}
+
+```lua
+Regex:ranges({text})
+```
+
+Find all non-overlapping matches off the Lua thread. At most 8192 matches
+and 2 MiB of text are accepted; exceeding either limit returns an error.
+
+**Parameters:**
+
+- `{text}` (`string`) Text to search.
+
+**Returns:** (`table?`, `string?`) Array of zero-based, end-exclusive `{start, end}` byte ranges, or nil plus an error.
+
+**Example:**
+
+```lua
+local ranges, err = re:ranges(source)
+```
+
+
 ## maki.task {#maki-task}
 
 The subagents of the focused session and their transcripts. Tasks are
@@ -6285,6 +6540,32 @@ for _, m in ipairs(maki.text.fuzzy_list(query, names, { limit = 10 })) do
 end
 ```
 
+---
+
+### `maki.text.unchanged_ranges()` {#maki-text-unchanged_ranges}
+
+```lua
+maki.text.unchanged_ranges({before}, {after})
+```
+
+Map unchanged byte spans between two texts, including separated changes.
+Each range is a three-element array `{old_start, new_start, length}` with zero-based offsets.
+Runs off-thread, accepts at most 2 MiB per input and 8192 unchanged spans,
+and fails rather than returning a partial diff when its deadline expires.
+
+**Parameters:**
+
+- `{before}` (`string`) Original text.
+- `{after}` (`string`) Candidate text.
+
+**Returns:** (`table?`, `string?`) Unchanged ranges, or nil plus an error.
+
+**Example:**
+
+```lua
+local equal, err = maki.text.unchanged_ranges(before, after)
+```
+
 
 ## maki.treesitter {#maki-treesitter}
 
@@ -6342,6 +6623,28 @@ Alias for `get_parser`. Use whichever name you prefer.
 - `{lang}` (`string`) Language name.
 
 **Returns:** ([`LanguageTree|nil`](#maki-treesitter-LanguageTree), `string|nil`) Parser, or nil and an error message.
+
+---
+
+### `maki.treesitter.language_for_path()` {#maki-treesitter-language_for_path}
+
+```lua
+maki.treesitter.language_for_path({path})
+```
+
+Resolves a path to its built-in tree-sitter grammar using the shared extension registry.
+
+**Parameters:**
+
+- `{path}` (`string`) Source file path.
+
+**Returns:** (`string|nil`) Grammar name, or nil for an unsupported extension.
+
+**Example:**
+
+```lua
+local lang = maki.treesitter.language_for_path("src/main.rs") -- "rust"
+```
 
 ---
 
@@ -6651,6 +6954,33 @@ Throws if the language is unknown or the query has a syntax error.
 
 ```lua
 local q = maki.treesitter.query.parse("lua", "(identifier) @id")
+```
+
+---
+
+### `maki.treesitter.query.parse_strict()` {#maki-treesitter-query-parse_strict}
+
+```lua
+maki.treesitter.query.parse_strict({lang}, {query})
+```
+
+Compile a query for deterministic enforcement off the Lua thread.
+Unlike `parse`, errors return a pair. Unknown predicates, directives,
+malformed predicate arguments and invalid regular expressions are rejected.
+Queries are limited to 4096 bytes, 64 patterns and 64 captures; strict
+iterators also fail on source, match-count or cursor-budget exhaustion.
+
+**Parameters:**
+
+- `{lang}` (`string`) Language name.
+- `{query}` (`string`) Tree-sitter S-expression query.
+
+**Returns:** ([`Query?`](#maki-treesitter-Query), `string?`) Compiled query, or nil plus an error.
+
+**Example:**
+
+```lua
+local q, err = maki.treesitter.query.parse_strict("rust", '(identifier) @id')
 ```
 
 ---
@@ -9079,6 +9409,13 @@ function M.list(path, ctx)
 function M.view(text, ctx)
 ```
 
+### `require("maki.edit_policy")`
+
+```lua
+function M.apply(ctx, path, before, after)
+function M.check(ctx, path, before, after)
+```
+
 ### `require("maki.fuzzy_replace")`
 
 ```lua
@@ -9090,6 +9427,13 @@ M.EMPTY_OLD_STRING = "old_string must not be empty"
 -- whitespace and indentation drift. Returns the new content, or nil plus
 -- one of the error constants above.
 function M.replace(content, old_string, new_string, replace_all)
+```
+
+### `require("maki.guards")`
+
+```lua
+function M.save(root, proposal)
+function M.check(path, before, after)
 ```
 
 ### `require("maki.list_picker")`

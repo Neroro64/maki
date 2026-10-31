@@ -1,13 +1,19 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
+use std::time::{Duration, Instant};
 
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, LuaString, Result as LuaResult, Table};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 
 use super::util::convert::TableExt;
-use super::util::pair::{Pair, pair, try_pair};
+use super::util::pair::{Pair, err_pair, pair, try_pair};
+
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DIFF_RANGES: usize = 8192;
+const DIFF_TIMEOUT: Duration = Duration::from_millis(250);
 
 thread_local! {
     /// `Matcher::new` allocates a score matrix of about 135KB, so building one
@@ -201,6 +207,58 @@ fn fuzzy_list(
     })
 }
 
+/// Map unchanged byte spans between two texts, including separated changes.
+/// Each range is a three-element array `{old_start, new_start, length}` with zero-based offsets.
+/// Runs off-thread, accepts at most 2 MiB per input and 8192 unchanged spans,
+/// and fails rather than returning a partial diff when its deadline expires.
+///
+/// @param before string Original text.
+/// @param after string Candidate text.
+/// @return (table?, string?) Unchanged ranges, or nil plus an error.
+/// @example
+/// local equal, err = maki.text.unchanged_ranges(before, after)
+#[lua_fn]
+async fn unchanged_ranges(lua: Lua, before: String, after: String) -> LuaResult<Pair<Table>> {
+    if before.len() > MAX_DIFF_BYTES || after.len() > MAX_DIFF_BYTES {
+        return Ok(err_pair("diff source exceeds 2-MiB limit"));
+    }
+    let ranges = try_pair!(
+        smol::unblock(move || {
+            let deadline = Instant::now() + DIFF_TIMEOUT;
+            let ops = capture_diff_slices_deadline(
+                Algorithm::Myers,
+                before.as_bytes(),
+                after.as_bytes(),
+                Some(deadline),
+            );
+            if Instant::now() >= deadline {
+                return Err("diff deadline exceeded; cannot safely identify unchanged matches");
+            }
+            let mut ranges = Vec::new();
+            for op in ops {
+                if let DiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } = op
+                {
+                    if ranges.len() == MAX_DIFF_RANGES {
+                        return Err("diff range count exceeds 8192 limit");
+                    }
+                    ranges.push([old_index, new_index, len]);
+                }
+            }
+            Ok(ranges)
+        })
+        .await
+    );
+    let out = lua.create_table_with_capacity(ranges.len(), 0)?;
+    for range in ranges {
+        out.push(lua.create_sequence_from(range)?)?;
+    }
+    Ok((Some(out), None))
+}
+
 lua_table! {
     /// Text utilities: format conversion and the fuzzy matcher the built-in
     /// pickers use.
@@ -210,7 +268,7 @@ lua_table! {
     /// local hits = maki.text.fuzzy_list("mrs", names, { limit = 10 })
     /// ```
     "maki.text" => pub(crate) fn create_text_table(), DOCS [
-        html_to_markdown, fuzzy, fuzzy_list,
+        html_to_markdown, fuzzy, fuzzy_list, unchanged_ranges,
     ]
 }
 

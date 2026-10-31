@@ -40,6 +40,7 @@ const SCOPE_TYPE_ERR: &str = "jobstart: scope must be \"task\", \"plugin\", or {
 const JOB_NOT_FOUND_ERR: &str = "job: not found";
 const JOB_UNWAITABLE_ERR: &str = "jobwait: unknown job id or already waited";
 const JOB_WAIT_TIMEOUT_ERR: &str = "jobwait: timed out";
+const JOB_OUTPUT_READ_ERR: &str = "job output read failed";
 const BLANK_NAME_ERR: &str = "jobstart: name must be non-blank";
 const EMPTY_ARGV_ERR: &str = "jobstart: argv table must not be empty";
 const CMD_TYPE_ERR: &str = "jobstart: cmd must be a shell string or an argv table";
@@ -57,6 +58,7 @@ pub(crate) enum JobEvent {
     Stdout(String),
     Stderr(String),
     Exit(i32),
+    ReadError(Arc<str>),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -194,6 +196,7 @@ struct JobMeta {
     /// Exit code owed to an `on_exit` attached after the process already died,
     /// served once by [`JobStore::next_matching`] as a synthetic event.
     replay_exit: Option<i32>,
+    read_error: Option<Arc<str>>,
 }
 
 impl JobMeta {
@@ -345,10 +348,22 @@ impl JobStore {
                         thread::Builder::new()
                             .name($name.into())
                             .spawn(move || {
-                                for line in BufReader::with_capacity(READER_BUF_SIZE, stream)
-                                    .lines()
-                                    .map_while(Result::ok)
+                                for line in
+                                    BufReader::with_capacity(READER_BUF_SIZE, stream).lines()
                                 {
+                                    let line = match line {
+                                        Ok(line) => line,
+                                        Err(error) => {
+                                            let _ = tx.send(JobEvent::ReadError(
+                                                format!(
+                                                    "{JOB_OUTPUT_READ_ERR} ({}): {error}",
+                                                    $name
+                                                )
+                                                .into(),
+                                            ));
+                                            break;
+                                        }
+                                    };
                                     if tx.send(JobEvent::$variant(line)).is_err() {
                                         break;
                                     }
@@ -409,6 +424,7 @@ impl JobStore {
                 exit_code: None,
                 elapsed_secs: None,
                 replay_exit: None,
+                read_error: None,
             },
         );
 
@@ -433,6 +449,7 @@ impl JobStore {
             JobEvent::Stdout(_) => meta.on_stdout.as_ref(),
             JobEvent::Stderr(_) => meta.on_stderr.as_ref(),
             JobEvent::Exit(_) => meta.on_exit.as_ref(),
+            JobEvent::ReadError(_) => None,
         }
     }
 
@@ -504,6 +521,10 @@ impl JobStore {
         match event {
             JobEvent::Stdout(line) => job.record_line(true, line),
             JobEvent::Stderr(line) => job.record_line(false, line),
+            JobEvent::ReadError(error) => {
+                job.read_error.get_or_insert_with(|| Arc::clone(error));
+                job.dropped_output = true;
+            }
             // Termination is [`Self::complete`]'s business: it owns
             // `exit_code` and runs once per job.
             JobEvent::Exit(_) => {}
@@ -746,6 +767,7 @@ pub(crate) struct JobSnapshot {
     /// Some output never reached the tails, so what they hold is a window
     /// onto a longer stream.
     pub dropped_output: bool,
+    pub read_error: Option<Arc<str>>,
 }
 
 impl JobSnapshot {
@@ -771,6 +793,7 @@ impl JobSnapshot {
                 Vec::new()
             },
             dropped_output: job.dropped_output,
+            read_error: job.read_error.clone(),
         }
     }
 }
@@ -1040,10 +1063,11 @@ fn parse_scope(lua: &Lua, plugin: &Arc<str>, scope: Value) -> LuaResult<JobOwner
 
 /// Snapshot a job this plugin can see. Live jobs report tails collected
 /// so far; session-owned jobs still answer after they exit.
+/// `read_error` describes failed output capture, including non-UTF-8 output.
 ///
 /// @param job_id integer Job id returned by `jobstart`.
 /// @return (table|nil, string|nil) `{ id, command, name, pid, session, status,
-///   exit_code, elapsed_secs, stdout_lines, stderr_lines }`, or nil and
+///   exit_code, elapsed_secs, read_error, stdout_lines, stderr_lines }`, or nil and
 ///   an error. `status` is `"running"` or `"exited"`.
 /// @example
 /// local info = maki.fn.jobinfo(id)
@@ -1120,7 +1144,7 @@ fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpda
 ///
 /// @param session string? Session id filter.
 /// @return (table) array of `{ id, command, name, pid, session, status,
-///   exit_code, elapsed_secs }`.
+///   exit_code, elapsed_secs, read_error }`.
 /// @example
 /// local jobs = maki.fn.joblist(maki.session.current())
 #[lua_fn(guard = Run)]
@@ -1158,6 +1182,7 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table
         },
     )?;
     row.set("exit_code", snap.exit_code)?;
+    row.set("read_error", snap.read_error.as_deref())?;
     if tails {
         let stdout = lua.create_table()?;
         for (i, line) in snap.stdout_lines.iter().enumerate() {
@@ -1218,7 +1243,7 @@ fn jobforget(lua: &Lua, #[ctx] plugin: Arc<str>, job_id: u32) -> LuaResult<()> {
 /// @param job_id integer Job id returned by `jobstart`.
 /// @param timeout_ms integer? Maximum wait in milliseconds (default 30000).
 /// @return (table?, string?) `{ stdout, stderr, exit_code, truncated }`, or
-///   nil plus an error on timeout or an unknown job.
+///   nil plus an error on timeout, unreadable/non-UTF-8 output, or an unknown job.
 /// @example
 /// local id = maki.fn.jobstart("echo hello")
 /// local result, err = maki.fn.jobwait(id, 5000)
@@ -1236,6 +1261,9 @@ async fn jobwait(
     if let Some(snap) = with_jobs(&lua, |store| store.snapshot(job_id, task_id, &plugin))
         && let Some(code) = snap.exit_code
     {
+        if let Some(error) = snap.read_error {
+            return Ok(err_pair(error.as_ref()));
+        }
         return wait_result(
             &lua,
             &snap.stdout_lines,
@@ -1256,6 +1284,7 @@ async fn jobwait(
 
     let mut stdout_lines = Vec::new();
     let mut stderr_lines = Vec::new();
+    let mut read_error = None;
 
     let exit_code = loop {
         let event =
@@ -1277,9 +1306,15 @@ async fn jobwait(
         match event {
             JobEvent::Stdout(line) => stdout_lines.push(line),
             JobEvent::Stderr(line) => stderr_lines.push(line),
+            JobEvent::ReadError(error) => {
+                read_error.get_or_insert(error);
+            }
             JobEvent::Exit(code) => break code,
         }
     };
+    if let Some(error) = read_error {
+        return Ok(err_pair(error.as_ref()));
+    }
 
     wait_result(&lua, &stdout_lines, &stderr_lines, exit_code, false)
 }
@@ -1326,6 +1361,7 @@ pub(crate) async fn deliver_job_event(lua: &Lua, job_id: u32, event: &JobEvent) 
                 Value::String(lua.create_string(line)?)
             }
             JobEvent::Exit(code) => Value::Integer(*code as i64),
+            JobEvent::ReadError(_) => return Ok(()),
         };
         let call = lua
             .create_thread(callback)?
@@ -1453,6 +1489,9 @@ lua_table! {
 mod tests {
     use super::*;
     use crate::api::util::command::{NO_UI_ERR, WinView};
+    use std::fs;
+
+    use tempfile::TempDir;
 
     const TEST_PLUGIN: &str = "test-plugin";
     const JOB_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1461,6 +1500,94 @@ mod tests {
     const EXIT_WITHOUT_REAP: &str =
         "an exit event must mean the child was reaped, or a later kill can signal a recycled pid";
     const NEVER_EXITED: &str = "job never reported its exit";
+    const GIT_PROGRAM: &str = "git";
+    const GIT_INIT_ARGUMENTS: &[&str] = &["init", "--quiet"];
+    const GIT_HASH_ARGUMENTS: &[&str] = &["hash-object", "-w", "--"];
+    const GIT_CAPTURE_ARGUMENTS: &[&str] = &["cat-file", "blob"];
+    const GIT_DIRECTORY: &str = "GIT_DIR";
+    const GIT_WORK_TREE: &str = "GIT_WORK_TREE";
+    const GIT_OBJECT_DIRECTORY: &str = "GIT_OBJECT_DIRECTORY";
+    const GIT_ALTERNATE_OBJECTS: &str = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+    const GIT_CONFIG_COUNT: &str = "GIT_CONFIG_COUNT";
+    const GIT_INDEX_FILE: &str = "GIT_INDEX_FILE";
+    const GIT_SUCCESS: i32 = 0;
+    const RAW_BLOB_NAME: &str = "capture.bin";
+    const RAW_OUTPUT: &[u8] = b"valid prefix\n\xff\nremaining output\n";
+
+    #[test]
+    fn unreadable_output_fails_live_and_completed_job_waits() {
+        let directory = TempDir::new().unwrap();
+        let git = || {
+            let mut command = Command::new(GIT_PROGRAM);
+            command
+                .current_dir(directory.path())
+                .env(GIT_CONFIG_COUNT, "0");
+            for key in [
+                GIT_DIRECTORY,
+                GIT_WORK_TREE,
+                GIT_INDEX_FILE,
+                GIT_OBJECT_DIRECTORY,
+                GIT_ALTERNATE_OBJECTS,
+            ] {
+                command.env_remove(key);
+            }
+            command
+        };
+        let initialized = git().args(GIT_INIT_ARGUMENTS).output().unwrap();
+        assert!(initialized.status.success(), "{initialized:?}");
+        let blob = directory.path().join(RAW_BLOB_NAME);
+        fs::write(&blob, RAW_OUTPUT).unwrap();
+        let hashed = git().args(GIT_HASH_ARGUMENTS).arg(&blob).output().unwrap();
+        assert!(hashed.status.success(), "{hashed:?}");
+        let sha = String::from_utf8(hashed.stdout).unwrap().trim().to_owned();
+        let mut command: Vec<String> = vec![GIT_PROGRAM.into()];
+        command.extend(GIT_CAPTURE_ARGUMENTS.iter().map(|arg| (*arg).to_owned()));
+        command.push(sha);
+        let mut spec = JobSpec::new(session_owner(MakiId::generate()), JobCommand::Argv(command));
+        spec.cwd = Some(directory.path().to_string_lossy().into_owned());
+        spec.env = Some(HashMap::from([
+            (
+                GIT_DIRECTORY.into(),
+                directory.path().join(".git").to_string_lossy().into_owned(),
+            ),
+            (
+                GIT_WORK_TREE.into(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            (
+                GIT_OBJECT_DIRECTORY.into(),
+                directory
+                    .path()
+                    .join(".git/objects")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (GIT_ALTERNATE_OBJECTS.into(), String::new()),
+            (GIT_CONFIG_COUNT.into(), "0".into()),
+        ]));
+        let lua = Lua::new();
+        let id = with_jobs(&lua, |store| store.start(spec)).unwrap();
+        let first = smol::block_on(jobwait(
+            lua.clone(),
+            Arc::from(TEST_PLUGIN),
+            id,
+            Some(DEFAULT_WAIT_MS),
+        ))
+        .unwrap();
+        assert!(first.0.is_none());
+        assert!(first.1.as_deref().unwrap().starts_with(JOB_OUTPUT_READ_ERR));
+        let snapshot = with_jobs(&lua, |store| store.snapshot(id, None, TEST_PLUGIN)).unwrap();
+        assert_eq!(snapshot.exit_code, Some(GIT_SUCCESS));
+        let completed = smol::block_on(jobwait(
+            lua,
+            Arc::from(TEST_PLUGIN),
+            id,
+            Some(DEFAULT_WAIT_MS),
+        ))
+        .unwrap();
+        assert!(completed.0.is_none());
+        assert_eq!(completed.1, first.1);
+    }
 
     /// Pull events until {id} reports its exit, so assertions run against a
     /// job that is certainly done.
@@ -1528,6 +1655,7 @@ mod tests {
             exit_code: None,
             elapsed_secs: None,
             replay_exit: None,
+            read_error: None,
         }
     }
 

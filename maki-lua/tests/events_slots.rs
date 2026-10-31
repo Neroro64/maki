@@ -123,6 +123,7 @@ fn flashes_until_sentinel(ui: &flume::Receiver<UiAction>) -> Vec<String> {
 #[test_case("ToolDone" ; "tool_done")]
 #[test_case("CompactionDone" ; "compaction_done")]
 #[test_case("InputChanged" ; "input_changed")]
+#[test_case("Rewind" ; "rewind")]
 fn content_fields_are_left_out_without_session_read(event: &str) {
     let fields = host_event_fields(event).expect("a content event is classified");
     let (_reg, host) = host();
@@ -1998,6 +1999,112 @@ fn agent_slot_layers_need_full_trust(granted: fn() -> PluginPermissions, runs: b
     assert_eq!(
         matches!(verdict, Verdict::Replaced(value) if value == kept_going),
         runs
+    );
+}
+
+#[test_case(r#"error('early integrity failure')"#, 0 ; "exception_before_prev")]
+#[test_case(r#"prev(value, ctx); error('late integrity failure')"#, 1 ; "exception_after_prev")]
+#[test_case(r#"return { continuation = function() end }"#, 0 ; "non_json_table")]
+#[test_case(r#"local cycle = {}; cycle.self = cycle; return cycle"#, 0 ; "recursive_json")]
+#[test_case(r#"return true"#, 0 ; "invalid_value")]
+fn stop_layer_failures_deny_without_replaying_prev(body: &str, expected_hits: usize) {
+    let (reg, host) = host();
+    load_granted(
+        &host,
+        LAYER_PLUGIN,
+        &format!(
+            r#"local hits = 0
+maki.api.set_slot("agent.stop", function(prev, value, ctx)
+    hits += 1
+    return prev(value, ctx)
+end)
+maki.api.set_slot("agent.stop", function(prev, value, ctx)
+    {body}
+end)
+{}"#,
+            probe_tool("integrity_hits", "return tostring(hits)"),
+        ),
+        PluginPermissions::trusted(),
+    );
+    let hook = reg.agent_hook().unwrap();
+    let cancel = CancelToken::none();
+    let call = AgentCall {
+        session_id: None,
+        task_id: Some("child"),
+        model: AGENT_MODEL,
+        context_size: 0,
+        context_window: 0,
+        cancel: &cancel,
+        deadline: Instant::now() + DISPATCH_TIMEOUT,
+    };
+    let verdict = within(hook.run(AgentSlot::Stop, serde_json::json!({}), &call));
+    assert!(
+        matches!(verdict, Verdict::Denied(warning) if warning.contains("[DIFF INTEGRITY WARNING]"))
+    );
+    assert_eq!(exec_tool(&reg, "integrity_hits"), expected_hits.to_string());
+}
+
+#[test]
+fn an_outer_stop_layer_cannot_catch_a_failing_inner_gate() {
+    let (reg, host) = host();
+    load_granted(
+        &host,
+        LAYER_PLUGIN,
+        r#"
+maki.api.set_slot("agent.stop", function() error("inner integrity failure") end)
+maki.api.set_slot("agent.stop", function(prev, value, ctx)
+    local ok = pcall(prev, value, ctx)
+    assert(not ok)
+    return value
+end)
+"#,
+        PluginPermissions::trusted(),
+    );
+    let cancel = CancelToken::none();
+    let call = AgentCall {
+        session_id: None,
+        task_id: None,
+        model: AGENT_MODEL,
+        context_size: 0,
+        context_window: 0,
+        cancel: &cancel,
+        deadline: Instant::now() + DISPATCH_TIMEOUT,
+    };
+    let verdict = within(reg.agent_hook().unwrap().run(
+        AgentSlot::Stop,
+        serde_json::json!({}),
+        &call,
+    ));
+    assert!(
+        matches!(verdict, Verdict::Denied(warning) if warning.contains("inner integrity failure"))
+    );
+}
+
+#[test]
+fn a_dropped_host_denies_stop_instead_of_completing() {
+    let (reg, host) = host();
+    load_granted(
+        &host,
+        LAYER_PLUGIN,
+        &stop_layer(),
+        PluginPermissions::trusted(),
+    );
+    let hook = reg.agent_hook().unwrap();
+    assert!(hook.wraps(AgentSlot::Stop));
+    drop(host);
+    let cancel = CancelToken::none();
+    let call = AgentCall {
+        session_id: None,
+        task_id: None,
+        model: AGENT_MODEL,
+        context_size: 0,
+        context_window: 0,
+        cancel: &cancel,
+        deadline: Instant::now() + DISPATCH_TIMEOUT,
+    };
+    let verdict = within(hook.run(AgentSlot::Stop, serde_json::json!({}), &call));
+    assert!(
+        matches!(verdict, Verdict::Denied(warning) if warning.contains("[DIFF INTEGRITY WARNING]"))
     );
 }
 

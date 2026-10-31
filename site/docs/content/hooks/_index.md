@@ -194,8 +194,9 @@ the call, because nothing has run yet and nobody is left to read a result. An
 output layer cut short leaves the output as it found it, since the work is
 already done.
 
-**A broken layer is skipped.** If a layer throws, the chain continues as if it
-had passed the value along, and the error is logged with the plugin name.
+**A broken layer is skipped, except on `agent.stop`.** Other chains continue as
+if the layer had passed the value along, and log the error with the plugin name.
+A failing Stop layer blocks completion, even after calling `prev`.
 
 **Order is registration order.** The last layer registered is the outermost one
 and sees the value first. Package load order decides this, so avoid writing two
@@ -248,7 +249,7 @@ The agent loop fires four slots of its own:
 | Slot | Fires | Gets |
 | --- | --- | --- |
 | `agent.user_message` | before the model sees a user message | `{ text, images, source }` |
-| `agent.stop` | when the model ends its turn without calling a tool | `{ reason, last_message, num_turns }` |
+| `agent.stop` | before completion, including a turn-limit exit | `{ reason, last_message, num_turns, user_request, diff_snapshot }` |
 | `agent.compact.before` | before a compaction starts | `{ reason, context_size, usable, request_instructions }` |
 | `agent.compact.prepare` | before the transcript goes to the summarizer | `{ results, budget, collapse }` |
 
@@ -257,7 +258,8 @@ inside a subagent), `model`, `context_size`, `context_window`, and
 `deadline_ms`.
 
 A layer on any of them needs every permission, because it steers what the agent
-does next. The chain gets 30 seconds, then the loop carries on without it.
+does next. The chain gets 30 seconds. Other slots pass through a failure or
+timeout; `agent.stop` blocks completion instead.
 
 ### agent.user_message
 
@@ -282,14 +284,26 @@ end)
 ### agent.stop
 
 `reason` is `"finished"` or `"max_tokens"`, and `last_message` is the text of
-the final answer. Return `{ continue = text }` to send `text` as the next
-message and keep going:
+the final answer. `user_request` is the latest real user message from this
+agent's own history, excluding synthetic continuations and host observations.
+A child task gets its own request, not its parent's.
+
+`diff_snapshot` freezes the current agent's Git baseline and mutation scope:
+`{ captured, mutated, root, reference, attributes, paths }`. `paths = nil`
+means whole-turn scope; an empty array means no native paths were attempted in
+this task. `mutated` records a mutation-capable tool attempt, including failed
+or partial writes. `root` and scoped paths are absolute. `reference` identifies
+the captured baseline; `attributes` identifies its isolated Git attributes.
+
+Return `{ continue = text }` to send `text` as the next synthetic message and
+keep going. Add `required = true` when the run must not finish until the
+warning is fixed or explicitly justified:
 
 ```lua
 maki.api.set_slot("agent.stop", function(prev, stop, ctx)
   local todo = maki.fs.read("TODO.md")
   if todo and todo:find("%- %[ %]") then
-    return { continue = "TODO.md still has open items. Keep going." }
+    return { continue = "TODO.md still has open items. Keep going.", required = true }
   end
   return prev(stop, ctx)
 end)
@@ -297,6 +311,57 @@ end)
 
 A run continues at most 3 times in a row, so a layer that always answers
 `continue` cannot bill forever. The count resets on the next user message.
+Stop still runs when that allowance or `max_turns` is exhausted. An unresolved
+required continuation then returns an error with its warning, never successful
+completion. An optional continuation can finish at the limit.
+
+Returning `nil, reason` blocks completion with an error. A hook exception,
+timeout, malformed JSON result, or dead runtime does the same, even if the
+failing layer already called `prev`. An outer layer cannot catch a failing
+inner gate and turn it into a successful completion. Clean or explicitly
+justified gates pass the original value through normally. Cancellation remains
+cancellation.
+
+### Diff integrity gate
+
+The bundled `diff_integrity` plugin runs before main agents and task subagents
+finish. It uses Git and tree-sitter without a model call. It compares files
+against the captured turn baseline, including untracked code, so existing user
+changes are not treated as agent changes.
+
+The gate checks Rust, Python, JavaScript, and TypeScript for:
+
+- Net assertion or test removal within the same declaration, including commented
+  assertions. An unrelated new assertion does not offset a removed one.
+- Added lint/type suppressions, ignored or skipped tests, and TODO stubs.
+- Matched strict declarations widened to `any`, `serde_json::Value`, or
+  `Box<dyn Any>`.
+
+A task normally checks its attempted native write paths. Shell commands and
+writers without a known path require whole-turn inspection. A running task
+keeps its original baseline when the parent starts another turn. These scopes
+do not identify writes made outside the tool dispatcher.
+
+Findings produce `[DIFF INTEGRITY WARNING]` and require another turn. Fix the
+change, or justify each finding in the current final reply:
+
+```text
+[DIFF INTEGRITY JUSTIFICATION] <exact DI identifier>: source.rs keeps this ignored test because it is a parser fixture, not an executable workspace test. Its assertion remains intact.
+```
+
+Each identifier is tied to the current diff. Empty, generic, and stale
+justifications do not pass. An explicit request such as `Remove test
+checks_answer` permits that test and its contained assertions to be removed.
+It does not permit new suppressions or type weakening.
+
+Unavailable baselines, unsupported changed code, parser failures, unreadable
+Git output, and exceeded analysis limits produce required warnings rather than
+clean results. Inspection is bounded to 256 code files, 512 KiB per source,
+and 4 MiB of total source. At a turn limit, unresolved warnings return an error
+instead of a successful main-agent completion or task summary.
+
+Disable the gate with `plugins.diff_integrity = { enabled = false }` in your
+Maki configuration.
 
 ### agent.compact.before
 

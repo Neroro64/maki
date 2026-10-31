@@ -4,6 +4,8 @@ pub(crate) mod node;
 pub(crate) mod query;
 pub(crate) mod tree;
 
+use std::path::Path;
+
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{AnyUserData, Lua, LuaString, Result as LuaResult, Table};
 
@@ -43,6 +45,62 @@ fn get_parser(lua: &Lua, source: String, lang: String) -> LuaResult<Pair<AnyUser
 #[lua_fn]
 fn get_string_parser(lua: &Lua, source: String, lang: String) -> LuaResult<Pair<AnyUserData>> {
     parse_impl(lua, source, lang)
+}
+
+/// Resolves a path to its built-in tree-sitter grammar using the shared extension registry.
+///
+/// @param path string Source file path.
+/// @return (string|nil) Grammar name, or nil for an unsupported extension.
+/// @example
+/// local lang = maki.treesitter.language_for_path("src/main.rs") -- "rust"
+#[lua_fn]
+fn language_for_path(_lua: &Lua, path: String) -> LuaResult<Option<String>> {
+    let Some(lang) = Path::new(&path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(Language::from_extension)
+    else {
+        return Ok(None);
+    };
+    let name = match lang {
+        Language::Rust => "rust",
+        Language::Python => "python",
+        Language::TypeScript => "typescript",
+        Language::Tsx => "tsx",
+        Language::JavaScript => "javascript",
+        Language::Gleam => "gleam",
+        Language::Go => "go",
+        Language::Html => "html",
+        Language::Java => "java",
+        Language::C => "c",
+        Language::Cpp => "cpp",
+        Language::CSharp => "c_sharp",
+        Language::Ruby => "ruby",
+        Language::Php => "php",
+        Language::Swift => "swift",
+        Language::Kotlin => "kotlin",
+        Language::Scala => "scala",
+        Language::Bash => "bash",
+        Language::Lua => "lua",
+        Language::Elixir => "elixir",
+        Language::Markdown => "markdown",
+        Language::MarkdownInline => "markdown_inline",
+        Language::Starlark => "starlark",
+        Language::V => "v",
+        Language::Zig => "zig",
+        Language::Nix => "nix",
+        Language::Dart => "dart",
+        Language::Sql => "sql",
+        Language::Toml => "toml",
+        Language::Yaml => "yaml",
+        Language::Containerfile => "containerfile",
+        Language::Css => "css",
+        Language::Hcl => "hcl",
+        Language::Json => "json",
+        Language::Make => "make",
+        Language::Clojure => "clojure",
+    };
+    Ok(Some(name.to_owned()))
 }
 
 /// Gets the text that {node} covers in {source}.
@@ -191,7 +249,7 @@ lua_table! {
     /// local root = trees[1]:root()
     /// ```
     extend "maki.treesitter" => pub(crate) fn add_treesitter_fns(), DOCS [
-        get_parser, get_string_parser, get_node_text, get_node_range, get_range,
+        get_parser, get_string_parser, language_for_path, get_node_text, get_node_range, get_range,
         is_ancestor, is_in_node_range, node_contains, get_node,
     ]
 }

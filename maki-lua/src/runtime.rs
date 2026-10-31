@@ -49,8 +49,9 @@ use crate::api::plan::{
     install_row_handlers, row_handler_opts, rows_from_table, rows_to_table,
 };
 use crate::api::slot::{
-    ChainObserver, LayerCost, LayeredTools, PERMISSION_PROMPT_SLOT, PLAN_FORM_ACTIONS_SLOT,
-    PLAN_FORM_SLOT, SlotLayer, SlotStore, layer_plugins, run_host_chain, run_host_chain_with,
+    AGENT_STOP_SLOT, ChainObserver, LayerCost, LayeredTools, PERMISSION_PROMPT_SLOT,
+    PLAN_FORM_ACTIONS_SLOT, PLAN_FORM_SLOT, SlotLayer, SlotStore, layer_plugins, run_host_chain,
+    run_host_chain_with,
 };
 use crate::api::tool::{
     LuaTool, PendingRules, PendingTool, PendingTools, ToolCallReply, ToolPermission, resolve_rules,
@@ -4349,14 +4350,25 @@ async fn open_plan_form(
     Some(plan_form_rows(lua, plugins, gate, deadline, session, args, rows).await)
 }
 
+/// Only completion gates fail closed; other host slots retain pass-through failures.
+pub(crate) fn hook_failure(stop: bool, reason: impl Display) -> Verdict {
+    if stop {
+        Verdict::Denied(format!(
+            "[DIFF INTEGRITY WARNING] agent.stop failed: {reason}"
+        ))
+    } else {
+        Verdict::Unchanged
+    }
+}
+
 /// Fires a host-owned chain and reads back the one contract every host slot
 /// shares: a table replaces the value, `nil` leaves it alone, and
 /// `nil, reason` stops the call with a reason the model reads. A second value
 /// of `{ ask = reason }` instead escalates the call to the user, with or
 /// without a rewrite in front of it, where [`HookRun::may_ask`] allows it.
 ///
-/// Every failure below is a pass-through, because a layer is an opinion about a
-/// call and never a precondition for making it.
+/// Failures pass through except on `agent.stop`, where completion depends on
+/// the chain answering successfully.
 ///
 /// [`run_awaited`] is what makes the chain answerable to the call waiting on
 /// it, down to a layer that never comes back ending at the window dispatch
@@ -4380,9 +4392,10 @@ async fn run_hook(
     let Some(&slot) = names.first() else {
         return Verdict::Unchanged;
     };
+    let stop = slot == AGENT_STOP_SLOT;
     let args = match (json_to_lua(lua, &value), json_to_lua(lua, &call)) {
         (Ok(value), Ok(call)) => MultiValue::from_vec(vec![value, call]),
-        _ => return Verdict::Unchanged,
+        (Err(error), _) | (_, Err(error)) => return hook_failure(stop, strip_traceback(&error)),
     };
     let allow_layer = layer_delegation(lua, plugins, cost);
     let chain = run_host_chain(lua, &names, args, &allow_layer);
@@ -4391,11 +4404,11 @@ async fn run_hook(
         Ok(Ok(None)) => return Verdict::Unchanged,
         Ok(Err(e)) => {
             tracing::warn!(slot, error = %strip_traceback(&e), "slot chain failed");
-            return Verdict::Unchanged;
+            return hook_failure(stop, strip_traceback(&e));
         }
         Err(msg) => {
             tracing::warn!(slot, reason = msg, "slot chain abandoned");
-            return Verdict::Unchanged;
+            return hook_failure(stop, msg);
         }
     };
 
@@ -4406,6 +4419,9 @@ async fn run_hook(
             Ok(reason) => reason,
             Err(e) => {
                 tracing::warn!(slot, error = %e, "slot answered `ask` with something other than a string");
+                if stop {
+                    return hook_failure(true, e);
+                }
                 None
             }
         },
@@ -4421,6 +4437,9 @@ async fn run_hook(
                 reason,
                 "only a tool input layer can ask, so the ask was dropped"
             );
+            if stop {
+                return hook_failure(true, "only a tool input layer can ask");
+            }
             None
         }
         ask => ask,
@@ -4435,6 +4454,9 @@ async fn run_hook(
             Ok(replacement) => Some(replacement),
             Err(e) => {
                 tracing::warn!(slot, error = %strip_traceback(&e), "slot returned a table that is not json");
+                if stop {
+                    return hook_failure(true, strip_traceback(&e));
+                }
                 None
             }
         },
@@ -4445,6 +4467,9 @@ async fn run_hook(
                 returned = other.type_name(),
                 "slot must return a table, nil, or nil plus a reason"
             );
+            if stop {
+                return hook_failure(true, "slot must return a table, nil, or nil plus a reason");
+            }
             None
         }
     };

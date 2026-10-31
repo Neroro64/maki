@@ -14,6 +14,7 @@ pub mod model;
 pub mod paths;
 pub mod plans;
 pub mod sessions;
+pub mod snapshot;
 pub mod theme;
 pub mod trusted_folders;
 pub mod version;

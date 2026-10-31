@@ -7,8 +7,14 @@ use mlua::{Lua, MultiValue, Value as LuaValue};
 use regex::{Error as RegexError, Regex};
 use tree_sitter::{Query, QueryCursor, QueryPredicateArg, StreamingIterator};
 
+use crate::api::util::pair::{Pair, err_pair, pair};
 use crate::docs::{FnDoc, ParamDoc};
 use crate::language::Language;
+
+const MAX_STRICT_QUERY_BYTES: usize = 4096;
+const MAX_STRICT_PATTERNS: usize = 64;
+const MAX_STRICT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STRICT_RESULTS: usize = 8192;
 
 use super::node::LuaNode;
 
@@ -19,6 +25,7 @@ const KNOWN_PREDICATES: &[&str] = &[
     "contains?",
     "has-ancestor?",
     "has-parent?",
+    "any-of?",
 ];
 
 #[allow(non_upper_case_globals)]
@@ -89,6 +96,7 @@ const iter_matches__doc: FnDoc = FnDoc {
 
 pub(crate) struct LuaQuery {
     pub(crate) inner: Arc<Query>,
+    strict: bool,
 }
 
 fn query_fields<F: mlua::UserDataFields<LuaQuery>>(fields: &mut F) {
@@ -106,13 +114,13 @@ fn query_fields<F: mlua::UserDataFields<LuaQuery>>(fields: &mut F) {
 fn query_methods<M: mlua::UserDataMethods<LuaQuery>>(methods: &mut M) {
     methods.add_method("iter_captures", |lua, this, args: MultiValue| {
         let parsed = IterArgs::parse(args, "iter_captures")?;
-        let results = collect_captures(&this.inner, &parsed)?;
+        let results = collect_captures(&this.inner, &parsed, this.strict)?;
         stateful_iter(lua, results)
     });
 
     methods.add_method("iter_matches", |lua, this, args: MultiValue| {
         let parsed = IterArgs::parse(args, "iter_matches")?;
-        let results = collect_matches(&this.inner, &parsed)?;
+        let results = collect_matches(&this.inner, &parsed, this.strict)?;
         stateful_iter(lua, results)
     });
 }
@@ -147,7 +155,88 @@ fn parse(_lua: &Lua, lang: String, query: String) -> mlua::Result<LuaQuery> {
         .ts_language();
     let q = Query::new(&ts_lang, &query)
         .map_err(|e| mlua::Error::runtime(format!("query parse error: {e}")))?;
-    Ok(LuaQuery { inner: Arc::new(q) })
+    Ok(LuaQuery {
+        inner: Arc::new(q),
+        strict: false,
+    })
+}
+
+/// Compile a query for deterministic enforcement off the Lua thread.
+/// Unlike `parse`, errors return a pair. Unknown predicates, directives,
+/// malformed predicate arguments and invalid regular expressions are rejected.
+/// Queries are limited to 4096 bytes, 64 patterns and 64 captures; strict
+/// iterators also fail on source, match-count or cursor-budget exhaustion.
+///
+/// @param lang string Language name.
+/// @param query string Tree-sitter S-expression query.
+/// @return (Query?, string?) Compiled query, or nil plus an error.
+/// @example
+/// local q, err = maki.treesitter.query.parse_strict("rust", '(identifier) @id')
+#[lua_fn]
+async fn parse_strict(_lua: Lua, lang: String, query: String) -> mlua::Result<Pair<LuaQuery>> {
+    if query.len() > MAX_STRICT_QUERY_BYTES {
+        return Ok(err_pair("strict query exceeds 4096-byte limit"));
+    }
+    Ok(pair(
+        smol::unblock(move || {
+            let language =
+                Language::from_name(&lang).ok_or_else(|| format!("unknown language: {lang}"))?;
+            let q = Query::new(&language.ts_language(), &query)
+                .map_err(|e| format!("query parse error: {e}"))?;
+            validate_strict(&q)?;
+            Ok::<_, String>(LuaQuery {
+                inner: Arc::new(q),
+                strict: true,
+            })
+        })
+        .await,
+    ))
+}
+
+fn validate_strict(query: &Query) -> Result<(), String> {
+    if query.pattern_count() == 0
+        || query.pattern_count() > MAX_STRICT_PATTERNS
+        || query.capture_names().len() > MAX_STRICT_PATTERNS
+    {
+        return Err("strict query requires 1-64 patterns and at most 64 captures".to_owned());
+    }
+    for pattern in 0..query.pattern_count() {
+        if !query.property_settings(pattern).is_empty()
+            || !query.property_predicates(pattern).is_empty()
+        {
+            return Err(
+                "strict query does not support property predicates or directives".to_owned(),
+            );
+        }
+        for predicate in query.general_predicates(pattern) {
+            let op = predicate.operator.as_ref();
+            if !is_known_predicate(op) {
+                return Err(format!("unsupported strict query predicate: #{op}"));
+            }
+            let (_, base) = parse_predicate_op(op);
+            let args = &predicate.args;
+            let first_capture = matches!(args.first(), Some(QueryPredicateArg::Capture(_)));
+            let valid = first_capture
+                && match base {
+                    "eq?" | "contains?" => args.len() == 2,
+                    "match?" | "lua-match?" | "has-parent?" | "has-ancestor?" => {
+                        args.len() == 2
+                            && matches!(&args[1], QueryPredicateArg::String(s) if !s.is_empty())
+                    }
+                    "any-of?" => args.len() >= 2,
+                    _ => false,
+                };
+            if !valid {
+                return Err(format!(
+                    "invalid arguments for strict query predicate: #{op}"
+                ));
+            }
+        }
+        if let Some((pattern, err)) = broken_regex(query, pattern) {
+            return Err(format!("invalid strict query regex {pattern:?}: {err}"));
+        }
+    }
+    Ok(())
 }
 
 /// Looks up a named built-in query for {lang} (not yet implemented, always returns nil).
@@ -171,7 +260,7 @@ lua_table! {
     /// local q = maki.treesitter.query.parse("lua", "(string) @str")
     /// ```
     "maki.treesitter.query" => pub(crate) fn create_query_module(), DOCS [
-        parse, get,
+        parse, parse_strict, get,
     ]
 }
 
@@ -288,9 +377,17 @@ fn new_cursor(start_row: Option<usize>, stop_row: Option<usize>) -> QueryCursor 
     cursor
 }
 
-fn collect_captures(query: &Query, args: &IterArgs) -> mlua::Result<Vec<CaptureEntry>> {
+fn collect_captures(
+    query: &Query,
+    args: &IterArgs,
+    strict: bool,
+) -> mlua::Result<Vec<CaptureEntry>> {
+    strict_source(args, strict)?;
     let source_bytes = args.source.as_bytes();
     let mut cursor = new_cursor(args.start_row, args.stop_row);
+    if strict {
+        cursor.set_match_limit(MAX_STRICT_RESULTS as u32);
+    }
     let mut regex_cache = HashMap::new();
     let mut results = Vec::new();
 
@@ -309,20 +406,31 @@ fn collect_captures(query: &Query, args: &IterArgs) -> mlua::Result<Vec<CaptureE
             continue;
         }
         let capture = &m.captures()[*capture_idx];
+        if strict && results.len() == MAX_STRICT_RESULTS {
+            return Err(mlua::Error::runtime("strict query result budget exceeded"));
+        }
         results.push(CaptureEntry {
             capture_index: capture.index,
             node: LuaNode::new(capture.node, Arc::clone(&args.lua_node.tree)),
             metadata,
         });
     }
+    if strict && cursor.did_exceed_match_limit() {
+        return Err(mlua::Error::runtime("strict query cursor budget exceeded"));
+    }
     Ok(results)
 }
 
-fn collect_matches(query: &Query, args: &IterArgs) -> mlua::Result<Vec<MatchEntry>> {
+fn collect_matches(query: &Query, args: &IterArgs, strict: bool) -> mlua::Result<Vec<MatchEntry>> {
+    strict_source(args, strict)?;
     let source_bytes = args.source.as_bytes();
     let mut cursor = new_cursor(args.start_row, args.stop_row);
+    if strict {
+        cursor.set_match_limit(MAX_STRICT_RESULTS as u32);
+    }
     let mut regex_cache = HashMap::new();
     let mut results = Vec::new();
+    let mut capture_count = 0;
 
     let node = args.lua_node.ts_node()?;
     let mut matches = cursor.matches(query, node, source_bytes);
@@ -338,6 +446,15 @@ fn collect_matches(query: &Query, args: &IterArgs) -> mlua::Result<Vec<MatchEntr
         ) {
             continue;
         }
+        if strict && results.len() == MAX_STRICT_RESULTS {
+            return Err(mlua::Error::runtime("strict query result budget exceeded"));
+        }
+        if strict {
+            capture_count += m.captures().len();
+            if capture_count > MAX_STRICT_RESULTS {
+                return Err(mlua::Error::runtime("strict query capture budget exceeded"));
+            }
+        }
         let mut captures_map: HashMap<u32, Vec<LuaNode>> = HashMap::new();
         for capture in m.captures() {
             captures_map
@@ -351,7 +468,19 @@ fn collect_matches(query: &Query, args: &IterArgs) -> mlua::Result<Vec<MatchEntr
             metadata,
         });
     }
+    if strict && cursor.did_exceed_match_limit() {
+        return Err(mlua::Error::runtime("strict query cursor budget exceeded"));
+    }
     Ok(results)
+}
+
+fn strict_source(args: &IterArgs, strict: bool) -> mlua::Result<()> {
+    if strict && args.source.len() > MAX_STRICT_SOURCE_BYTES {
+        return Err(mlua::Error::runtime(
+            "strict query source exceeds 2-MiB limit",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

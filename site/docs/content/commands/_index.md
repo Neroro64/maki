@@ -39,6 +39,7 @@ Type `/` in the input box to open the command palette.
 | `/design-note` | Append human design feedback and notify the current session. |
 | `/design-view` | Show the preview URL, saved screenshots, viewport matrix, notes and dev-server log. |
 | `/memory` | View, edit, and delete memory files |
+| `/reflect` | Learn one concise project rule or edit guard from recent mistakes and fixes. Optionally include a correction. |
 | `/rename` | Rename the current session |
 | `/review` | Review changes vs HEAD, comment on diff lines, send fixes to maki |
 | `/sessions` | Browse and switch sessions |
@@ -145,6 +146,7 @@ Aliasing adds a name, so both stay in the palette. Any command works as a target
 - Needs `fs_read`, `fs_write`: `/memory`, `/skills`.
 - Needs `fs_read`, `fs_write`, `net`, `run`, `env`, `agent`, `session_read`, `session_write`, `session_settings`: `/tasks`.
 - Needs `fs_read`, `fs_write`, `net`, `run`, `session_write`: `/design`, `/design-note`, `/design-view`.
+- Needs `fs_read`, `fs_write`, `agent`, `session_read`, `session_write`: `/reflect`.
 - Needs `run`, `agent`, `session_write`: `/review`.
 - Needs `agent`: `/btw`.
 - Needs `agent`, `session_write`: `/compact`, custom commands, MCP prompts.

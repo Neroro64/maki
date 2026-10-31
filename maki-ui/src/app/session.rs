@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -12,7 +13,7 @@ use crate::text_buffer::Writers;
 use maki_agent::Transcript;
 use maki_agent::agent::SessionExport;
 use maki_agent::session::SessionHeader;
-use maki_lua::agent_autocmd::HostEvent;
+use maki_lua::agent_autocmd::{HostEvent, compact_trajectory};
 use maki_lua::{PluginPermissions, PluginReach, SessionEndReason};
 use maki_providers::{Message, Model, RequestOptions, TokenUsage, estimate_message_tokens};
 use maki_storage::id::MakiId;
@@ -545,6 +546,40 @@ impl App {
     }
 
     pub(super) fn rewind_to(&mut self, entry: RewindEntry) -> Vec<Action> {
+        let result = self
+            .file_access
+            .as_ref()
+            .map(|access| {
+                access.restore_snapshot(
+                    Path::new(&self.state.session.cwd),
+                    &self.state.session.id.to_string(),
+                    entry.turn_index,
+                )
+            })
+            .transpose();
+        match result {
+            Ok(Some(Some(_))) => {}
+            Ok(_) => self.restore_checkpoint(entry.turn_index),
+            Err(error) => {
+                self.flash(format!("rewind failed; chat left unchanged: {error}"));
+                return vec![];
+            }
+        }
+        self.rewind_chat_to(entry)
+    }
+
+    pub(super) fn rewind_chat_to(&mut self, entry: RewindEntry) -> Vec<Action> {
+        let discarded = self
+            .state
+            .session
+            .messages()
+            .get(entry.turn_index..)
+            .unwrap_or_default();
+        let trajectory = compact_trajectory(discarded);
+        self.fire_session_event(HostEvent::Rewind {
+            turn_index: entry.turn_index,
+            trajectory: &trajectory,
+        });
         // The live size came from the provider, so it also counts the system
         // prompt and the tool schemas, a baseline the estimator cannot see.
         // Subtract only what we drop, or the gauge collapses until the next
@@ -554,7 +589,6 @@ impl App {
             .state
             .context_size
             .saturating_sub(estimate_message_tokens(self.state.session.messages()));
-        self.restore_checkpoint(entry.turn_index);
         let session = self.state.session_mut();
         session.truncate_messages(entry.turn_index);
         session.prune_orphans(|m| m.tool_uses().map(|(id, _, _)| id.to_owned()).collect());
