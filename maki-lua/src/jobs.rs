@@ -5,7 +5,7 @@ use std::mem;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
@@ -195,6 +195,7 @@ struct JobMeta {
     /// Set by the job's task the moment the child is reaped, which is well
     /// before `exit_code`. Read by [`kill_job`].
     reaped: Arc<AtomicBool>,
+    read_error: Arc<OnceLock<String>>,
     exit_code: Option<i32>,
     /// Recorded at exit so elapsed time stops counting once the process is gone.
     elapsed_secs: Option<u64>,
@@ -391,6 +392,8 @@ impl JobStore {
         ];
         let reaped = Arc::new(AtomicBool::new(false));
         let wait_reaped = Arc::clone(&reaped);
+        let read_error = Arc::new(OnceLock::new());
+        let wait_read_error = Arc::clone(&read_error);
         tokio::spawn(async move {
             // Reaping frees the pid, and that pid is the process group
             // `kill_job` signals. The readers only return once every
@@ -399,6 +402,7 @@ impl JobStore {
             for reader in readers.into_iter().flatten() {
                 if let Ok(Err(error)) = reader.await {
                     tracing::warn!(job_id = id, pid, %error, "job output reader failed");
+                    let _ = wait_read_error.set(error.to_string());
                 }
             }
             let code = child.wait().await.map_or(-1, |s| s.code().unwrap_or(-1));
@@ -428,6 +432,7 @@ impl JobStore {
                     (Redirect::Capture, Redirect::Capture)
                 ),
                 reaped,
+                read_error,
                 exit_code: None,
                 elapsed_secs: None,
                 replay_exit: None,
@@ -476,6 +481,7 @@ impl JobStore {
         Some(WaitLease {
             rx: Arc::clone(&job.events.rx).try_lock_owned().ok()?,
             queue: Arc::clone(&job.events.queue),
+            read_error: Arc::clone(&job.read_error),
             _wake: WakePumps(self.changed.clone()),
         })
     }
@@ -748,6 +754,7 @@ impl Drop for JobStore {
 pub(crate) struct WaitLease {
     rx: OwnedMutexGuard<UnboundedReceiver<JobEvent>>,
     queue: Arc<JobQueue>,
+    read_error: Arc<OnceLock<String>>,
     /// Declared after `rx`, since fields drop in order: the pumps are woken
     /// only once the receiver is free again.
     _wake: WakePumps,
@@ -758,6 +765,10 @@ impl WaitLease {
         let event = self.rx.recv().await?;
         self.queue.popped(&event);
         Some(event)
+    }
+
+    pub fn read_error(&self) -> Option<String> {
+        self.read_error.get().cloned()
     }
 }
 
@@ -803,6 +814,7 @@ pub(crate) struct JobSnapshot {
     /// Some output never reached the tails, so what they hold is a window
     /// onto a longer stream.
     pub dropped_output: bool,
+    pub read_error: Option<String>,
 }
 
 impl JobSnapshot {
@@ -828,6 +840,7 @@ impl JobSnapshot {
                 Vec::new()
             },
             dropped_output: job.dropped_output,
+            read_error: job.read_error.get().cloned(),
         }
     }
 }

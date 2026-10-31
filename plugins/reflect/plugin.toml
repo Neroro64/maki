@@ -1,0 +1,6 @@
+[permissions]
+fs_read = true
+fs_write = true
+agent = true
+session_read = true
+session_write = true

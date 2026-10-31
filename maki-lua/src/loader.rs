@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use include_dir::{Dir, File, include_dir};
 use maki_agent::permissions::{PluginRuleStore, carries_builtin_defaults};
 use maki_agent::tools::ToolRegistry;
-use maki_agent::{Cutter, SessionEndReason};
+use maki_agent::{AgentSeed, Cutter, SessionEndReason};
 use maki_config::{GatedFile, PluginsConfig, ProjectConfig, RawConfig};
 use maki_providers::plugin::{DeclAuthority, keep_granted};
 use tokio::runtime::{Builder, EnterGuard, Handle, Runtime, RuntimeFlavor};
@@ -73,6 +73,12 @@ pub const TRUST_SCOPE_WARNING: &str =
 pub const INSTRUCTIONS_SCOPE_WARNING: &str =
     "instructions is only read from the global init.lua; ignoring the instructions table in";
 
+fn publish_rewind_trajectory(session: MakiId, trajectory: Option<&str>) {
+    if let Some(seed) = AgentSeed::live(session) {
+        seed.file_access.set_rewind_trajectory(trajectory);
+    }
+}
+
 /// How far user `init.lua` may reach. `--no-plugins` turns it off, and a
 /// project folder nobody vouched for stops at the global file.
 ///
@@ -119,12 +125,24 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/review"),
     },
     BundledPlugin {
+        name: "reflect",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/reflect"),
+    },
+    BundledPlugin {
+        name: "diff_integrity",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/diff_integrity"),
+    },
+    BundledPlugin {
         name: "thinking",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/thinking"),
     },
     BundledPlugin {
         name: "index",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/index"),
+    },
+    BundledPlugin {
+        name: "lsp_speculate",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lsp_speculate"),
     },
     BundledPlugin {
         name: "webfetch",
@@ -1311,6 +1329,16 @@ impl EventHandle {
     /// [`HostEventKind::fields`](crate::agent_autocmd::HostEventKind::fields)
     /// classifies. {session_id} is the session the event is about.
     pub fn fire(&self, session_id: Option<&dyn Display>, event: HostEvent<'_>) {
+        let trajectory = match &event {
+            HostEvent::Rewind { trajectory, .. } => Some(Some(*trajectory)),
+            HostEvent::SessionEnd { .. } => Some(None),
+            _ => None,
+        };
+        if let (Some(trajectory), Some(session)) = (trajectory, session_id)
+            && let Ok(session) = session.to_string().parse::<MakiId>()
+        {
+            publish_rewind_trajectory(session, trajectory);
+        }
         let _ = self.tx.send(Request::FireAutocmd {
             event: event.name().to_owned(),
             data: event.payload(session_id),
@@ -1334,6 +1362,7 @@ impl EventHandle {
     /// Nothing waits here, so handlers get no deadline and the UI is still
     /// there to answer them.
     pub fn end_session(&self, session: MakiId, reason: SessionEndReason) {
+        publish_rewind_trajectory(session, None);
         let _ = self.tx.send(Request::EndSession(EndSession {
             session,
             reason,
@@ -1375,6 +1404,7 @@ impl EventHandle {
         reason: SessionEndReason,
         deadline: Instant,
     ) -> Option<oneshot::Receiver<()>> {
+        publish_rewind_trajectory(session, None);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(Request::EndSession(EndSession {

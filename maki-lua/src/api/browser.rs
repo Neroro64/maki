@@ -18,9 +18,10 @@ use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::{Page, ScreenshotParams};
-use futures_lite::StreamExt;
-use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
+use futures::StreamExt;
 use tempfile::{Builder as TempDirBuilder, TempDir};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use url::{Host, Url};
 
@@ -112,11 +113,11 @@ fn preview_address(url: &Url) -> Result<SocketAddr, String> {
 }
 
 async fn probe_preview(url: Url, address: SocketAddr) -> Result<u16, String> {
-    let connection = smol::net::TcpStream::connect(address).await;
+    let connection = TcpStream::connect(address).await;
     let mut stream = match connection {
         Ok(stream) => stream,
         Err(_) if url.host() == Some(Host::Domain("localhost")) => {
-            smol::net::TcpStream::connect((Ipv6Addr::LOCALHOST, address.port()))
+            TcpStream::connect((Ipv6Addr::LOCALHOST, address.port()))
                 .await
                 .map_err(|e| e.to_string())?
         }
@@ -188,11 +189,9 @@ async fn browser_preview_status(_lua: Lua, opts: Table) -> LuaResult<Pair<u16>> 
         .opt::<u64>("timeout")?
         .unwrap_or(2)
         .clamp(1, DEFAULT_TIMEOUT_SECS);
-    let result = futures_lite::future::or(probe_preview(url, address), async {
-        smol::Timer::after(Duration::from_secs(timeout)).await;
-        Err(PREVIEW_TIMEOUT.to_owned())
-    })
-    .await;
+    let result = tokio::time::timeout(Duration::from_secs(timeout), probe_preview(url, address))
+        .await
+        .unwrap_or_else(|_| Err(PREVIEW_TIMEOUT.to_owned()));
     Ok(match result {
         Ok(code) => (Some(code), None),
         Err(e) => (None, Some(e)),
@@ -265,16 +264,11 @@ where
     tokio_rt().spawn(async move {
         let _ = tx.send(fut.await);
     });
-    let deadline = smol::Timer::after(Duration::from_secs(timeout_secs));
-    futures_lite::pin!(deadline);
-    futures_lite::future::or(
-        async { rx.await.map_err(|_| TASK_CANCELLED.to_owned())? },
-        async {
-            (&mut deadline).await;
-            Err(BROWSER_TIMEOUT.to_owned())
-        },
-    )
-    .await
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
+        Ok(Ok(res)) => res,
+        Ok(Err(_)) => Err(TASK_CANCELLED.to_owned()),
+        Err(_) => Err(BROWSER_TIMEOUT.to_owned()),
+    }
 }
 
 struct BrowserSession {
@@ -909,7 +903,7 @@ mod tests {
             first
         });
         let url = Url::parse(&format!("http://{address}/preview?q=1#ignored")).unwrap();
-        let result = smol::block_on(probe_preview(url, address));
+        let result = crate::test_support::runtime().block_on(probe_preview(url, address));
         assert_eq!(server.join().unwrap(), "GET /preview?q=1 HTTP/1.1\r\n");
         assert_eq!(result.as_ref().ok().copied(), expected);
         if expected.is_none() {
@@ -955,25 +949,25 @@ mod tests {
         let opts = live_opts(&lua).unwrap();
         opts.set("url", LIVE_HTML).unwrap();
         opts.set("headless", true).unwrap();
-        let (out, err) = smol::block_on(browser_open(lua.clone(), opts)).unwrap();
+        let (out, err) = crate::test_support::runtime().block_on(browser_open(lua.clone(), opts)).unwrap();
         assert!(out.is_some(), "{}", err.unwrap_or_default());
         let opened = out.unwrap();
         assert_eq!(opened.get::<String>("title").unwrap(), "BraveSmoke");
 
         let (out, err) =
-            smol::block_on(browser_snapshot(lua.clone(), live_opts(&lua).unwrap())).unwrap();
+            crate::test_support::runtime().block_on(browser_snapshot(lua.clone(), live_opts(&lua).unwrap())).unwrap();
         assert!(out.is_some(), "{}", err.unwrap_or_default());
         let snap = out.unwrap();
         assert!(snap.get::<i64>("count").unwrap() >= 2);
 
         let opts = live_opts(&lua).unwrap();
         opts.set("index", 1).unwrap();
-        let (out, err) = smol::block_on(browser_click(lua.clone(), opts)).unwrap();
+        let (out, err) = crate::test_support::runtime().block_on(browser_click(lua.clone(), opts)).unwrap();
         assert_eq!(out, Some(true), "{}", err.unwrap_or_default());
 
         let opts = live_opts(&lua).unwrap();
         opts.set("source", "document.title").unwrap();
-        let (out, _) = smol::block_on(browser_eval(lua.clone(), opts)).unwrap();
+        let (out, _) = crate::test_support::runtime().block_on(browser_eval(lua.clone(), opts)).unwrap();
         assert_eq!(
             out,
             Some(LuaValue::String(lua.create_string("clicked").unwrap()))
@@ -983,12 +977,12 @@ mod tests {
             let opts = live_opts(&lua).unwrap();
             opts.set("width", width).unwrap();
             opts.set("height", height).unwrap();
-            let (out, err) = smol::block_on(browser_viewport(lua.clone(), opts)).unwrap();
+            let (out, err) = crate::test_support::runtime().block_on(browser_viewport(lua.clone(), opts)).unwrap();
             assert_eq!(out, Some(true), "{}", err.unwrap_or_default());
             let opts = live_opts(&lua).unwrap();
             opts.set("source", "({width: innerWidth, height: innerHeight})")
                 .unwrap();
-            let (out, err) = smol::block_on(browser_eval(lua.clone(), opts)).unwrap();
+            let (out, err) = crate::test_support::runtime().block_on(browser_eval(lua.clone(), opts)).unwrap();
             let Some(LuaValue::Table(size)) = out else {
                 panic!("{}", err.unwrap_or_default());
             };
@@ -1000,13 +994,13 @@ mod tests {
         let opts = live_opts(&lua).unwrap();
         opts.set("path", path.to_string_lossy().into_owned())
             .unwrap();
-        let (out, err) = smol::block_on(browser_screenshot(lua.clone(), opts)).unwrap();
+        let (out, err) = crate::test_support::runtime().block_on(browser_screenshot(lua.clone(), opts)).unwrap();
         assert!(out.is_some(), "{}", err.unwrap_or_default());
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
 
         let (out, _) =
-            smol::block_on(browser_close(lua.clone(), live_opts(&lua).unwrap())).unwrap();
+            crate::test_support::runtime().block_on(browser_close(lua.clone(), live_opts(&lua).unwrap())).unwrap();
         assert_eq!(out, Some(true));
     }
 }

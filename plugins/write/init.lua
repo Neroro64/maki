@@ -1,5 +1,6 @@
 local shorten_path = require("maki.shorten_path")
 local ToolView = require("maki.tool_view")
+local edit_policy = require("maki.edit_policy")
 
 local DESCRIPTION = [[Write content to a file, replacing existing content.
 
@@ -79,14 +80,30 @@ maki.api.register_tool({
     end
 
     local path = maki.fs.abspath(raw)
+    local metadata, metadata_err = maki.fs.metadata(path)
+    if metadata_err then
+      return { llm_output = "read error: " .. tostring(metadata_err), is_error = true }
+    end
+    local before = ""
+    if metadata then
+      local read_err
+      before, read_err = maki.fs.read(path)
+      if read_err then
+        return { llm_output = "read error: " .. tostring(read_err), is_error = true }
+      end
+    end
+    local after = input.append and (before .. content) or content
+    local ok, policy_err = edit_policy.check(ctx, path, before, after)
+    if not ok then
+      return { llm_output = policy_err, is_error = true }
+    end
 
     local parent = maki.fs.dirname(path)
     if parent then
       maki.fs.mkdir(parent, { parents = true })
     end
 
-    local write = input.append and maki.fs.append or maki.fs.write
-    local _, write_err = write(path, content)
+    local _, write_err = maki.fs.write(path, after)
     if write_err then
       return { llm_output = "write error: " .. tostring(write_err), is_error = true }
     end

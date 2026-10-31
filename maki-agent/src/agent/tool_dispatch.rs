@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use serde_json::{Value, json};
+use tokio::task::spawn_blocking;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, warn};
 
@@ -22,7 +23,9 @@ use crate::permissions::{LayerAnswer, PermissionCheck, PromptLayers};
 use crate::tools::hook::{
     Authority, ChainCut, HookCall, HookStage, OUTPUT_IS_ERROR, OUTPUT_TEXT, Verdict, bounded,
 };
-use crate::tools::registry::{BoxFuture, InstalledHook, RegisteredTool, Tool, ToolInvocation};
+use crate::tools::registry::{
+    BoxFuture, InstalledHook, RegisteredTool, Tool, ToolInvocation, ToolSource,
+};
 use crate::tools::{
     CallOrigin, FileKey, LocalTool, LocalToolFn, MovedCall, MovedLand, PermissionScopes,
     ToolAudience, ToolContext, ToolExecResult, ToolLive, truncate_bytes,
@@ -31,7 +34,7 @@ use crate::{
     AgentError, AgentEvent, AgentSeed, CallRecord, TextOutput, ToolDoneEvent, ToolOutput,
     ToolStartEvent,
 };
-use maki_config::ToolKey;
+use maki_config::{Permission, ToolKey};
 use maki_storage::id::SessionRef;
 
 const DOOM_LOOP_THRESHOLD: usize = 3;
@@ -941,6 +944,21 @@ async fn run_native_tool(
         return done_error(e);
     }
 
+    let snapshots = mutated.is_some()
+        || matches!(name, "bash" | "pwsh")
+        || entry
+            .tool
+            .reach()
+            .is_some_and(|reach| reach.permission == Permission::FsWrite);
+    let _mutation_guard = if snapshots {
+        match ctx.file_access.mutation_guard().await {
+            Ok(guard) => Some(guard),
+            Err(error) => return done_error(error),
+        }
+    } else {
+        None
+    };
+
     // Taken after the permission gate, so a pending approval prompt never
     // holds a file lock, and around the whole handler, so it may `await`
     // freely without a sibling call on the same file interleaving its
@@ -951,17 +969,69 @@ async fn run_native_tool(
     let _guard = match &mutated {
         Some(key) => {
             let guard = ctx.file_access.acquire(key).await;
-            if ctx.config.stale_read_check
-                && let Err(message) = ctx.file_access.check_before_edit(key)
-            {
-                return done_error(message);
+            if ctx.cancel.is_cancelled() {
+                return done_error(ERROR_CANCELLED.to_owned());
+            }
+            if ctx.config.stale_read_check {
+                let check = match &entry.source {
+                    ToolSource::Lua { plugin } if plugin.as_ref() == "edit" => match name {
+                        "edit" | "multiedit" => {
+                            ctx.file_access.check_before_targeted_edit(key, false)
+                        }
+                        "edit_lines" | "insert_lines" => {
+                            ctx.file_access.check_before_targeted_edit(key, true)
+                        }
+                        _ => ctx.file_access.check_before_edit(key),
+                    },
+                    _ => ctx.file_access.check_before_edit(key),
+                };
+                if let Err(message) = check {
+                    return done_error(message);
+                }
             }
             Some(guard)
         }
         None => None,
     };
 
+    if snapshots {
+        let access = Arc::clone(&ctx.file_access);
+        match spawn_blocking(move || access.prepare_snapshot()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return done_error(format!("snapshot failed before mutation: {error}"));
+            }
+            Err(error) => {
+                return done_error(format!("snapshot failed before mutation: {error}"));
+            }
+        }
+    }
+
+    if snapshots && ctx.cancel.is_cancelled() {
+        return done_error(ERROR_CANCELLED.to_owned());
+    }
+    if snapshots {
+        ctx.file_access.note_mutation(mutated.as_ref());
+    }
+
     let result = invocation.execute(ctx).await;
+
+    if snapshots {
+        let access = Arc::clone(&ctx.file_access);
+        match spawn_blocking(move || access.record_snapshot_creations()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return done_error(format!(
+                    "mutation completed but snapshot metadata failed: {error}"
+                ));
+            }
+            Err(error) => {
+                return done_error(format!(
+                    "mutation completed but snapshot metadata failed: {error}"
+                ));
+            }
+        }
+    }
 
     // Nothing else could have touched the file while the guard was held, so the
     // mtime is refreshed here instead of by each write plugin remembering to.
@@ -972,7 +1042,9 @@ async fn run_native_tool(
         && result.moved.is_none()
         && let Some(key) = &mutated
     {
-        ctx.file_access.record_read(key);
+        let access = Arc::clone(&ctx.file_access);
+        let key = key.clone();
+        let _ = spawn_blocking(move || access.record_read(&key)).await;
     }
 
     let elapsed_ms = started.elapsed().as_millis() as u64;

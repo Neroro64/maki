@@ -586,6 +586,7 @@ pub struct App {
     pub(crate) trust: TrustState,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
     pub(crate) shared_history: Option<SharedMessages>,
+    pub(crate) file_access: Option<Arc<maki_agent::tools::FileAccess>>,
     pub(crate) paste_rx: Vec<oneshot::Receiver<Result<PastedContent, String>>>,
     pub(crate) mouse_paste_rx: Vec<oneshot::Receiver<Option<String>>>,
     storage_writer: Arc<StorageWriter>,
@@ -729,6 +730,7 @@ impl App {
             trust: TrustState::Inert,
             usage_slot: Arc::new(ArcSwapOption::empty()),
             shared_history: None,
+            file_access: None,
             paste_rx: vec![],
             mouse_paste_rx: vec![],
             storage_writer,
@@ -1589,6 +1591,7 @@ impl App {
             KeyboardOwner::RewindPicker => Some(match self.rewind_picker.handle_key(key) {
                 RewindPickerAction::Consumed => vec![],
                 RewindPickerAction::Select(entry) => self.rewind_to(entry),
+                RewindPickerAction::ChatOnly(entry) => self.rewind_chat_to(entry),
                 RewindPickerAction::Fork(entry) => self.fork_to(entry),
                 RewindPickerAction::Close => vec![],
             }),

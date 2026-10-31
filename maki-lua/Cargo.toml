@@ -44,6 +44,7 @@ tree-sitter = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
 regex = { workspace = true }
+similar = { workspace = true }
 include_dir = { workspace = true }
 maki-storage = { workspace = true }
 reqwest = { workspace = true, features = ["socks", "gzip", "deflate"] }

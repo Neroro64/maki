@@ -7,13 +7,14 @@ use std::io::{
 };
 use std::mem;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::UNIX_EPOCH;
 
 use maki_agent::{FileQuery, FileReader, Ranked};
-use maki_lua_macro::{lua_fn, lua_table};
+use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use mlua::{Buffer, Lua, Result as LuaResult, Table, Value};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::spawn_blocking;
 use tracing::warn;
 
@@ -23,6 +24,9 @@ use crate::api::util::pair::{Pair, err_pair, pair, try_pair};
 use crate::loader::EventHandle;
 use crate::plugin_permissions::PluginPermissions;
 use crate::runtime::LUA_MEMORY_LIMIT;
+use crate::runtime::{TaskHandle, lock_cell};
+use maki_agent::cancel::CancelToken;
+use maki_agent::tools::FileKey;
 
 /// All plugins share one Lua heap, and callers often copy what they read. So a
 /// big read fails here with a clear error, before it can run some other tool
@@ -34,7 +38,80 @@ const _: () = assert!(
 );
 const NON_UTF8_CONTENT_ERR: &str = "non-utf8 content; use read_bytes";
 const SCAN_CHUNK: usize = 64 * 1024;
+const MAX_WRITE_LOCKS: usize = 1024;
 pub(crate) const LINE_CUT_MARKER: &str = "...";
+static WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Semaphore>>>> = OnceLock::new();
+
+pub(crate) struct WriteLock {
+    guard: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+/// Serialize cooperating writes to a normalized path across plugin instances
+/// in this process. Does not access or modify that file. The lock is released
+/// by `:release()` or garbage collection. Acquisition honors task cancellation.
+///
+/// @param path string Shared write identity.
+/// @return (maki.fs.WriteLock?, string?) Held permit, or nil plus an error.
+/// @example
+/// local permit, err = maki.fs.write_lock(root)
+/// if not permit then return end
+/// permit:release()
+#[lua_fn(guard = FsWrite)]
+async fn write_lock(lua: Lua, path: String) -> LuaResult<Pair<WriteLock>> {
+    let key = try_pair!(normalize(&lua, path).map(PathBuf::from));
+    let key = spawn_blocking(move || FileKey::new(&key).as_path().to_path_buf())
+        .await
+        .unwrap();
+    let sem = {
+        let mut locks = WRITE_LOCKS
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, weak| weak.strong_count() != 0);
+        if locks.len() == MAX_WRITE_LOCKS && !locks.contains_key(&key) {
+            return Ok(err_pair("concurrent write-lock identity budget exceeded"));
+        }
+        if let Some(sem) = locks.get(&key).and_then(Weak::upgrade) {
+            sem
+        } else {
+            let sem = Arc::new(Semaphore::new(1));
+            locks.insert(key, Arc::downgrade(&sem));
+            sem
+        }
+    };
+    let cancel = lua
+        .app_data_ref::<TaskHandle>()
+        .map(|h| lock_cell(&h).cancel.clone())
+        .unwrap_or_else(CancelToken::none);
+    let guard = try_pair!(
+        cancel
+            .race(sem.acquire_owned())
+            .await
+            .and_then(|res| res.map_err(|_| "write lock closed".to_owned()))
+    );
+    Ok((
+        Some(WriteLock {
+            guard: Mutex::new(Some(guard)),
+        }),
+        None,
+    ))
+}
+
+/// Release the held write lock. Repeated calls are harmless.
+///
+/// @return (true?, string?) Always true.
+/// @example
+/// permit:release()
+#[lua_fn]
+fn release(_lua: &Lua, this: &WriteLock) -> LuaResult<Pair<bool>> {
+    this.guard.lock().unwrap_or_else(|e| e.into_inner()).take();
+    Ok((Some(true), None))
+}
+
+lua_class! {
+    /// A process-wide cooperating write permit.
+    "maki.fs.WriteLock" => WriteLock, WRITE_LOCK_DOCS [release]
+}
 
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     maki_storage::paths::expand_tilde(Path::new(path))
@@ -1519,8 +1596,9 @@ lua_table! {
     "maki.fs" => pub(crate) fn create_fs_table(perms: &PluginPermissions, plugin: Arc<str>), DOCS [
         read(perms), read_bytes(perms), read_lines(perms), metadata(perms), dirname, basename,
         joinpath, normalize, abspath, parents, root(perms), relpath, ext,
-        dir(perms), write(perms), append(perms), atomic_write(perms), rename(perms),
-        rm(perms), mkdir(perms), glob(perms), grep(perms), fuzzy_files(perms, plugin),
+        dir(perms), write(perms), append(perms), atomic_write(perms), write_lock(perms),
+        rename(perms), rm(perms), mkdir(perms), glob(perms), grep(perms),
+        fuzzy_files(perms, plugin),
     ]
 }
 

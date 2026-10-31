@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::ready;
+use std::path::Path;
 use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -14,8 +15,9 @@ use maki_agent::tools::interpreter_bridge;
 use maki_agent::tools::registry::ToolRegistry;
 use maki_agent::tools::schema::sanitize_tool_input_schema;
 use maki_agent::tools::{
-    Authority, BackgroundFor, CallOrigin, Deadline, DescriptionContext, LocalTool, LocalTools,
-    RequestTools, ToolAudience, ToolContext, ToolFilter, ToolLive, ToolOutputMode,
+    Authority, BackgroundFor, CallOrigin, Deadline, DescriptionContext, FileKey, LocalTool,
+    LocalTools, MAIN_TASK_ID, RequestTools, SymbolLease, ToolAudience, ToolContext, ToolFilter,
+    ToolLive, ToolOutputMode,
 };
 use maki_agent::types::ALLOWED_BY;
 use maki_agent::{
@@ -37,8 +39,8 @@ use maki_storage::id::MakiId;
 use maki_storage::now_epoch;
 use maki_storage::sessions::StoredThinking;
 use mlua::{
-    Either as LuaEither, Function, IntoLuaMulti, Lua, Result as LuaResult, Table, UserDataRef,
-    Value as LuaValue,
+    Either as LuaEither, Function, IntoLuaMulti, Lua, LuaString, Result as LuaResult, Table,
+    UserDataRef, Value as LuaValue,
 };
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex as AsyncMutex;
@@ -134,6 +136,92 @@ fn config_filter(base: ToolFilter, agent: &AgentContext, model: &Model) -> ToolF
         .collect();
     base.excluding(&disabled)
         .excluding(maki_agent::tools::capability_exclusions(model))
+}
+
+/// Claim qualified declaration names before committing a targeted edit.
+/// Claims remain held until the subagent session closes, cancels, or rewinds.
+/// The main agent checks subagent claims without retaining its own.
+///
+/// @param ctx LuaCtx Agent context.
+/// @param path string File path.
+/// @param symbols string[] Qualified symbol names, or `"<file>"` for the whole file.
+/// @return (boolean?, string?) `(true, nil)` or `(nil, err)` on conflict.
+#[lua_fn(guard = FsWrite)]
+async fn lock_symbols(
+    _lua: Lua,
+    ctx: UserDataRef<LuaCtx>,
+    path: String,
+    symbols: Vec<String>,
+) -> LuaResult<Pair<bool>> {
+    let agent = try_pair!(dispatch_ctx(&ctx, "lock_symbols"));
+    let access = Arc::clone(&agent.file_access);
+    let holder = agent.task_id.clone();
+    let cancel = agent.cancel.clone();
+    drop(ctx);
+    Ok(pair(
+        spawn_blocking(move || {
+            if cancel.is_cancelled() {
+                return Err(CANCELLED_MSG.to_owned());
+            }
+            access
+                .claim_symbols(
+                    &FileKey::new(Path::new(&path)),
+                    holder.as_deref().unwrap_or(MAIN_TASK_ID),
+                    &symbols,
+                )
+                .map(|()| true)
+        })
+        .await
+        .unwrap(),
+    ))
+}
+
+/// Return a task's cached read source only when the file changed since that read.
+/// Main-agent reads and uncached files return `(nil, nil)`.
+///
+/// @param ctx LuaCtx Agent context.
+/// @param path string File path.
+/// @return (string?, string?) Cached source, or `(nil, err)` on failure.
+#[lua_fn(guard = FsRead)]
+async fn edit_snapshot(
+    lua: Lua,
+    ctx: UserDataRef<LuaCtx>,
+    path: String,
+) -> LuaResult<Pair<LuaString>> {
+    let agent = try_pair!(dispatch_ctx(&ctx, "edit_snapshot"));
+    let access = Arc::clone(&agent.file_access);
+    let cancel = agent.cancel.clone();
+    drop(ctx);
+    let result = spawn_blocking(move || {
+        if cancel.is_cancelled() {
+            return Err(CANCELLED_MSG.to_owned());
+        }
+        access.edit_snapshot(&FileKey::new(Path::new(&path)))
+    })
+    .await
+    .unwrap();
+    Ok(match result {
+        Ok(Some(source)) => (Some(lua.create_string(source.as_bytes())?), None),
+        Ok(None) => (None, None),
+        Err(error) => err_pair(error),
+    })
+}
+/// Read the latest compact discarded trajectory of a live chat session.
+/// Rewind publishes it before the chat changes. Session end clears it.
+/// Contains no thinking or images and is bounded to 12 KiB.
+///
+/// @param opts table `session` (string) Live chat session id.
+/// @return (string?, string?) Latest trajectory, nil if none, or nil plus an error.
+/// @example
+/// local failed, err = maki.agent.rewind_trajectory({ session = sid })
+#[lua_fn(guard = SessionRead)]
+fn rewind_trajectory(lua: &Lua, opts: Table) -> LuaResult<Pair<LuaString>> {
+    let session = try_pair!(required_session(Some(&opts))?);
+    let seed = try_pair!(AgentSeed::live(session).ok_or_else(|| not_live(session)));
+    Ok(match seed.file_access.rewind_trajectory() {
+        Some(text) => (Some(lua.create_string(text.as_bytes())?), None),
+        None => (None, None),
+    })
 }
 
 fn required_opts(opts: Option<Table>) -> LuaResult<Table> {
@@ -1261,6 +1349,8 @@ async fn session(
         }
     }
 
+    let name = name.unwrap_or_default();
+    let (file_access, symbol_lease) = agent_ctx.file_access.task_scope(&ui_id, &name);
     let cancellation = Arc::new(SessionCancellation {
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
         ui_id,
@@ -1270,6 +1360,7 @@ async fn session(
         background: owner.is_some(),
         mailbox: SessionMailbox::register(MakiId::generate()),
         adoption,
+        symbol_lease,
     });
     if let Some(session) = &agent_ctx.session_id {
         cancellation
@@ -1336,11 +1427,7 @@ async fn session(
             task_id: Some(Arc::from(cancellation.ui_id.as_str())),
             mailbox: Some(cancellation.mailbox.clone()),
             timeouts: agent_ctx.timeouts,
-            // Shared with the parent, not fresh: a lock that a subagent does
-            // not take is no lock at all once two of them edit one file, and a
-            // subagent starting with an empty read history would overwrite
-            // whatever its parent read without ever being told it was stale.
-            file_access: Arc::clone(&agent_ctx.file_access),
+            file_access,
             prompt_slots: Arc::clone(&agent_ctx.prompt_slots),
             subagent_cancels: Arc::new(CancelMap::new()),
             ledger: RunLedger::child(&agent_ctx.ledger),
@@ -1509,9 +1596,9 @@ lua_table! {
     ///   end,
     /// })
     /// ```
-    "maki.agent" => pub(crate) fn create_agent_table(plugin: Arc<str>, perms: PluginPermissions), DOCS [
+    "maki.agent" => pub(crate) fn create_agent_table(plugin: Arc<str>, guards: &PluginPermissions, perms: PluginPermissions), DOCS [
         resolve_model, system_prompt, tools, callable_tools, call_tool,
-        session(plugin, perms), list,
+        lock_symbols(guards), edit_snapshot(guards), rewind_trajectory(guards), session(plugin, perms), list,
     ]
 }
 
@@ -1830,6 +1917,7 @@ struct SessionCancellation {
     /// whole life, so a later prompt still hears of a call an earlier one moved.
     mailbox: SessionMailbox,
     adoption: Option<Adoption>,
+    symbol_lease: SymbolLease,
 }
 
 impl SessionCancellation {
@@ -1842,6 +1930,7 @@ impl SessionCancellation {
     /// Ends the session as closed, unless something ended it first.
     fn close(&self) {
         self.control.end(EndReason::Closed);
+        self.symbol_lease.release();
         self.parent_cancels.retire(&self.ui_id, self.slot);
         if self.background {
             self.registry.remove(&self.ui_id);
@@ -1867,8 +1956,10 @@ impl SessionCancellation {
         let registry = self.registry.clone();
         let mailbox = self.mailbox.clone();
         let task_id = self.ui_id.clone();
+        let symbol_lease = self.symbol_lease.clone();
         tokio::spawn(async move {
             token.cancelled().await;
+            symbol_lease.release();
             registry.end_mailbox(&mailbox);
             mailbox.untrack_task(&task_id);
         });
@@ -2363,17 +2454,73 @@ mod tests {
     async fn native_session(lua: &Lua, ctx: &ToolContext) -> AnyUserData {
         lua.set_app_data(Arc::clone(ToolRegistry::global_arc()));
         let ctx = lua.create_userdata(LuaCtx::handler(ctx)).unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("name", PLUGIN).unwrap();
         let (session, error) = session(
             lua.clone(),
             Arc::from(PLUGIN),
             PluginPermissions::trusted(),
             LuaEither::Left(ctx.borrow().unwrap()),
-            Some(lua.create_table().unwrap()),
+            Some(opts),
         )
         .await
         .unwrap();
         assert!(error.is_none(), "{error:?}");
         session.unwrap()
+    }
+
+    #[test_case("close" ; "session_close")]
+    #[test_case("abort" ; "session_abort")]
+    #[test_case("drop" ; "session_drop")]
+    #[tokio::test]
+    async fn actual_sessions_share_symbol_claims_until_the_holder_retires(retirement: &str) {
+        let lua = Lua::new();
+        let ctx = stub_ctx_with(&AgentMode::Build, None, Some(PARENT_ID));
+        let mut sibling_ctx = ctx.clone();
+        sibling_ctx.tool_use_id = Some("task-2".into());
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("shared.rs");
+        let key = FileKey::new(&path);
+        let first_symbol = vec!["Parser::parse".to_owned()];
+        let second_symbol = vec!["Renderer::render".to_owned()];
+        let first = native_session(&lua, &ctx).await;
+        let second = native_session(&lua, &sibling_ctx).await;
+        let first_inner = Arc::clone(&first.borrow::<LuaSession>().unwrap().inner);
+        let second_inner = Arc::clone(&second.borrow::<LuaSession>().unwrap().inner);
+        let first_access = Arc::clone(&first_inner.lock().await.params.file_access);
+        let second_access = Arc::clone(&second_inner.lock().await.params.file_access);
+        first_access
+            .claim_symbols(&key, PARENT_ID, &first_symbol)
+            .unwrap();
+        second_access
+            .claim_symbols(&key, "task-2", &second_symbol)
+            .unwrap();
+        let error = second_access
+            .claim_symbols(&key, "task-2", &first_symbol)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "Conflict: Subagent {PARENT_ID} ({PLUGIN}) currently holds lock on symbol Parser::parse in {}",
+                key.as_path().display(),
+            )
+        );
+        match retirement {
+            "close" => close(lua.clone(), first.borrow().unwrap(), None).await.unwrap(),
+            "abort" => first.borrow::<LuaSession>().unwrap().cancellation.close(),
+            "drop" => drop(first.take::<LuaSession>().unwrap()),
+            _ => unreachable!(),
+        }
+        second_access
+            .claim_symbols(&key, "task-2", &first_symbol)
+            .unwrap();
+        assert!(
+            first_access
+                .claim_symbols(&key, PARENT_ID, &second_symbol)
+                .is_err()
+        );
+        assert!(first_access.mutation_guard().await.is_err());
+        close(lua.clone(), second.borrow().unwrap(), None).await.unwrap();
     }
 
     #[test_case(false ; "close")]
@@ -2926,8 +3073,9 @@ mod tests {
     #[tokio::test]
     async fn ctx_less_session_needs_a_task_and_a_live_session() {
         let lua = Lua::new();
+        let permissions = PluginPermissions::trusted();
         let agent =
-            create_agent_table(&lua, Arc::from(PLUGIN), PluginPermissions::trusted()).unwrap();
+            create_agent_table(&lua, Arc::from(PLUGIN), &permissions, permissions.clone()).unwrap();
         lua.globals().set("agent", agent).unwrap();
         let session = MakiId::generate();
         lua.globals().set("sid", session.to_string()).unwrap();

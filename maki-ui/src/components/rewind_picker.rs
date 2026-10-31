@@ -15,7 +15,11 @@ use ratatui::layout::{Position, Rect};
 const TITLE: &str = " Rewind ";
 const PREVIEW_MAX_LEN: usize = 80;
 pub(crate) const NO_TURNS_MSG: &str = "No user turns to rewind to";
-const FOOTER: &[(&str, &str)] = &[("Enter", "rewind"), (key::FORK.label, "fork")];
+const FOOTER: &[(&str, &str)] = &[
+    ("Enter", "rewind chat + code"),
+    ("Tab", "rewind chat only"),
+    (key::FORK.label, "fork"),
+];
 const CONFIRM_PREFIX: &str = "Press enter again to rewind and stop ";
 const ONE_TASK: &str = "1 background task";
 const MANY_TASKS_SUFFIX: &str = " background tasks";
@@ -46,6 +50,7 @@ fn stop_notice(stopped: &[&(Arc<str>, String)]) -> String {
 pub enum RewindPickerAction {
     Consumed,
     Select(RewindEntry),
+    ChatOnly(RewindEntry),
     Fork(RewindEntry),
     Close,
 }
@@ -172,6 +177,20 @@ impl RewindPicker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> RewindPickerAction {
+        if key.code == KeyCode::Tab {
+            if let Some(turn) = self.picker.selected_item().map(|entry| entry.turn_index)
+                && self.armed != Some(turn)
+                && let Some(notice) = self.stops.get(&turn)
+            {
+                self.armed = Some(turn);
+                self.picker.set_alert_text(Some(notice.clone()));
+                return RewindPickerAction::Consumed;
+            }
+            return self
+                .picker
+                .take_selected()
+                .map_or(RewindPickerAction::Consumed, RewindPickerAction::ChatOnly);
+        }
         if key::FORK.matches(key) {
             return self
                 .picker
@@ -350,6 +369,24 @@ mod tests {
         picker.open(&msgs, &[]).unwrap();
         let top = picker.picker.selected_item().unwrap();
         assert!(top.label().starts_with("2: second"));
+    }
+
+    #[test_case(KeyCode::Enter, false ; "chat_and_code")]
+    #[test_case(KeyCode::Tab, true ; "chat_only")]
+    fn rewind_mode_selects_the_same_prompt(code: KeyCode, chat_only: bool) {
+        let mut picker = RewindPicker::new();
+        picker
+            .open(&[user_msg("first"), assistant_msg(), user_msg("second")])
+            .unwrap();
+        let action = picker.handle_key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
+        let entry = match (action, chat_only) {
+            (RewindPickerAction::Select(entry), false)
+            | (RewindPickerAction::ChatOnly(entry), true) => entry,
+            _ => panic!("wrong rewind mode"),
+        };
+        assert_eq!(entry.turn_index, 2);
+        assert_eq!(entry.prompt_text, "second");
+        assert!(!picker.is_open());
     }
 
     #[test]

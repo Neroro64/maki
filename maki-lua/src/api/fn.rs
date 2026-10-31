@@ -31,6 +31,7 @@ const SCOPE_TYPE_ERR: &str = "jobstart: scope must be \"task\", \"plugin\", or {
 const JOB_NOT_FOUND_ERR: &str = "job: not found";
 const JOB_UNWAITABLE_ERR: &str = "jobwait: unknown job id or already waited";
 const JOB_WAIT_TIMEOUT_ERR: &str = "jobwait: timed out";
+const JOB_OUTPUT_READ_ERR: &str = "jobwait: output read failed";
 const BLANK_NAME_ERR: &str = "jobstart: name must be non-blank";
 const EMPTY_ARGV_ERR: &str = "jobstart: argv table must not be empty";
 const CMD_TYPE_ERR: &str = "jobstart: cmd must be a shell string or an argv table";
@@ -383,6 +384,7 @@ fn snapshot_table(lua: &Lua, snap: &JobSnapshot, tails: bool) -> LuaResult<Table
         },
     )?;
     row.set("exit_code", snap.exit_code)?;
+    row.set("read_error", snap.read_error.as_deref())?;
     if tails {
         let stdout = lua.create_table()?;
         for (i, line) in snap.stdout_lines.iter().enumerate() {
@@ -463,6 +465,9 @@ async fn jobwait(
         return Ok(err_pair(JOB_UNWAITABLE_ERR));
     };
     if let Some(code) = snap.exit_code {
+        if let Some(error) = snap.read_error {
+            return Ok(err_pair(format!("{JOB_OUTPUT_READ_ERR}: {error}")));
+        }
         return wait_result(
             &lua,
             &snap.stdout_lines,
@@ -506,6 +511,10 @@ async fn jobwait(
             JobEvent::Exit(code) => break code,
         }
     };
+
+    if let Some(error) = lease.read_error() {
+        return Ok(err_pair(format!("{JOB_OUTPUT_READ_ERR}: {error}")));
+    }
 
     wait_result(
         &lua,

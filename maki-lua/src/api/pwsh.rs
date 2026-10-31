@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::api::util::convert::TableExt;
 use crate::api::util::pair::Pair;
@@ -35,7 +36,7 @@ const SESSION_DEAD: &str = "pwsh session died between calls";
 
 struct PwshSession {
     stdin: Arc<Mutex<ChildStdin>>,
-    lines: flume::Receiver<String>,
+    lines: Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>,
     pid: u32,
     started: Instant,
     seq: AtomicU32,
@@ -79,7 +80,7 @@ impl PwshStore {
         };
         let pid = child.id();
         let stdin = Arc::new(Mutex::new(child.stdin.take().expect("piped stdin")));
-        let (tx, rx) = flume::unbounded();
+        let (tx, rx) = mpsc::unbounded_channel();
 
         macro_rules! spawn_reader {
             ($stream:expr, $name:expr) => {
@@ -125,7 +126,7 @@ impl PwshStore {
 
         let pwsh = Arc::new(PwshSession {
             stdin,
-            lines: rx,
+            lines: Arc::new(AsyncMutex::new(rx)),
             pid,
             started: Instant::now(),
             seq: AtomicU32::new(0),
@@ -249,8 +250,9 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
         return Ok((None, Some(SESSION_DEAD.to_owned())));
     }
 
-    let deadline = smol::Timer::after(Duration::from_secs(timeout));
-    futures_lite::pin!(deadline);
+    let mut rx = rx.lock().await;
+    let deadline = tokio::time::sleep(Duration::from_secs(timeout));
+    tokio::pin!(deadline);
 
     let mut output = String::new();
     let mut exit_code: Option<i32> = None;
@@ -263,19 +265,14 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
         Timeout,
     }
     loop {
-        let tick = futures_lite::future::or(
-            async {
-                match rx.recv_async().await {
-                    Ok(line) => Tick::Line(line),
-                    Err(_) => Tick::Closed,
-                }
+        let tick = tokio::select! {
+            biased;
+            maybe_line = rx.recv() => match maybe_line {
+                Some(line) => Tick::Line(line),
+                None => Tick::Closed,
             },
-            async {
-                (&mut deadline).await;
-                Tick::Timeout
-            },
-        )
-        .await;
+            () = &mut deadline => Tick::Timeout,
+        };
         match tick {
             Tick::Line(line) => {
                 if let Some(code) = parse_marker(&line, seq) {

@@ -383,6 +383,16 @@ pub const KEYBINDS: &[Keybind] = &[
         Ctx::Picker,
     ),
     single(
+        "Enter",
+        "Rewind chat and code to the selected prompt",
+        Ctx::RewindPicker,
+    ),
+    single(
+        "Tab",
+        "Rewind chat only to the selected prompt",
+        Ctx::RewindPicker,
+    ),
+    single(
         key::FORK.label,
         "Fork up to the selected prompt and switch to it",
         Ctx::RewindPicker,

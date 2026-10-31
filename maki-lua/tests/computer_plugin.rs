@@ -4,6 +4,7 @@ use maki_agent::tools::ToolRegistry;
 use maki_agent::tools::test_support::stub_ctx;
 use maki_agent::{AgentMode, ToolOutput};
 use maki_lua::PluginHost;
+use maki_lua::test_support::runtime;
 use serde_json::{Value, json};
 
 const COMPUTER_PLUGIN_SRC: &str = include_str!("../../plugins/computer/init.lua");
@@ -25,7 +26,7 @@ fn exec(reg: &ToolRegistry, input: Value) -> String {
         .unwrap_or_else(|| panic!("tool computer not registered"));
     let inv = entry.tool.parse(&input).expect("parse failed");
     let ctx = stub_ctx(&AgentMode::Build);
-    let res = smol::block_on(async { inv.execute(&ctx).await }).output;
+    let res = runtime().block_on(async { inv.execute(&ctx).await }).output;
     match res {
         Ok(ToolOutput::Plain(s) | ToolOutput::Markdown(s)) => s.text,
         Ok(other) => panic!("unexpected output: {other:?}"),

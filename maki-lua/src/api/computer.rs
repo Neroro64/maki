@@ -201,13 +201,14 @@ async fn computer_screenshot(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     #[cfg(windows)]
     let dims = {
         let target = target.clone();
-        match smol::unblock(move || {
+        match tokio::task::spawn_blocking(move || {
             let (image, left, top) = capture_screen()?;
             let (width, height) = image.dimensions();
             save_png(&image, &target)?;
             Ok::<_, String>((width, height, left, top))
         })
         .await
+        .unwrap()
         {
             Ok(dimensions) => dimensions,
             Err(error) => return Ok((None, Some(error))),
@@ -253,14 +254,15 @@ async fn portal_screenshot(target: &std::path::Path) -> Result<(u32, u32), Strin
             .map_err(|e| format!("portal screenshot failed: {e}"))?;
         Ok::<_, String>(shot)
     };
-    let shot = smol::future::or(request, async {
-        smol::Timer::after(PORTAL_TIMEOUT).await;
-        Err(format!(
-            "no X11 capture ({NO_DISPLAY}); portal screenshot timed out after {}s",
-            PORTAL_TIMEOUT.as_secs()
-        ))
-    })
-    .await?;
+    let shot = match tokio::time::timeout(PORTAL_TIMEOUT, request).await {
+        Ok(res) => res?,
+        Err(_) => {
+            return Err(format!(
+                "no X11 capture ({NO_DISPLAY}); portal screenshot timed out after {}s",
+                PORTAL_TIMEOUT.as_secs()
+            ));
+        }
+    };
     let source = shot
         .uri()
         .to_file_path()

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -14,7 +15,7 @@ use crate::text_buffer::Writers;
 use maki_agent::agent::SessionExport;
 use maki_agent::session::SessionHeader;
 use maki_agent::{CompactRequest, SessionMailbox, TaskEnd, Transcript};
-use maki_lua::agent_autocmd::HostEvent;
+use maki_lua::agent_autocmd::{HostEvent, compact_trajectory};
 use maki_lua::{PluginPermissions, PluginReach, SessionEndReason};
 use maki_providers::{Message, Model, RequestOptions, TokenUsage, estimate_message_tokens};
 use maki_storage::id::MakiId;
@@ -704,6 +705,40 @@ impl App {
     /// to bring back. Every other task keeps its tab as it was, ending and
     /// all, and its receipt row in the rebuilt main chat keeps its badge.
     pub(super) fn rewind_to(&mut self, entry: RewindEntry) -> Vec<Action> {
+        let result = self
+            .file_access
+            .as_ref()
+            .map(|access| {
+                access.restore_snapshot(
+                    Path::new(&self.state.session.cwd),
+                    &self.state.session.id.to_string(),
+                    entry.turn_index,
+                )
+            })
+            .transpose();
+        match result {
+            Ok(Some(Some(_))) => {}
+            Ok(_) => self.restore_checkpoint(entry.turn_index),
+            Err(error) => {
+                self.flash(format!("rewind failed; chat left unchanged: {error}"));
+                return vec![];
+            }
+        }
+        self.rewind_chat_to(entry)
+    }
+
+    pub(super) fn rewind_chat_to(&mut self, entry: RewindEntry) -> Vec<Action> {
+        let discarded = self
+            .state
+            .session
+            .messages()
+            .get(entry.turn_index..)
+            .unwrap_or_default();
+        let trajectory = compact_trajectory(discarded);
+        self.fire_session_event(HostEvent::Rewind {
+            turn_index: entry.turn_index,
+            trajectory: &trajectory,
+        });
         let messages = self.state.session.messages();
         if let Some(mailbox) = self.live_mailbox() {
             for id in mailbox.unsettled() {
@@ -729,7 +764,6 @@ impl App {
         // The prune and the rebuild below read the meta.
         self.sync_subagents();
         let measured = self.state.context_size;
-        self.restore_checkpoint(entry.turn_index);
         let session = self.state.session_mut();
         let context_size = truncate_to_turn(session, entry.turn_index, measured);
         session.update_title_if_default(None);

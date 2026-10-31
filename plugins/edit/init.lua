@@ -1,6 +1,7 @@
 local shorten_path = require("maki.shorten_path")
 local ToolView = require("maki.tool_view")
 local fuzzy_replace = require("maki.fuzzy_replace")
+local edit_policy = require("maki.edit_policy")
 local replace_lines = require("edit_helpers").replace_lines
 local insert_after = require("edit_helpers").insert_after
 local preserve_line_endings = require("edit_helpers").preserve_line_endings
@@ -196,17 +197,27 @@ local function diff_restore(blocks_from)
   end
 end
 
-local function apply_edit(path, transform)
+local function apply_edit(ctx, path, transform)
   path = maki.fs.abspath(path)
+  local baseline, snapshot_err = maki.agent.edit_snapshot(ctx, path)
+  if snapshot_err then
+    return nil, snapshot_err
+  end
 
   local before, read_err = maki.fs.read(path)
   if read_err then
     return nil, "read error: " .. tostring(read_err)
   end
 
-  local after, transform_err = preserve_line_endings(before, transform)
+  local after, transform_err = preserve_line_endings(baseline or before, transform)
   if transform_err then
     return nil, transform_err
+  end
+
+  local policy_err
+  after, policy_err = edit_policy.apply(ctx, path, baseline or before, after)
+  if policy_err then
+    return nil, policy_err
   end
 
   local _, write_err = maki.fs.write(path, after)
@@ -283,8 +294,8 @@ maki.api.register_tool({
     return { { old = input.old_string, new = input.new_string } }
   end),
 
-  handler = function(input)
-    local result, err = apply_edit(input.path, function(content)
+  handler = function(input, ctx)
+    local result, err = apply_edit(ctx, input.path, function(content)
       return fuzzy_replace.replace(content, input.old_string, input.new_string, input.replace_all or false)
     end)
     if not result then
@@ -350,13 +361,13 @@ register_tool_if(opts.multiedit, {
     return blocks
   end),
 
-  handler = function(input)
+  handler = function(input, ctx)
     local edits = input.edits
     if #edits == 0 then
       return { llm_output = "provide at least one edit", is_error = true }
     end
 
-    local result, err = apply_edit(input.path, function(content)
+    local result, err = apply_edit(ctx, input.path, function(content)
       for i, edit in ipairs(edits) do
         local replaced, replace_err =
           fuzzy_replace.replace(content, edit.old_string, edit.new_string, edit.replace_all or false)
@@ -423,8 +434,8 @@ register_tool_if(opts.edit_lines, {
     return { { new = input.new_string, nr = input.start } }
   end),
 
-  handler = function(input)
-    local result, err = apply_edit(input.path, function(content)
+  handler = function(input, ctx)
+    local result, err = apply_edit(ctx, input.path, function(content)
       return replace_lines(content, input.start, input["end"], input.new_string)
     end)
     if not result then
@@ -473,8 +484,8 @@ register_tool_if(opts.insert_lines, {
     return { { new = input.new_string, nr = input.line + 1 } }
   end),
 
-  handler = function(input)
-    local result, err = apply_edit(input.path, function(content)
+  handler = function(input, ctx)
+    local result, err = apply_edit(ctx, input.path, function(content)
       return insert_after(content, input.line, input.new_string)
     end)
     if not result then

@@ -36,6 +36,7 @@ pub(crate) const SECTIONS: &[(&str, &[&str])] = &[
             "glob",
             "grep",
             "index",
+            "lsp_speculate",
             "view_image",
         ],
     ),

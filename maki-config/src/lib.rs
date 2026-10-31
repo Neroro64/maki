@@ -109,17 +109,20 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "context_notes",
     "deepseek",
     "design",
+    "diff_integrity",
     "edit",
     "glob",
     "grep",
     "index",
     "list",
+    "lsp_speculate",
     "memory",
     "mistral",
     "openrouter",
     "pwsh",
     "question",
     "read",
+    "reflect",
     "regolo",
     "requesty",
     "review",
@@ -1477,7 +1480,7 @@ pub struct AgentConfig {
 
     #[config(
         default = false,
-        desc = "Commit working-tree changes to a temp git at the end of each turn so rewind restores project state"
+        desc = "Save turn-end filesystem checkpoints outside Git repositories; Git projects use hidden per-turn snapshot refs automatically"
     )]
     pub checkpoint: bool,
 
