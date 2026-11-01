@@ -349,10 +349,14 @@ change, or justify each finding in the current final reply:
 [DIFF INTEGRITY JUSTIFICATION] <exact DI identifier>: source.rs keeps this ignored test because it is a parser fixture, not an executable workspace test. Its assertion remains intact.
 ```
 
-Each identifier is tied to the current diff. Empty, generic, and stale
-justifications do not pass. An explicit request such as `Remove test
-checks_answer` permits that test and its contained assertions to be removed.
-It does not permit new suppressions or type weakening.
+The identifier is the `DI-…` token alone. The `<path>:<line>` printed after it
+may be echoed between the identifier and the rationale, and a rationale for an
+analysis-unavailable finding may name the affected file from its evidence
+instead of the synthetic `<integrity>` path. Identifiers are tied to the
+current diff. Empty, generic, and stale justifications do not pass. An
+explicit request such as `Remove test checks_answer` permits that test and its
+contained assertions to be removed. It does not permit new suppressions or
+type weakening.
 
 Unavailable baselines, unsupported changed code, parser failures, unreadable
 Git output, and exceeded analysis limits produce required warnings rather than
