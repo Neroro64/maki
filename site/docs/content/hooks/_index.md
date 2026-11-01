@@ -358,10 +358,12 @@ explicit request such as `Remove test checks_answer` permits that test and its
 contained assertions to be removed. It does not permit new suppressions or
 type weakening.
 
-Unavailable baselines, unsupported changed code, parser failures, unreadable
-Git output, and exceeded analysis limits produce required warnings rather than
-clean results. Inspection is bounded to 256 code files, 512 KiB per source,
-and 4 MiB of total source. At a turn limit, unresolved warnings return an error
+Unavailable baselines, parser failures, unreadable Git output, and exceeded
+analysis limits produce required warnings rather than clean results. Changed
+files in languages without an integrity grammar, and data files, are skipped
+without a warning. Renaming checked code to such a path still warns.
+Inspection is bounded to 256 code files, 512 KiB per source, and 4 MiB of
+total source. At a turn limit, unresolved warnings return an error
 instead of a successful main-agent completion or task summary.
 
 Disable the gate with `plugins.diff_integrity = { enabled = false }` in your

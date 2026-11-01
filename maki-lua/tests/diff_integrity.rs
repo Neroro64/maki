@@ -310,31 +310,73 @@ fn unavailable_analysis_fails_closed(snapshot: Value, expected: &str) {
 }
 
 #[test_case("source.rs", "fn answer( {", "invalid syntax"; "invalid_code")]
-#[test_case("source.go", "package example\nfunc answer() int { return 42 }\n", "unsupported integrity grammar"; "unsupported_code")]
-fn invalid_or_unsupported_changed_code_is_not_clean(file: &str, source: &str, expected: &str) {
+fn invalid_changed_code_is_not_clean(file: &str, source: &str, expected: &str) {
     let fixture = Fixture::new(file, source);
     fixture.write(&fixture.path, &format!("{source}\n// changed\n"));
     assert!(warning(&fixture.actual_gate("Done.")).contains(expected));
 }
 
 #[test]
-fn echoed_finding_location_and_evidence_path_justify_unsupported_grammar() {
-    let fixture = Fixture::new(
-        "init.lua",
-        "vim.cmd.colorscheme(\"emberbox\")\nrequire(\"config.lazy\")\n",
-    );
-    fixture.write(&fixture.path, "require(\"config.lazy\")\n");
+fn sibling_anonymous_closures_do_not_break_analysis_and_still_count_assertions() {
+    let before = "fn run() -> Vec<i32> {\n    let doubled = vec![1]\n        .into_iter()\n        .map(|x| { assert!(x > 0); x * 2 })\n        .filter(|x| *x > 0);\n    assert!(!doubled.is_empty());\n    doubled.collect()\n}\n";
+    let fixture = Fixture::new("source.rs", before);
+    fixture.write(&fixture.path, &before.replace("x * 2", "x * 3"));
+    let clean = fixture.actual_gate("Widened the mapping.");
+    assert!(clean.get("continue").is_none(), "{clean}");
+    fixture.write(&fixture.path, &before.replace("assert!(x > 0); ", ""));
+    assert!(warning(&fixture.actual_gate("Done.")).contains("removed assertion"));
+}
+
+#[test]
+fn sibling_anonymous_arrows_do_not_break_analysis_and_still_count_assertions() {
+    let before = "function run(values: number[]) {\n  const out = values\n    .filter((v) => v > 0)\n    .map((v) => { expect(v).toBe(v); return Math.round(v); });\n  return out.length;\n}\n";
+    let fixture = Fixture::new("source.ts", before);
+    fixture.write(&fixture.path, &before.replace("Math.round(v)", "Math.floor(v)"));
+    let clean = fixture.actual_gate("Rounded down.");
+    assert!(clean.get("continue").is_none(), "{clean}");
+    fixture.write(&fixture.path, &before.replace("expect(v).toBe(v); ", ""));
+    assert!(warning(&fixture.actual_gate("Done.")).contains("removed assertion"));
+}
+
+#[test_case(
+    "init.lua",
+    "require(\"config.lazy\")\n",
+    "vim.cmd.colorscheme(\"emberbox\")\nrequire(\"config.lazy\")\n";
+    "lua_edited"
+)]
+#[test_case(
+    "source.go",
+    "package example\nfunc answer() int { return 42 }\n",
+    "package example\nfunc answer() int { return 43 }\n";
+    "go_edited"
+)]
+fn changed_code_without_an_integrity_grammar_is_out_of_scope(
+    file: &str,
+    before: &str,
+    after: &str,
+) {
+    let fixture = Fixture::new(file, before);
+    fixture.write(&fixture.path, after);
+    fixture.write(&fixture.directory.path().join("added.lua"), "return {}\n");
+    let result = fixture.actual_gate("Done.");
+    assert!(result.get("continue").is_none(), "{result}");
+}
+
+#[test]
+fn renaming_checked_code_to_a_path_without_an_integrity_grammar_warns() {
+    let fixture = Fixture::new("source.rs", SOURCE);
+    git(fixture.directory.path(), &["mv", "source.rs", "source.lua"]);
     let denied = fixture.actual_gate("Done.");
     let finding = warning(&denied);
     assert!(finding.contains("analysis unavailable"), "{finding}");
     assert!(
-        finding.contains("unsupported integrity grammar for init.lua (lua)"),
+        finding.contains("code moved to an unsupported/resource path: source.lua"),
         "{finding}"
     );
     let id = identifiers(finding).into_iter().next().expect("finding id");
     for separator in [":0:", ":0"] {
         let reply = format!(
-            "[DIFF INTEGRITY JUSTIFICATION] {id} <integrity>{separator} init.lua shrank because the emberbox colorscheme call moved into the LazyVim colorscheme option in plugins/colors.lua, keeping startup identical.\n"
+            "[DIFF INTEGRITY JUSTIFICATION] {id} <integrity>{separator} source.lua holds the retired Rust fixture text because the parser specimen now lives as an inert Lua config module.\n"
         );
         assert!(
             fixture.actual_gate(&reply).get("continue").is_none(),

@@ -108,7 +108,8 @@ end)
             .file_access
             .prepare_snapshot()
             .expect("capture real turn baseline");
-        let baseline = json!({ "captured": true, "mutated": true, "root": directory.path(),
+        let baseline = json!({ "captured": true, "mutated": true,
+            "root": fs::canonicalize(directory.path()).expect("canonical fixture root"),
             "reference": reference, "attributes": attributes, "paths": null });
         Self {
             _host: host,

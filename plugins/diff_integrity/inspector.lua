@@ -10,7 +10,6 @@ local GIT_TIMEOUT = 5000
 local WARNING = "[DIFF INTEGRITY WARNING]"
 local MARKER = "[DIFF INTEGRITY JUSTIFICATION]"
 local SUPPORTED = { rust = true, javascript = true, typescript = true, tsx = true, python = true }
-local DATA = { json = true, jsonc = true, toml = true, yaml = true, html = true, css = true, markdown = true }
 local DECL = {
   function_item = true, function_definition = true, function_declaration = true,
   method_definition = true, class_definition = true, class_declaration = true,
@@ -22,6 +21,7 @@ local DECL = {
   type_alias_declaration = true, interface_declaration = true,
   arrow_function = true, function_expression = true, closure_expression = true,
 }
+local ANONYMOUS_FUNCTION = { arrow_function = true, function_expression = true, closure_expression = true }
 
 -- Two independent integer rolling hashes bind identifiers to the entire current
 -- normalized diff, not a previous warning, reply, or filename alone.
@@ -144,12 +144,11 @@ end
 local function declaration(node, source)
   if not DECL[node:type()] then return nil end
   local name = field(node, "name", source) or field(node, "pattern", source)
-  if node:type() == "arrow_function" or node:type() == "function_expression" or node:type() == "closure_expression" then
-    name = name or "<anonymous>"
-  end
   if node:type() == "impl_item" then
     name = (field(node, "trait", source) or "") .. " for " .. (field(node, "type", source) or "")
   end
+  -- Anonymous function-likes have no stable name, so they count under their
+  -- enclosing declaration instead of colliding as duplicate callables.
   return name and node:type() .. ":" .. compact(name) or nil
 end
 
@@ -171,8 +170,8 @@ end
 
 local function analyze(path, source)
   local language = maki.treesitter.language_for_path(path)
-  if not language or DATA[language] then return { assertions = {}, tests = {}, risks = {}, types = {} } end
-  if not SUPPORTED[language] then return nil, "unsupported integrity grammar for " .. path .. " (" .. language .. ")" end
+  -- A language without an integrity grammar is out of scope, not a warning.
+  if not SUPPORTED[language] then return { assertions = {}, tests = {}, risks = {}, types = {} } end
   if source:find("\0", 1, true) then return nil, "changed code is binary: " .. path end
   local parser, err = maki.treesitter.get_string_parser(source, language)
   if not parser then return nil, "cannot parse " .. path .. ": " .. tostring(err) end
@@ -318,7 +317,7 @@ local function analyze(path, source)
       local name = field(node, "name", source) or ""
       if name:match("^test_") then counted(result.tests, scope, node) end
     end
-    if identity then
+    if identity or ANONYMOUS_FUNCTION[kind] then
       for _, slot in ipairs({ "type", "return_type" }) do
         local type_nodes = node:field(slot)
         if type_nodes[1] then
@@ -483,7 +482,7 @@ local function collect(snapshot, request, work)
   for path in pairs(selected) do
     local language = maki.treesitter.language_for_path(path)
     local original_language = renamed[path] and maki.treesitter.language_for_path(renamed[path]) or nil
-    if ((language and not DATA[language]) or (original_language and not DATA[original_language]))
+    if (SUPPORTED[language] or SUPPORTED[original_language])
       and (not old_names[path] or not selected[old_names[path]]) then
       ordered[#ordered + 1] = path
     end
@@ -542,7 +541,7 @@ local function collect(snapshot, request, work)
     if binary[path] or binary[before_path] then return nil, "changed code is binary: " .. path end
     local old_language = maki.treesitter.language_for_path(before_path)
     local new_language = maki.treesitter.language_for_path(path)
-    if old_language and not DATA[old_language] and (not new_language or DATA[new_language]) then
+    if SUPPORTED[old_language] and not SUPPORTED[new_language] then
       return nil, "code moved to an unsupported/resource path: " .. path
     end
     units[#units + 1] = { path = path, before_path = before_path, before = before, after = after }
