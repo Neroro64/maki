@@ -191,6 +191,13 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         plugin_access: CHANGES_SETTINGS,
     },
     BuiltinCommand {
+        name: "/orchestrate",
+        description: "Toggle ledger-based multi-agent mode, or `/orchestrate <objective>` to start",
+        max_args: usize::MAX,
+        bang: false,
+        plugin_access: STARTS_TURNS,
+    },
+    BuiltinCommand {
         name: "/exit",
         description: "Exit the application",
         max_args: 0,

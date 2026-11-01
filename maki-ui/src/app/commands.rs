@@ -136,6 +136,30 @@ impl App {
                 );
                 vec![]
             }
+            "/orchestrate" => {
+                let objective = cmd.args.trim();
+                if objective.is_empty() {
+                    self.orchestrate = !self.orchestrate;
+                    self.orchestrate_armed = self.orchestrate;
+                    self.flash(
+                        if self.orchestrate {
+                            "Orchestrate mode ON - describe the objective; workers coordinate via the .maki/orchestrate ledger".into()
+                        } else {
+                            "Orchestrate mode OFF".into()
+                        },
+                    );
+                    vec![]
+                } else {
+                    // One-shot kickoff: enable and submit the objective as the
+                    // first manager turn.
+                    self.orchestrate = true;
+                    self.orchestrate_armed = true;
+                    self.submit_or_queue(QueuedMessage {
+                        text: objective.to_string(),
+                        images: Vec::new(),
+                    })
+                }
+            }
             EXIT_COMMAND => self.quit(),
             "/reload" => self.reload(cmd.bang),
             // Typing `/trust` is the consent, exactly like `maki trust add

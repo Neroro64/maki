@@ -71,6 +71,10 @@ The whole conversation is re-sent to the model on every turn, so anything that l
 * ACP, for editors like Zed. See [below](#acp).
 * Opt-in [OpenTelemetry](https://maki.sh/docs/telemetry/) export, same format as Claude Code's.
 
+### Orchestrate mode (experimental)
+
+* `/orchestrate <objective>` - ledger-based zero-shot self-orchestration ([GVS5H](https://github.com/slee-persis/GVS5H)). The agent becomes a manager that decomposes the objective into `plan.md`, dispatches fresh `task` subagents (same model as the session - run maki on `zai/glm-3` etc. to orchestrate cheap models), and coordinates with them purely through a shared filesystem ledger (`.maki/orchestrate/<run>/`): plan, append-only notes, and verification. The manager never reads worker transcripts - the ledger is the only channel - and verifies every acceptance criterion itself before calling anything done. Bare `/orchestrate` toggles the mode for subsequent messages.
+
 ## Supported providers
 
 | Provider | How to auth |

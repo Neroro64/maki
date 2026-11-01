@@ -12,6 +12,7 @@ mod copy;
 mod image_paste;
 pub(crate) mod mode;
 mod mouse;
+mod orchestrate;
 mod plan_form;
 mod queue;
 mod session;
@@ -552,6 +553,11 @@ pub struct App {
     /// exit and never reset, not even by [`Self::clear_exit_request`].
     background_deadline: Option<Instant>,
     pub(crate) queue: MessageQueue,
+    /// Orchestrate mode (experimental, `/orchestrate`): messages go out as
+    /// ledger-manager prompts. `orchestrate_armed` carries the full protocol
+    /// on the first message after enabling.
+    pub(crate) orchestrate: bool,
+    pub(crate) orchestrate_armed: bool,
     recoverable_queue: Vec<String>,
     pub answer_tx: Option<UnboundedSender<String>>,
     /// Bumped whenever the host opens a prompt, see [`Self::open_prompt`].
@@ -711,6 +717,8 @@ impl App {
             exit_on_done: None,
             background_deadline: None,
             queue: MessageQueue::default(),
+            orchestrate: false,
+            orchestrate_armed: false,
             recoverable_queue: Vec::new(),
             answer_tx: None,
             prompts_opened: 0,
