@@ -10,6 +10,7 @@ mod copy;
 mod image_paste;
 pub(crate) mod mode;
 mod mouse;
+mod orchestrate;
 mod queue;
 mod session;
 pub(crate) mod session_state;
@@ -541,6 +542,11 @@ pub struct App {
     pub exit_request: ExitRequest,
     pub(crate) exit_on_done: bool,
     pub(crate) queue: MessageQueue,
+    /// Orchestrate mode (experimental, `/orchestrate`): messages go out as
+    /// ledger-manager prompts. `orchestrate_armed` carries the full protocol
+    /// on the first message after enabling.
+    pub(crate) orchestrate: bool,
+    pub(crate) orchestrate_armed: bool,
     recoverable_queue: Vec<String>,
     pub answer_tx: Option<flume::Sender<String>>,
     pub(super) pending_input: PendingInput,
@@ -688,6 +694,8 @@ impl App {
             exit_request: ExitRequest::None,
             exit_on_done: false,
             queue: MessageQueue::default(),
+            orchestrate: false,
+            orchestrate_armed: false,
             recoverable_queue: Vec::new(),
             answer_tx: None,
             pending_input: PendingInput::None,
@@ -2801,6 +2809,30 @@ impl App {
                     .into(),
                 );
                 vec![]
+            }
+            "/orchestrate" => {
+                let objective = cmd.args.trim();
+                if objective.is_empty() {
+                    self.orchestrate = !self.orchestrate;
+                    self.orchestrate_armed = self.orchestrate;
+                    self.flash(
+                        if self.orchestrate {
+                            "Orchestrate mode ON - describe the objective; workers coordinate via the .maki/orchestrate ledger".into()
+                        } else {
+                            "Orchestrate mode OFF".into()
+                        },
+                    );
+                    vec![]
+                } else {
+                    // One-shot kickoff: enable and submit the objective as the
+                    // first manager turn.
+                    self.orchestrate = true;
+                    self.orchestrate_armed = true;
+                    self.submit_or_queue(QueuedMessage {
+                        text: objective.to_string(),
+                        images: Vec::new(),
+                    })
+                }
             }
             EXIT_COMMAND => self.quit(),
             "/reload" => self.quit_with(ExitRequest::Reload),

@@ -4455,6 +4455,71 @@ fn yolo_toggle() {
     assert!(flash.contains("disabled"), "flash={flash:?}");
 }
 
+#[test]
+fn orchestrate_toggle_and_objective_kickoff() {
+    let mut app = test_app();
+    assert!(!app.orchestrate);
+
+    // bare command toggles on and arms the full protocol
+    app.execute_command(cmd("/orchestrate"), 0);
+    assert!(app.orchestrate && app.orchestrate_armed);
+    let flash = app.status_bar.flash_text().unwrap();
+    assert!(flash.contains("ON"), "flash={flash:?}");
+
+    // the next message carries the full protocol, then the flag disarms
+    let actions = app.submit_or_queue(QueuedMessage {
+        text: "build the thing".into(),
+        images: Vec::new(),
+    });
+    let Some(Action::SendMessage(input)) = actions.into_iter().next() else {
+        panic!("expected a send");
+    };
+    assert!(input.message.contains("# ORCHESTRATE MODE"));
+    assert!(input.message.ends_with("build the thing"));
+    assert!(!app.orchestrate_armed);
+    assert!(app.orchestrate, "toggle stays on for later turns");
+
+    // agent is streaming now, so the next message queues instead of sending
+    let actions = app.submit_or_queue(QueuedMessage {
+        text: "keep going".into(),
+        images: Vec::new(),
+    });
+    assert!(actions.is_empty(), "queued while streaming");
+}
+
+#[test]
+fn orchestrate_with_objective_starts_the_run_immediately() {
+    let mut app = test_app();
+    assert!(!app.orchestrate);
+
+    let actions = app.execute_command(cmd("/orchestrate ship the feature"), 0);
+    assert!(app.orchestrate, "mode stays on for later turns");
+    assert!(
+        !app.orchestrate_armed,
+        "protocol was consumed by the kickoff"
+    );
+    let Some(Action::SendMessage(input)) = actions.into_iter().next() else {
+        panic!("expected the objective to go out as a turn");
+    };
+    assert!(input.message.contains("# ORCHESTRATE MODE"));
+    assert!(input.message.ends_with("ship the feature"));
+    // armed was consumed by the kickoff message
+    assert!(!app.orchestrate_armed);
+}
+
+#[test]
+fn orchestrate_off_sends_messages_untouched() {
+    let mut app = test_app();
+    let actions = app.submit_or_queue(QueuedMessage {
+        text: "plain message".into(),
+        images: Vec::new(),
+    });
+    let Some(Action::SendMessage(input)) = actions.into_iter().next() else {
+        panic!("expected a send");
+    };
+    assert_eq!(input.message, "plain message");
+}
+
 /// The toggle is session state like mode and thinking, so a checkpoint has to
 /// mirror it or a resume silently downgrades the session's permissions.
 #[test]

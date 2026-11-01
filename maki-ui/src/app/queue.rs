@@ -229,6 +229,7 @@ impl App {
         let Some(ref shared) = self.queue.shared else {
             return false;
         };
+        let shared = shared.clone();
         let input = self.build_agent_input(&msg);
         shared.push(QueueItem::Message(QueuedInput {
             text: msg.text,

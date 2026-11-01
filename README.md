@@ -41,6 +41,10 @@ An AI coding agent optimized for minimal use of context tokens, while providing 
 * `/cd` to change dir.
 * Use `--print --output-format stream-json` to run UI-less. Output is compatible with Claude Code, so you can easily replace your existing solutions.
 
+### Orchestrate mode (experimental)
+
+* `/orchestrate <objective>` - ledger-based zero-shot self-orchestration ([GVS5H](https://github.com/slee-persis/GVS5H)). The agent becomes a manager that decomposes the objective into `plan.md`, dispatches fresh `task` subagents (same model as the session - run maki on `zai/glm-3` etc. to orchestrate cheap models), and coordinates with them purely through a shared filesystem ledger (`.maki/orchestrate/<run>/`): plan, append-only notes, and verification. The manager never reads worker transcripts - the ledger is the only channel - and verifies every acceptance criterion itself before calling anything done. Bare `/orchestrate` toggles the mode for subsequent messages.
+
 ## Supported providers
 
 * Anthropic - `ANTHROPIC_API_KEY` only (using OAuth is against TOS). Bedrock supported via `CLAUDE_CODE_USE_BEDROCK=1`.

@@ -147,10 +147,20 @@ impl App {
         }
     }
 
-    pub(crate) fn build_agent_input(&self, msg: &QueuedMessage) -> AgentInput {
+    pub(crate) fn build_agent_input(&mut self, msg: &QueuedMessage) -> AgentInput {
         let RequestOptions { thinking, fast } = self.request_options();
+        // Orchestrate mode: the manager protocol rides on the message itself.
+        // The full protocol goes once (armed); later turns get the reminder.
+        let text = if self.orchestrate {
+            let wrapped =
+                super::orchestrate::wrap(std::mem::take(&mut self.orchestrate_armed), &msg.text);
+            self.orchestrate_armed = false;
+            wrapped
+        } else {
+            msg.text.clone()
+        };
         AgentInput {
-            message: msg.text.clone(),
+            message: text,
             mode: self.agent_mode(),
             images: msg.images.clone(),
             preamble: Vec::new(),
