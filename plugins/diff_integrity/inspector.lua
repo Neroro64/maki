@@ -653,27 +653,48 @@ end
 
 local function justified(reply, identifier, entry)
   if type(reply) ~= "string" or #reply > 65536 then return false end
+  -- A warning renders findings as "<identifier> <path>:<line>", so accept that
+  -- echoed location between the identifier and the rationale.
+  local location = entry.path .. ":" .. entry.line
   for body in reply:gmatch("%[DIFF INTEGRITY JUSTIFICATION%]([^\n]+)") do
-    local id, rationale = body:match("^%s*(%S+)%s*:%s*(.-)%s*$")
-    if id == identifier and rationale and #rationale >= 40 and #rationale <= 2000 then
-      local lower = rationale:lower()
-      local words = 0
-      for _ in rationale:gmatch("%S+") do words = words + 1 end
-      local concrete = rationale:find(entry.path, 1, true) or rationale:find(entry.symbol, 1, true)
-      local reason = lower:match("%f[%a]because%f[^%a]") or lower:match("%f[%a]replaced%f[^%a]")
-        or lower:match("%f[%a]required%f[^%a]") or lower:match("%f[%a]intentional%f[^%a]")
-      local generic = { this = true, is = true, the = true, a = true, an = true, ["and"] = true, ["or"] = true,
-        because = true, change = true, changes = true, intentional = true, required = true, necessary = true,
-        justified = true, safe = true, correct = true, appropriate = true, ["for"] = true, it = true, to = true,
-        be = true, was = true, as = true, i = true, have = true, done = true, requested = true, user = true }
-      local substantive, seen = 0, {}
-      for word in lower:gmatch("[%a_][%w_]*") do
-        if #word >= 4 and not generic[word] and not seen[word] and not entry.path:lower():find(word, 1, true) then
-          seen[word] = true
-          substantive = substantive + 1
+    local id, rest = body:match("^%s*([^%s:]+)%s*(.-)%s*$")
+    if id == identifier then
+      local separator = "%s*:%s*"
+      if rest:sub(1, #location) == location then rest, separator = rest:sub(#location + 1), "%s*:?%s*" end
+      local rationale = rest:match("^" .. separator .. "(.-)%s*$")
+      if rationale and #rationale >= 40 and #rationale <= 2000 then
+        local lower = rationale:lower()
+        local words = 0
+        for _ in rationale:gmatch("%S+") do words = words + 1 end
+        local concrete = rationale:find(entry.path, 1, true) or rationale:find(entry.symbol, 1, true)
+        -- Analysis-unavailable findings carry a synthetic path, so a rationale may
+        -- instead name a real file path mentioned in the evidence.
+        if not concrete and entry.path == "<integrity>" then
+          for token in entry.evidence:gmatch("%S+") do
+            token = token:match("^%p*(.-)%p*$")
+            if #token >= 4 and token:find(".", 1, true) and rationale:find(token, 1, true) then
+              concrete = true
+              break
+            end
+          end
+        end
+        local reason = lower:match("%f[%a]because%f[^%a]") or lower:match("%f[%a]replaced%f[^%a]")
+          or lower:match("%f[%a]required%f[^%a]") or lower:match("%f[%a]intentional%f[^%a]")
+        local generic = { this = true, is = true, the = true, a = true, an = true, ["and"] = true, ["or"] = true,
+          because = true, change = true, changes = true, intentional = true, required = true, necessary = true,
+          justified = true, safe = true, correct = true, appropriate = true, ["for"] = true, it = true, to = true,
+          be = true, was = true, as = true, i = true, have = true, done = true, requested = true, user = true }
+        local substantive, seen = 0, {}
+        for word in lower:gmatch("[%a_][%w_]*") do
+          if #word >= 4 and not generic[word] and not seen[word] and not entry.path:lower():find(word, 1, true) then
+            seen[word] = true
+            substantive = substantive + 1
+          end
+        end
+        if words >= 8 and substantive >= 3 and concrete and reason and not lower:match("no reason") then
+          return true
         end
       end
-      if words >= 8 and substantive >= 3 and concrete and reason and not lower:match("no reason") then return true end
     end
   end
   return false

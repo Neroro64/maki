@@ -318,6 +318,39 @@ fn invalid_or_unsupported_changed_code_is_not_clean(file: &str, source: &str, ex
 }
 
 #[test]
+fn echoed_finding_location_and_evidence_path_justify_unsupported_grammar() {
+    let fixture = Fixture::new(
+        "init.lua",
+        "vim.cmd.colorscheme(\"emberbox\")\nrequire(\"config.lazy\")\n",
+    );
+    fixture.write(&fixture.path, "require(\"config.lazy\")\n");
+    let denied = fixture.actual_gate("Done.");
+    let finding = warning(&denied);
+    assert!(finding.contains("analysis unavailable"), "{finding}");
+    assert!(
+        finding.contains("unsupported integrity grammar for init.lua (lua)"),
+        "{finding}"
+    );
+    let id = identifiers(finding).into_iter().next().expect("finding id");
+    for separator in [":0:", ":0"] {
+        let reply = format!(
+            "[DIFF INTEGRITY JUSTIFICATION] {id} <integrity>{separator} init.lua shrank because the emberbox colorscheme call moved into the LazyVim colorscheme option in plugins/colors.lua, keeping startup identical.\n"
+        );
+        assert!(
+            fixture.actual_gate(&reply).get("continue").is_none(),
+            "{separator}"
+        );
+    }
+    for rationale in [
+        "The refactor is intentional because formatting rules shifted after the upstream merge.",
+        "source.rs keeps this ignored test because it is a parser regression specimen, not an executable workspace test.",
+    ] {
+        let generic = format!("[DIFF INTEGRITY JUSTIFICATION] {id} <integrity>:0: {rationale}");
+        warning(&fixture.actual_gate(&generic));
+    }
+}
+
+#[test]
 fn preserves_a_lower_stop_continuation_when_warning_is_required() {
     let fixture = Fixture::with_lower_stop("source.rs", SOURCE);
     let clean = fixture.gate(
@@ -506,6 +539,34 @@ fn real_task_may_finish_with_current_per_finding_concrete_justification() {
         requests.len(),
         4,
         "the real task stops after its justification, without a fixing turn"
+    );
+    assert!(String::from_utf8_lossy(&requests[3].body).contains(WARNING));
+}
+
+#[test]
+fn real_task_finishes_after_an_echoed_finding_location_justification() {
+    let fixture = Fixture::new("source.rs", SOURCE);
+    let risky = SOURCE.replace("#[test]", "#[test]\n#[ignore]");
+    fixture.write(&fixture.path, &risky);
+    let denied = fixture.actual_gate("Done.");
+    let finding = warning(&denied);
+    let id = identifiers(finding).into_iter().next().expect("finding id");
+    let location = finding
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{id} ")))
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("echoed finding location");
+    let reply = format!(
+        "[DIFF INTEGRITY JUSTIFICATION] {id} {location}: source.rs keeps this ignored test because checks_answer is a parser regression specimen in the temporary Git fixture, not an executable workspace test; its assertion is preserved.\n"
+    );
+    let (result, requests) = fixture.scripted_justification(&risky, &reply);
+    assert!(result.contains("parser regression specimen"), "{result}");
+    assert_eq!(fs::read_to_string(&fixture.path).unwrap(), risky);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        4,
+        "the task stops after its echoed-form justification, without a fixing turn"
     );
     assert!(String::from_utf8_lossy(&requests[3].body).contains(WARNING));
 }
