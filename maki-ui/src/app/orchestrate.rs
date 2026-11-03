@@ -10,9 +10,6 @@
 //! subagents (they already start with no shared context), and the ledger is
 //! plain files under `.maki/orchestrate/<run>/`.
 
-/// The ledger directory every run nests under.
-pub const LEDGER_ROOT: &str = ".maki/orchestrate";
-
 /// Full protocol, injected once into the first message after `/orchestrate`.
 pub const PROTOCOL: &str = "\
 # ORCHESTRATE MODE (experimental)\n\
