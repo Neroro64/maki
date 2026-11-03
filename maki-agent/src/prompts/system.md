@@ -11,6 +11,9 @@
 
 {{efficient_tools}}
 
+# Coordination
+{{coordination}}
+
 # Conventions
 {{conventions}}
 

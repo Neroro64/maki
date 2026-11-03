@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Write;
 use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
@@ -6,7 +7,8 @@ use std::time::Duration;
 
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_storage::id::MakiId;
-use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table, Value};
+use mlua::{Function, Lua, LuaString, RegistryKey, Result as LuaResult, Table, Value};
+use tempfile::Builder as TempFileBuilder;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::sleep;
 
@@ -23,6 +25,9 @@ use crate::plugin_permissions::{Ceiling, Permission, PluginPermissions, require}
 use crate::runtime::{active_task_id, job_task_id, strip_traceback, with_jobs};
 
 const DEFAULT_WAIT_MS: u64 = 30_000;
+
+const OUTPUT_LOG_PREFIX: &str = "maki-command-output-";
+const OUTPUT_LOG_SUFFIX: &str = ".log";
 
 const NO_TASK_SCOPE_ERR: &str =
     "jobstart: no active task; use scope = \"plugin\" or { session = ... }";
@@ -542,6 +547,32 @@ fn wait_result(
     Ok((Some(result), None))
 }
 
+/// Retain captured command output in a private, uniquely named OS-temp log.
+/// The file survives this call and plugin/session shutdown; OS temp cleanup
+/// determines its lifetime. Only call when output would otherwise be lost.
+/// This synchronous helper also works from non-yielding cancellation hooks.
+///
+/// @param output string Complete command output captured so far.
+/// @return (string?, string?) Readable absolute log path, or nil plus an error.
+/// @example
+/// local path, err = maki.fn.retain_output(output)
+#[lua_fn(guard = Run)]
+fn retain_output(_lua: &Lua, output: LuaString) -> LuaResult<Pair<String>> {
+    let mut file = try_pair!(
+        TempFileBuilder::new()
+            .prefix(OUTPUT_LOG_PREFIX)
+            .suffix(OUTPUT_LOG_SUFFIX)
+            .tempfile()
+    );
+    try_pair!(file.write_all(output.as_bytes().as_ref()));
+    let path = file.path().to_str().map(str::to_owned);
+    let Some(path) = path else {
+        return Ok(err_pair("command output log path is not UTF-8"));
+    };
+    try_pair!(file.keep());
+    Ok((Some(path), None))
+}
+
 /// Check whether {name} can be found on `$PATH` or is an absolute path
 /// to a file. Returns 1 when found, 0 otherwise (matches Neovim's
 /// `vim.fn.executable`).
@@ -651,7 +682,7 @@ lua_table! {
         jobstart(perms, plugin, grants), jobstop(perms, plugin), jobforget(perms, plugin),
         jobwait(perms, plugin), jobinfo(perms, plugin), joblist(perms, plugin),
         jobattach(perms, plugin), jobfind(perms, plugin),
-        executable(perms),
+        executable(perms), retain_output(perms),
         winsaveview(tx), winrestview(tx), mode,
     ]
 }
@@ -665,9 +696,54 @@ mod tests {
     use tokio::sync::mpsc::unbounded_channel;
 
     const TEST_PLUGIN: &str = "test-plugin";
+    use std::fs;
+
     /// Can't exit while a test runs, so only the code under test ends it.
     const SLEEPING_JOB: &str = "sleep 600";
     const LONG_WAIT_MS: u64 = 600_000;
+    const RETAINED_OUTPUT: &str = "first diagnostic\n\noriginal failure café\nlast diagnostic\n";
+
+    #[test]
+    fn retained_command_logs_are_unique_and_outlive_lua() {
+        let lua = Lua::new();
+        let capture = || {
+            let (path, error) =
+                retain_output(&lua, lua.create_string(RETAINED_OUTPUT).unwrap()).unwrap();
+            assert!(error.is_none(), "{error:?}");
+            path.unwrap()
+        };
+        let first = capture();
+        let second = capture();
+        assert_ne!(first, second);
+        drop(lua);
+        for path in [first, second] {
+            assert!(Path::new(&path).is_absolute());
+            assert_eq!(fs::read_to_string(&path).unwrap(), RETAINED_OUTPUT);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn retaining_output_requires_run_permission() {
+        let lua = Lua::new();
+        let permissions = PluginPermissions::denied();
+        let functions = create_fn_table(
+            &lua,
+            Arc::from(TEST_PLUGIN),
+            &permissions,
+            permissions.clone(),
+            None,
+        )
+        .unwrap();
+        let retain: Function = functions.get("retain_output").unwrap();
+        let error = retain.call::<Pair<String>>(RETAINED_OUTPUT).unwrap_err();
+        assert!(error.to_string().contains("run"));
+    }
 
     fn lua_with_view(tx: Option<UnboundedSender<UiAction>>) -> Lua {
         let lua = Lua::new();

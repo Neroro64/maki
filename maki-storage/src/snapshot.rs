@@ -29,18 +29,6 @@ pub struct Snapshots {
 }
 
 impl Snapshots {
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn reference(&self, turn: usize) -> String {
-        format!("{}{turn}", self.prefix)
-    }
-
-    pub fn attributes(&self) -> &str {
-        &self.attributes
-    }
-
     pub fn discover(cwd: &Path, session: &str) -> Result<Option<Self>, CheckpointError> {
         if session.is_empty()
             || !session
@@ -74,7 +62,7 @@ impl Snapshots {
     }
 
     pub fn capture(&self, turn: usize) -> Result<String, CheckpointError> {
-        let reference = self.reference(turn);
+        let reference = format!("{}{turn}", self.prefix);
         let mut index = NamedTempFile::new()?;
         let original_index = match fs::read(&self.index) {
             Ok(bytes) => Some(bytes),

@@ -4,7 +4,6 @@
 //! one: a table replaces the value, nothing leaves it alone, and `nil, reason`
 //! stops where stopping makes sense. Stop alone fails closed on hook errors.
 
-use std::future::Future;
 use std::time::{Duration, Instant};
 
 use maki_providers::Model;
@@ -19,6 +18,7 @@ use crate::tools::registry::BoxFuture;
 /// A layer may shell out before it decides, but the user is waiting on every
 /// one of these. Past this other slots pass through; Stop blocks completion.
 const AGENT_CHAIN_MAX: Duration = Duration::from_secs(30);
+const STOP_DEADLINE_EXCEEDED: &str = "agent.stop deadline exceeded";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum AgentSlot {
@@ -88,17 +88,6 @@ impl AgentHooks<'_> {
     /// `value` is only built when a layer is there to read it. Cancellation
     /// answers unchanged here; the loop preserves it as cancellation.
     pub async fn fire(&self, slot: AgentSlot, value: impl FnOnce() -> Value) -> Verdict {
-        self.fire_fallible(slot, || async move { Ok(value()) })
-            .await
-    }
-
-    /// A frozen Stop descriptor can contain paths that JSON cannot serialize.
-    /// Such failures must block completion, without building an unwrapped slot.
-    pub async fn fire_fallible<F: Future<Output = serde_json::Result<Value>>>(
-        &self,
-        slot: AgentSlot,
-        value: impl FnOnce() -> F,
-    ) -> Verdict {
         let Some(hook) = self.registry.agent_hook().filter(|h| h.wraps(slot)) else {
             return Verdict::Unchanged;
         };
@@ -112,25 +101,12 @@ impl AgentHooks<'_> {
             cancel: self.cancel,
             deadline: Instant::now() + AGENT_CHAIN_MAX,
         };
-        let invoke = async {
-            let value = match value().await {
-                Ok(value) => value,
-                Err(error) if slot == AgentSlot::Stop => {
-                    return Verdict::Denied(format!(
-                        "[DIFF INTEGRITY WARNING] agent.stop value could not be serialized: {error}"
-                    ));
-                }
-                Err(_) => return Verdict::Unchanged,
-            };
-            hook.run(slot, value, &call).await
-        };
         let run = async {
+            let invoke = hook.run(slot, value(), &call);
             if slot == AgentSlot::Stop {
                 match tokio::time::timeout_at(call.deadline.into(), invoke).await {
                     Ok(verdict) => verdict,
-                    Err(_) => Verdict::Denied(
-                        "[DIFF INTEGRITY WARNING] agent.stop deadline exceeded".into(),
-                    ),
+                    Err(_) => Verdict::Denied(STOP_DEADLINE_EXCEEDED.into()),
                 }
             } else {
                 invoke.await
@@ -139,7 +115,7 @@ impl AgentHooks<'_> {
         match bounded(self.cancel, call.deadline, hook.answer_grace(), run).await {
             Ok(verdict) => verdict,
             Err(ChainCut::Lapsed) if slot == AgentSlot::Stop => {
-                Verdict::Denied("[DIFF INTEGRITY WARNING] agent.stop deadline exceeded".into())
+                Verdict::Denied(STOP_DEADLINE_EXCEEDED.into())
             }
             Err(_) => Verdict::Unchanged,
         }

@@ -125,14 +125,18 @@ local function build_body(ctx, code)
   return buf, view, highlight
 end
 
-local description = [[Execute Python in a sandbox where every tool is an async function.
+local description = [[Execute the Monty Python subset in a sandbox where every tool is an async function, not CPython.
 
 Use for chained/dependent tool calls and filtering/processing results, e.g. filtering web tool output. **DRAMATICALLY** cheaper than sequential tool calls!
 
 - All tools are async and return strings: `result = await read(path='file.txt', offset=1, limit=0)`. Parse output yourself.
 - Tool results are complete. Only what you print/return is capped.
 - Concurrency: `a, b = await gather(read(path='a.py', offset=1, limit=0), grep(pattern='x'))`. Pass calls directly, never wrapped in `async def`.
-- Available libs: re, asyncio, sys, os, json, pathlib. No other imports, no classes, no network access. `open()` works on text files, and `os`/`pathlib` can stat, list, walk, glob and mkdir.
+- Bundled modules include re, asyncio, sys, os, json and pathlib (import pathlib explicitly). No network access; do not assume CPython's full standard library/API.
+- Regex: use re.search/match/fullmatch/findall/finditer/compile/escape/split or re.sub(pattern, replacement, text, count=0, flags=0). re.subn is unavailable. For unlimited substitution, count matches on the original text with len(list(re.finditer(pattern, text))) and replace with re.sub; pass matching flags to both.
+- Generator expressions are eager lists, not iterators. For a first match use a for loop with break, not next(x for x in items if ...); next(iter(items), default) works for explicit iterators.
+- For filesystem operations, prefer the available async read/write/list/glob tools below. Native filesystem helpers do not bypass tool permissions or hooks: missing read/write/list tools disable the corresponding access. Read input hooks (including wildcard hooks) disable open() reads and Path.read_text(); use await read(...) instead. List input hooks disable os/pathlib filesystem inspection, listing, walking, globbing and mkdir; use the available async file tools instead.
+- When allowed, text I/O forms are open(path, 'r').read(), open(path, 'w').write(text), and Path(path).read_text()/write_text(text). Text is UTF-8: open accepts encoding='utf-8' (not arbitrary encodings); Path.read_text() takes NO encoding/errors arguments. Binary I/O, removal and renaming are not supported here. Append requires a write tool with an append option; mkdir also requires list access and write permission without a prompt.
 - Fresh sandbox each run: no state persists between executions.
 - 30s script timeout (`timeout` param); time awaiting tool calls doesn't count.
 - Skip it when a single tool call needs no transformation.

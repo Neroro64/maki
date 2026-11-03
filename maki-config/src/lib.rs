@@ -109,7 +109,6 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "context_notes",
     "deepseek",
     "design",
-    "diff_integrity",
     "edit",
     "glob",
     "grep",

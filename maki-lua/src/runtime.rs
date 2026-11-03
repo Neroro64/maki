@@ -5336,9 +5336,7 @@ async fn open_plan_form(
 /// Only completion gates fail closed; other host slots retain pass-through failures.
 pub(crate) fn hook_failure(stop: bool, reason: impl Display) -> Verdict {
     if stop {
-        Verdict::Denied(format!(
-            "[DIFF INTEGRITY WARNING] agent.stop failed: {reason}"
-        ))
+        Verdict::Denied(format!("agent.stop failed: {reason}"))
     } else {
         Verdict::Unchanged
     }

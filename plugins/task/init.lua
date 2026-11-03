@@ -26,10 +26,11 @@ Subagent types (set via `subagent_type`):
 - `general`: Full tool access. For delegating implementation work.
 
 Notes:
-1. Launch multiple tasks concurrently when possible.
+1. Launch ready independent tasks together. Use `background=true` when you have independent work to do; completion arrives as a notice, so do not poll. Use a blocking batch when you need all results.
 2. The agent's result is not visible to the user. Summarize it in your response.
-3. Each invocation starts fresh - inline any needed context into the prompt.
-4. Tell it to return concise summaries with file:line refs, not full file contents.
+3. Each invocation starts fresh. For multi-worker implementation, pass the task's `ledger` brief with known findings, owned files, dependencies and acceptance criteria instead of repeating broad discovery.
+4. One verification owner per worktree runs builds/tests/formatters after sibling edits settle. Other workers report needed checks and exact changes. Independent worktrees may verify concurrently.
+5. Return concise handoffs with file:line refs and command-result paths, not full source or diffs.
 ]]
 
 local examples = {

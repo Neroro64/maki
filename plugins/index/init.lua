@@ -131,7 +131,7 @@ end
 
 maki.api.register_prompt_hint({
   slot = "tool_usage",
-  content = "- Use the **index** tool first on individual files to get their skeleton, then use the **read** tool with offset/limit for the specific section you need.",
+  content = "- Use **index** first only for the supported file types listed in its description, then **read** with offset/limit for the section needed. Skip index for unsupported types (including PowerShell .ps1/.psm1/.psd1); locate relevant lines with **grep**, then use bounded **read**. Directories remain supported.",
 })
 
 maki.api.register_prompt_hint({
@@ -146,14 +146,15 @@ maki.api.register_tool({
   description = [[
 Return a compact overview of a source file: imports, type definitions, function signatures, and structure with their line numbers surrounded by []. ~70-90% more efficient than reading the full file.
 
-- Use this FIRST to understand file structure before using read with offset/limit.
-- Supports source files in different programming languages and markdown.
-- Falls back with an error on unsupported languages. Use read instead.]],
+- For supported files, use this FIRST to understand structure before read with offset/limit.
+- Directories return a sorted listing, not a recursive source index.
+- Unsupported file types (including PowerShell .ps1/.psm1/.psd1) cannot be indexed. Skip index: use grep to locate relevant lines, then read with offset/limit; do not read the entire file just to discover its structure.
+- Supported file types (case-sensitive extensions and exact filenames): ]] .. indexer.SUPPORTED_FILE_TYPES .. ".",
 
   schema = {
     type = "object",
     properties = {
-      path = { type = "string", description = "Absolute path to the file", required = true },
+      path = { type = "string", description = "Absolute path to a supported file or a directory", required = true },
     },
   },
   header = function(input)
@@ -194,19 +195,13 @@ Return a compact overview of a source file: imports, type definitions, function 
       }
     end
 
-    local filename = path:match("([^/]+)$")
-    local lang = indexer.FILENAME_TO_LANG[filename]
-
+    local lang, ext = indexer.language_for_path(path)
     if not lang then
-      local ext = path:match("%.([^%.]+)$")
-      if not ext then
-        return { llm_output = "Unsupported file type: (no extension). Use the read tool instead.", is_error = true }
-      end
-
-      lang = indexer.EXT_TO_LANG[ext]
-      if not lang then
-        return { llm_output = "Unsupported file type: ." .. ext .. ". Use the read tool instead.", is_error = true }
-      end
+      local file_type = ext and ("." .. ext) or "(no extension)"
+      return {
+        llm_output = "Unsupported file type: " .. file_type .. ". Skip index for this type; use grep to locate relevant lines, then read with offset/limit.",
+        is_error = true,
+      }
     end
 
     local max_file_size = opts.max_file_size_mb * 1024 * 1024
@@ -231,10 +226,10 @@ Return a compact overview of a source file: imports, type definitions, function 
       return { llm_output = "error: " .. tostring(line_meta), is_error = true }
     end
 
-    local ext = path:match("%.([^%.]+)$") or indexer.LANG_TO_EXT[lang] or ""
+    local highlight_ext = ext or indexer.LANG_TO_EXT[lang] or ""
     return {
       llm_output = skeleton:gsub("\n+$", ""),
-      body = render_index(skeleton, ctx, ext, line_meta),
+      body = render_index(skeleton, ctx, highlight_ext, line_meta),
     }
   end,
 })

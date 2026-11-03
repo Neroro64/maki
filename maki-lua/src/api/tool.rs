@@ -1170,8 +1170,8 @@ fn register_prompt_hint(lua: &Lua, #[ctx] plugin: Arc<str>, spec: Table) -> LuaR
 /// and its last registration wins within that plugin. Unload removes its values.
 ///
 /// Prompt IDs: `system`, `research`, `general`, and `plan`.
-/// Sections: `identity`, `tone`, `tool_usage`, `efficient_tools`, `conventions`,
-/// `after_instructions`, `objectivity`, and `completion`.
+/// Sections: `identity`, `tone`, `tool_usage`, `efficient_tools`, `coordination`,
+/// `conventions`, `after_instructions`, `objectivity`, and `completion`.
 ///
 /// Identity and tone are available in system, research, and general prompts.
 /// Sections target the main agent when `prompt` is omitted. Only identity and

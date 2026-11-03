@@ -25,6 +25,7 @@ Commands run in the session's working directory (see Environment) by default.
 | `background` | boolean | no |  | Run in the background. The result arrives as a message. Prefer for slow commands whose result your next step doesn't need. |
 | `command` | string | yes |  | The bash command to execute |
 | `description` | string | no |  | What the command does in 3-5 words, not the command itself |
+| `tail` | integer | no |  | Return only the last N output lines, retaining the full capture |
 | `timeout` | integer | no | 120 | Timeout in seconds |
 | `workdir` | string | no | cwd | Working directory |
 
@@ -146,7 +147,7 @@ Return a compact overview of a source file: imports, type definitions, function 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | string | yes | Absolute path to the file |
+| `path` | string | yes | Absolute path to a supported file or a directory |
 
 ### `lsp_speculate` {#lsp_speculate}
 
@@ -183,7 +184,7 @@ Executes multiple independent tool calls concurrently to reduce round-trips.
 
 ### `code_execution` {#code_execution}
 
-Execute Python in a sandbox where every tool is an async function.
+Execute the Monty Python subset in a sandbox where every tool is an async function, not CPython.
 
 **Permission:** undeclared
 
@@ -220,7 +221,7 @@ Execute a PowerShell command in a persistent session.
 | `command` | string | yes |  | The PowerShell command to execute |
 | `description` | string | no |  | Short description (3-5 words) of what the command does |
 | `reset` | boolean | no |  | Kill the persistent session first, discarding all state |
-| `tail` | integer | no |  | Return only the last N lines |
+| `tail` | integer | no |  | Return only the last N output lines, retaining the full capture |
 | `timeout` | integer | no | 120 | Timeout in seconds, including queued time |
 
 ### `question` {#question}
@@ -247,8 +248,9 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `background` | boolean | no | Run in the background. The result arrives as a message. Default to true unless your next step needs the result. Launch all in one batch. Never sleep or poll, end your turn when idle. |
+| `background` | boolean | no | Run in the background and continue other work. The result arrives later in a notice. End your turn to wait for it. Background tasks cannot ask for permissions. |
 | `description` | string | yes | Short (3-5 words) description of the task |
+| `ledger` | string | no | Path to this task's ledger brief, usually .maki/orchestrate/<run>/tasks/<id>.md. Read it and the run's plan.md/notes.md before work. Record a compact handoff in your task file; read-only workers return it for the manager to record. |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
 | `output_schema` | object | no | JSON Schema (object) the subagent's final result must match. When set, the result is returned as a validated JSON string. |
 | `prompt` | string | yes | Detailed task prompt for the agent |

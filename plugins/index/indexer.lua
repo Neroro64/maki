@@ -77,6 +77,31 @@ local FILENAME_TO_LANG = {
   ["Makefile"] = "make",
 }
 
+local function language_for_path(path)
+  local filename = path:match("([^/\\]+)$") or path
+  local ext = filename:match("%.([^%.]+)$")
+  return FILENAME_TO_LANG[filename] or EXT_TO_LANG[ext], ext
+end
+
+local function supported_file_types()
+  local by_lang = {}
+  for ext, lang in pairs(EXT_TO_LANG) do
+    by_lang[lang] = by_lang[lang] or {}
+    table.insert(by_lang[lang], "." .. ext)
+  end
+  for filename, lang in pairs(FILENAME_TO_LANG) do
+    by_lang[lang] = by_lang[lang] or {}
+    table.insert(by_lang[lang], filename)
+  end
+  local entries = {}
+  for lang, names in pairs(by_lang) do
+    table.sort(names)
+    table.insert(entries, lang .. " (" .. table.concat(names, ", ") .. ")")
+  end
+  table.sort(entries)
+  return table.concat(entries, "; ")
+end
+
 -- JavaScript goes through the TSX grammar because that grammar is a superset
 -- of JavaScript and handles JSX. The one thing it gives up is the `<T>expr`
 -- type assertion, and that is TypeScript only, so a .js file never has one.
@@ -924,6 +949,8 @@ end
 
 return {
   index_source = index_source,
+  language_for_path = language_for_path,
+  SUPPORTED_FILE_TYPES = supported_file_types(),
   EXT_TO_LANG = EXT_TO_LANG,
   LANG_TO_EXT = LANG_TO_EXT,
   FILENAME_TO_LANG = FILENAME_TO_LANG,

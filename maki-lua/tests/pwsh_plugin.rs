@@ -116,8 +116,18 @@ fn pwsh_missing_command_is_rejected() {
 fn pwsh_tail_returns_the_last_lines(command: &str, tail: usize, expected: &str) {
     let (reg, _host) = load_pwsh_host();
     let ctx = session_ctx(SESSION_A);
-    let out = exec_result(&reg, json!({ "command": command, "tail": tail }), &ctx);
-    assert_eq!(out.unwrap(), expected);
+    let out = exec_result(&reg, json!({ "command": command, "tail": tail }), &ctx).unwrap();
+    if let Some((visible, retained)) = out.split_once("\nFull output: ") {
+        assert_eq!(visible, expected);
+        let (path, status) = retained.rsplit_once('\n').unwrap();
+        assert_eq!(status, EXIT_SUCCESS);
+        let capture = std::fs::read_to_string(path).unwrap();
+        assert!(capture.ends_with(expected), "{capture}");
+        assert_ne!(capture, expected);
+        std::fs::remove_file(path).unwrap();
+    } else {
+        assert_eq!(out, expected);
+    }
 }
 
 #[test]

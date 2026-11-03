@@ -11,6 +11,27 @@ are not re-listed here.
 
 ---
 
+## Unreleased
+
+- **Windows multiline paste:** decode Win32 key records embedded in bracketed
+  paste so Enter press/release sequences become line breaks instead of leaking
+  into the prompt. Keep pasted control characters inside the paste event rather
+  than treating them as submit keys.
+- **Parallel task coordination:** reuse the `/orchestrate` ledger policy for
+  multi-worker implementation, with manager-owned shared notes, per-task handoffs,
+  explicit dependencies and one verification owner per worktree. The `task` tool
+  accepts a ledger path and exposes opt-in background execution by default.
+- **Shell diagnostics:** retain full output when bash or PowerShell truncates or
+  tails a result, and retain partial output on interruption. Report readable
+  OS-temp log paths and exit status so diagnostics do not require another run.
+  Preserve raw output for known verification commands instead of automatic RTK
+  filtering. PowerShell streams its capture for cancellation recovery.
+- **Tool capabilities:** advertise indexable file types from the parser mappings,
+  direct unsupported files such as PowerShell to bounded search/read, and describe
+  the Python sandbox's supported text APIs, eager generators and permission hooks.
+
+---
+
 ## New Features
 
 ### Multi-agent & agent loop
@@ -45,8 +66,8 @@ are not re-listed here.
 ### Lua plugin API expansion
 - LSP API (definitions, references, hover, speculate), a regex API, expanded file-access
   helpers, and richer tree-sitter queries.
-- Session snapshot storage with a diff-integrity harness (symbol locking, reflection
-  guards) backing the plugin edit path.
+- Session snapshot storage, symbol locking, and reflection guards backing the
+  plugin edit path.
 
 ### UI & commands
 - **`/copy`** — searchable picker of assistant responses (newest first), copying full
@@ -76,8 +97,6 @@ are not re-listed here.
   calls share their timeout budget with execution and recover after a session reset.
 - **Tab completion:** restored path and `/skill:` name completion while typing in the
   prompt editor. The completion key now binds in insert mode instead of normal mode.
-- **diff-integrity:** fixed false-positive warnings, and a false issue triggered by a
-  plugin edit.
 - **Windows input & review responsiveness** (large change, incl. a vendored crossterm
   fork for Windows terminal handling). Same commit also ships a terminal-native theme
   and session recall.

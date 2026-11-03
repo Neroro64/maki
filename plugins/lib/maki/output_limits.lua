@@ -62,8 +62,21 @@ local function split_lines(text)
 end
 
 function M.tail(text, count)
-  local lines = split_lines(text)
-  return table.concat(lines, "\n", math.max(1, #lines - count + 1))
+  if count < 1 then
+    return ""
+  end
+  local starts, slot, pos = {}, 1, 1
+  while true do
+    starts[slot] = pos
+    slot = slot % count + 1
+    local newline = text:find("\n", pos, true)
+    if not newline then
+      break
+    end
+    pos = newline + 1
+  end
+  local start = starts[slot] or 1
+  return start == 1 and text or text:sub(start)
 end
 
 

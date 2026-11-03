@@ -1605,6 +1605,14 @@ impl TextBuffer {
         self.snap_cursor(Toward::Nearest);
     }
 
+    /// {byte} must be a char boundary within the value.
+    pub(crate) fn move_cursor_to(&mut self, byte: usize, select: bool) {
+        let anchor = select.then(|| self.anchor.unwrap_or_else(|| self.cursor_byte()));
+        self.place_cursor(byte);
+        self.snap_cursor(Toward::Nearest);
+        self.select(anchor);
+    }
+
     pub fn move_to_end(&mut self) {
         self.cursor_y = self.line_count() - 1;
         self.raw_x = self.current_line_len();

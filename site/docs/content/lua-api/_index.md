@@ -760,8 +760,8 @@ string clears a template or section. The alphabetically last plugin wins,
 and its last registration wins within that plugin. Unload removes its values.
 
 Prompt IDs: `system`, `research`, `general`, and `plan`.
-Sections: `identity`, `tone`, `tool_usage`, `efficient_tools`, `conventions`,
-`after_instructions`, `objectivity`, and `completion`.
+Sections: `identity`, `tone`, `tool_usage`, `efficient_tools`, `coordination`,
+`conventions`, `after_instructions`, `objectivity`, and `completion`.
 
 Identity and tone are available in system, research, and general prompts.
 Sections target the main agent when `prompt` is omitted. Only identity and
@@ -3410,6 +3410,33 @@ end
 
 ---
 
+### `maki.fn.retain_output()` {#maki-fn-retain_output}
+
+```lua
+maki.fn.retain_output({output})
+```
+
+Retain captured command output in a private, uniquely named OS-temp log.
+The file survives this call and plugin/session shutdown; OS temp cleanup
+determines its lifetime. Only call when output would otherwise be lost.
+This synchronous helper also works from non-yielding cancellation hooks.
+
+Requires the `run` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{output}` (`string`) Complete command output captured so far.
+
+**Returns:** (`string?`, `string?`) Readable absolute log path, or nil plus an error.
+
+**Example:**
+
+```lua
+local path, err = maki.fn.retain_output(output)
+```
+
+---
+
 ### `maki.fn.winsaveview()` {#maki-fn-winsaveview}
 
 ```lua
@@ -5895,6 +5922,10 @@ Requires the `run` [plugin permission](#plugin-permissions).
   - `session` (`string`) session id owning this shell. Required.
   - `command` (`string`) PowerShell command to run. Required.
   - `timeout` (`integer`) seconds to wait, including queued time. Default 120.
+  - `on_output` (`function?`) synchronous callback receiving each output line,
+    including the blank separator before completion. Must not yield.
+  - `collect_output` (`boolean`) include output in the result. Default true;
+    set false when on_output already owns the capture to avoid duplicating it.
 
 **Returns:** (`table`, `string?`) Pair: `{ output, exit_code, timed_out, dead }` on
   success, `(nil, err)` on failure. `exit_code` is the native exit code,
@@ -10269,6 +10300,15 @@ function M.dim(color, factor)
 end
 
 return M
+```
+
+### `require("maki.command_output")`
+
+```lua
+--- Keep the original capture whenever presentation hides output. Interrupted
+--- commands also retain their partial capture, even when it fits on screen.
+function M.render(text, max_lines, max_bytes, tail, interrupted)
+function M.exited(output, code, reduced)
 ```
 
 ### `require("maki.dir_listing")`

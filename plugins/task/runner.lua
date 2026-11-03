@@ -53,6 +53,11 @@ local schema = {
       type = "string",
       description = "Detailed task prompt for the agent",
     },
+    ledger = {
+      type = "string",
+      minLength = 1,
+      description = "Path to this task's ledger brief, usually .maki/orchestrate/<run>/tasks/<id>.md. Read it and the run's plan.md/notes.md before work. Record a compact handoff in your task file; read-only workers return it for the manager to record.",
+    },
     subagent_type = {
       type = "string",
       description = 'Subagent type: "research" (read-only, default) or "general" (can modify files)',
@@ -182,6 +187,12 @@ function Runner.prepare(input, ctx)
       },
     }
   end
+  local message = input.prompt
+  if input.ledger then
+    message = "Task ledger: " .. input.ledger
+      .. "\nRead this task record and the run's plan.md and notes.md before working. Follow its ownership, dependencies and verification owner. Update only your task record with findings, changed invariants, blockers and retained command-result paths. If read-only, return that handoff for the manager to record.\n\n"
+      .. message
+  end
 
   return {
     options = {
@@ -194,7 +205,7 @@ function Runner.prepare(input, ctx)
       name = input.description,
       thinking = input.thinking,
     },
-    message = input.prompt .. (validator and STRUCTURED_OUTPUT_PROMPT_SUFFIX or ""),
+    message = message .. (validator and STRUCTURED_OUTPUT_PROMPT_SUFFIX or ""),
     capture = capture,
     -- The user may have made the assignment long ago and logged out of its
     -- provider since. Naming it turns a bare 401 into something they can fix.

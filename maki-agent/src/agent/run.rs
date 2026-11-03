@@ -69,6 +69,7 @@ const MAX_STOP_CONTINUATIONS: u32 = 3;
 const FIELD_TEXT: &str = "text";
 const STOP_FINISHED: &str = "finished";
 const STOP_MAX_TOKENS: &str = "max_tokens";
+const STOP_BLOCKED: &str = "Completion blocked by agent.stop: ";
 const EMPTIED_MESSAGE: &str = "A plugin emptied the message, so there was nothing to send.";
 const NO_FRAME: &str = "no prompt frame to send the request under";
 /// The reason the API gives when it drops the old model's thinking after a
@@ -950,12 +951,7 @@ impl<'h> Agent<'h> {
         };
         let verdict = self
             .hooks()
-            .fire_fallible(AgentSlot::Stop, || async {
-                let file_access = Arc::clone(&self.file_access);
-                let diff_snapshot = spawn_blocking(move || file_access.diff_snapshot())
-                    .await
-                    .map_err(serde::ser::Error::custom)
-                    .and_then(|snapshot| serde_json::to_value(snapshot))?;
+            .fire(AgentSlot::Stop, || {
                 let last_message = self
                     .history
                     .as_slice()
@@ -963,21 +959,11 @@ impl<'h> Agent<'h> {
                     .filter(|m| matches!(m.role, Role::Assistant))
                     .and_then(Message::first_text_content)
                     .unwrap_or_default();
-                let user_request = self
-                    .history
-                    .as_slice()
-                    .iter()
-                    .rev()
-                    .filter(|m| matches!(m.role, Role::User) && !m.is_from_host())
-                    .find_map(Message::user_text)
-                    .unwrap_or_default();
-                Ok(json!({
+                json!({
                     "reason": reason,
                     "last_message": last_message,
                     "num_turns": self.num_turns,
-                    "user_request": user_request,
-                    "diff_snapshot": diff_snapshot,
-                }))
+                })
             })
             .await;
         if self.cancel.is_cancelled() {
@@ -1014,8 +1000,7 @@ impl<'h> Agent<'h> {
     }
 
     fn stop_error(&self, reason: String) -> AgentError {
-        let warning =
-            format!("[DIFF INTEGRITY WARNING] Completion blocked by agent.stop: {reason}");
+        let warning = format!("{STOP_BLOCKED}{reason}");
         warn!(warning, "agent.stop blocked completion");
         AgentError::Tool {
             tool: AgentSlot::Stop.name().into(),
@@ -5034,7 +5019,7 @@ mod tests {
     #[test_case(Some(1), 1, StopReason::MaxTokens ; "truncated_last_turn")]
     #[test_case(None, MAX_STOP_CONTINUATIONS + 1, StopReason::EndTurn ; "continuation_cap")]
     #[tokio::test]
-    async fn required_stop_warnings_cannot_be_bypassed(
+    async fn required_stop_continuations_cannot_be_bypassed(
         max_turns: Option<u32>,
         turns: u32,
         stop_reason: StopReason,
@@ -5056,7 +5041,7 @@ mod tests {
         let error = agent.run(default_input()).await.unwrap_err();
         assert!(
             matches!(error, AgentError::Tool { message: ref warning, .. }
-            if warning.contains("[DIFF INTEGRITY WARNING]") && warning.contains(KEEP_GOING))
+            if warning == &format!("{STOP_BLOCKED}{KEEP_GOING}"))
         );
         assert!(
             seen.lock()
@@ -5117,7 +5102,7 @@ mod tests {
         let (mut agent, mut event_rx) = make_agent(provider, &mut history);
         agent.task_id = Some("child".into());
         agent.config.max_turns = Some(resolved_at);
-        let seen = script(&agent.registry, move |slot, value| {
+        script(&agent.registry, move |slot, value| {
             if slot == AgentSlot::Stop
                 && value["num_turns"].as_u64().unwrap() < u64::from(resolved_at)
             {
@@ -5134,39 +5119,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reason, DoneReason::EndTurn);
-        for (_, value) in seen
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(slot, _)| *slot == AgentSlot::Stop)
-        {
-            assert_eq!(value["user_request"], REQUEST);
-        }
         let requests = requests.lock().unwrap();
         for pair in requests.windows(2) {
             assert_append_only(&pair[0], &pair[1]);
         }
         drop(agent);
         assert_continued(&drain_events(&mut event_rx), &history, resolved_at as usize - 1);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unserializable_stop_path_fails_closed() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-
-        let mut history = History::new(Vec::new());
-        let (agent, _events) = make_agent(MockProvider::new(Vec::new()), &mut history);
-        script(&agent.registry, |_, _| Verdict::Unchanged);
-        let verdict = agent
-            .hooks()
-            .fire_fallible(AgentSlot::Stop, || async {
-                serde_json::to_value(std::path::PathBuf::from(OsString::from_vec(vec![0xff])))
-            })
-            .await;
-        assert!(matches!(verdict, Verdict::Denied(warning)
-            if warning.contains("[DIFF INTEGRITY WARNING]") && warning.contains("serialized")));
     }
 
     /// The user is told about every continuation and the model reads each one.
@@ -5244,9 +5202,14 @@ mod tests {
 
         let seen = seen.lock().unwrap();
         let (_, stop) = seen.iter().find(|(s, _)| *s == AgentSlot::Stop).unwrap();
-        assert_eq!(stop["reason"], STOP_FINISHED);
-        assert_eq!(stop["last_message"], RESPONSE_TEXT);
-        assert_eq!(stop["num_turns"], 1);
+        assert_eq!(
+            stop,
+            &json!({
+                "reason": STOP_FINISHED,
+                "last_message": RESPONSE_TEXT,
+                "num_turns": 1,
+            })
+        );
     }
 
     #[test_case(drop_blocked, CompactReason::Auto, false ; "auto_is_skipped")]

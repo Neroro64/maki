@@ -129,10 +129,6 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/reflect"),
     },
     BundledPlugin {
-        name: "diff_integrity",
-        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/diff_integrity"),
-    },
-    BundledPlugin {
         name: "thinking",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/thinking"),
     },

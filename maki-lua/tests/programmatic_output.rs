@@ -566,6 +566,29 @@ fn programmatic_bash_skips_automatic_rtk_rewriting() {
                 .trim(),
             "explicit"
         );
+        assert_eq!(
+            run(&ctx, "bash", json!({ "command": RTK_COMMAND, "tail": 1 })).unwrap(),
+            "original"
+        );
+        for command in [
+            "cargo test",
+            "printf prefix && cargo test",
+            "env cargo test",
+        ] {
+            let output = run(&ctx, "bash", json!({ "command": command })).unwrap_err();
+            assert!(output.ends_with("Exit code: 7"), "{output}");
+            let capture_path = output
+                .lines()
+                .find_map(|line| line.strip_prefix("Full output: "))
+                .expect("raw verification output must be retained");
+            assert!(
+                fs::read_to_string(capture_path)
+                    .unwrap()
+                    .contains("original-diagnostic")
+            );
+            fs::remove_file(capture_path).unwrap();
+        }
+        assert_eq!(fs::read_to_string(&log_path).unwrap(), before);
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -584,6 +607,13 @@ esac
     )
     .unwrap();
     fs::set_permissions(&rtk, fs::Permissions::from_mode(0o755)).unwrap();
+    let cargo = dir.path().join("cargo");
+    fs::write(
+        &cargo,
+        "#!/bin/sh\ni=0; while [ \"$i\" -lt 24 ]; do printf 'original-diagnostic %s\\n' \"$i\"; i=$((i + 1)); done; exit 7\n",
+    )
+    .unwrap();
+    fs::set_permissions(cargo, fs::Permissions::from_mode(0o755)).unwrap();
     let mut paths = vec![dir.path().to_owned()];
     paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
     let output = Command::new(env::current_exe().unwrap())

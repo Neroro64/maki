@@ -2,6 +2,7 @@ local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 local partial = require("maki.partial")
 local bash_log = require("bash_log")
+local command_output = require("maki.command_output")
 
 local RTK_REWRITE_TIMEOUT_MS = 2000
 local RTK_UNSUPPORTED_FLAGS = {
@@ -37,6 +38,37 @@ local EARLIER_DROPPED = "[%d earlier lines dropped]"
 local FULL_OUTPUT_PATTERN = "^(.*)\nFull output: ([^\n]+)$"
 local FULL_OUTPUT_LINE = "Full output: %s"
 local EXPIRE_BACKGROUND = { expire = "background" }
+local VERIFICATION_COMMANDS = {
+  cargo = true,
+  rustc = true,
+  dotnet = true,
+  msbuild = true,
+  go = true,
+  pytest = true,
+  py = true,
+  python = true,
+  python3 = true,
+  npm = true,
+  npx = true,
+  pnpm = true,
+  yarn = true,
+  bun = true,
+  make = true,
+  gmake = true,
+  cmake = true,
+  ctest = true,
+  ninja = true,
+  just = true,
+  gradle = true,
+  gradlew = true,
+  mvn = true,
+  mvnw = true,
+  bazel = true,
+  rake = true,
+  bundle = true,
+  mix = true,
+  swift = true,
+}
 
 local rtk_available
 local fallback_log_seq = 0
@@ -115,12 +147,43 @@ local function run_rtk(cmd)
   return result
 end
 
+local function needs_raw_diagnostics(command)
+  local parser = maki.treesitter.get_parser(command, "bash")
+  if not parser then
+    return true
+  end
+  local root = parser:parse()[1]:root()
+  if root:has_error() then
+    return true
+  end
+  local function contains_verification(node)
+    local kind = node:type()
+    if kind == "command_name" or kind == "word" then
+      local word = unquote(maki.treesitter.get_node_text(node, command))
+      local name = word:gsub("\\", "/"):match("([^/]+)$") or word
+      if VERIFICATION_COMMANDS[name:lower():gsub("%.exe$", "")] then
+        return true
+      end
+    end
+    for child in node:iter_children() do
+      if contains_verification(child) then
+        return true
+      end
+    end
+    return false
+  end
+  return contains_verification(root)
+end
+
 local function rtk_rewrite(command, ctx)
   if ctx:output_mode() == "full" then
     return nil
   end
   local config = ctx:config()
   if config and not config.rtk then
+    return nil
+  end
+  if needs_raw_diagnostics(command) then
     return nil
   end
 
@@ -130,11 +193,6 @@ local function rtk_rewrite(command, ctx)
   end
 
   if not rtk_available then
-    return nil
-  end
-
-  local cmd = command:match("^%s*(.-)%s*$")
-  if cmd:match("^cargo ") and cmd:find(" -- ", 1, true) then
     return nil
   end
 
@@ -316,7 +374,8 @@ Commands run in the session's working directory (see Environment) by default.
 - Do NOT use to communicate text to the user.
 - Chain dependent commands with `&&`. Use batch for independent ones.
 - Provide a short `description` (3-5 words).
-- Output sent to the model is cut beyond 2000 lines or 50KB; the reply then names a log with the full output.
+- Output beyond 2000 lines or 50KB, or hidden by `tail`, is retained in the reported `Full output` log. Read that capture instead of rerunning.
+- Run builds/tests once, unfiltered (no shell tail/grep). Use the tool's `tail` for a bounded view; use a test logger/result artifact for diagnostics the runner does not print.
 - Interactive commands (sudo, ssh prompts) fail immediately.]]
 
 maki.api.register_prompt_hint({
@@ -351,6 +410,7 @@ maki.api.register_tool({
       command = { type = "string", description = "The bash command to execute", required = true },
       timeout = { type = "integer", description = "Timeout in seconds (default 120)" },
       workdir = { type = "string", description = "Working directory (default: cwd)" },
+      tail = { type = "integer", description = "Return only the last N output lines, retaining the full capture" },
       description = { type = "string", description = "What the command does in 3-5 words, not the command itself" },
       background = {
         type = "boolean",
@@ -392,7 +452,12 @@ maki.api.register_tool({
     if dir and dir ~= "." then
       title = title == "" and "in " .. dir or title .. " in " .. dir
     end
-    return title
+    if not input.tail then
+      return title
+    end
+    local buf = maki.ui.buf()
+    buf:line({ { title }, { " (tail " .. input.tail .. ")", "dim" } })
+    return buf
   end,
 
   restore = function(input, output, is_error, ctx)
@@ -430,6 +495,9 @@ maki.api.register_tool({
     if not input.command then
       return { llm_output = "error: command is required", is_error = true }
     end
+    if input.tail and input.tail < 1 then
+      return { llm_output = "error: tail must be >= 1", is_error = true }
+    end
 
     local started_at = os.time()
     local command, workdir = parse_cd_hint(input)
@@ -438,7 +506,7 @@ maki.api.register_tool({
 
     ctx:set_deadline(timeout_secs, opts.background_on_timeout and EXPIRE_BACKGROUND or nil)
 
-    local rewritten = rtk_rewrite(command, ctx)
+    local rewritten = not input.tail and rtk_rewrite(command, ctx)
     if rewritten then
       command = rewritten
     end
@@ -538,7 +606,7 @@ maki.api.register_tool({
           use_tail()
         end
       end
-      if collected and not log and not log_err and not collected:fits(bytes) then
+      if collected and not log and not log_err and (not collected:fits(bytes) or (input.tail and collected.line_count >= input.tail)) then
         open_log()
       end
       if collected then
@@ -552,23 +620,37 @@ maki.api.register_tool({
       view:append(line)
     end
 
-    local function final_output()
+    local function final_output(interrupted)
       if collected then
-        return collected:result()
+        local raw = collected:result()
+        local output = input.tail and output_limits.tail(raw, input.tail) or raw
+        local reduced = collected:truncated() or output ~= raw
+        if (reduced or (interrupted and raw ~= "")) and not log then
+          open_log()
+          if log then
+            pcall(log.drain, log)
+          end
+        end
+        local retained_path
+        if (reduced or (interrupted and raw ~= "")) and not log then
+          retained_path = maki.fn.retain_output(raw)
+        end
+        return output, reduced, retained_path
       end
-      local text = output_limits.cut_middle(bash_log.tail_text(tail), max_lines, max_bytes)
+      local text = output_limits.cut_middle(bash_log.tail_text(tail, input.tail), max_lines, max_bytes)
       local dropped = bash_log.tail_dropped(tail)
       if dropped == 0 then
-        return text
+        return text, log ~= nil, nil
       end
-      return earlier_note(log, dropped) .. "\n" .. text
+      return earlier_note(log, dropped) .. "\n" .. text, true, nil
     end
 
     -- The view ends on the log line the reply ends on: the UI repeats an
     -- error reply under a view that lacks the reply's last line.
-    local function reply_text(llm_output)
-      if log then
-        local log_line = FULL_OUTPUT_LINE:format(log.path)
+    local function reply_text(llm_output, retained_path)
+      local path = (log and log.path) or retained_path
+      if path then
+        local log_line = FULL_OUTPUT_LINE:format(path)
         view:append({ { log_line, "dim" } })
         llm_output = llm_output .. "\n" .. log_line
       end
@@ -589,38 +671,26 @@ maki.api.register_tool({
         return
       end
       finished = true
-      local output = final_output()
+      local output, reduced, retained_path = final_output(false)
       -- Full mode promises the whole output, so a cut there is an error, the
       -- way a `maki.fs` read past its limit is one.
       local over_full_limit = collected ~= nil and not max_bytes and collected:truncated()
-
       local is_error = exit_code ~= 0 or over_full_limit
-      local llm_output
-      if exit_code == 0 then
-        llm_output = output == "" and "Exit code: 0" or output
-      else
-        if output == "" then
-          llm_output = "Exit code: " .. exit_code
-        else
-          llm_output = output .. "\nExit code: " .. exit_code
-        end
-      end
-      if over_full_limit then
-        llm_output = llm_output .. "\n" .. output_limits.FULL_LIMIT_NOTE
-      end
 
       if output == "" then
         view:clear()
         view:append({ { "No output", "dim" } })
       end
 
+      local reply = reply_text(output, retained_path)
+      reply = command_output.exited(reply, exit_code, reduced or log ~= nil or retained_path ~= nil)
       if exit_code ~= 0 then
         view:append({ { "Exit code: " .. exit_code, "dim" } })
       end
       if over_full_limit then
+        reply = reply .. "\n" .. output_limits.FULL_LIMIT_NOTE
         view:append({ { output_limits.FULL_LIMIT_NOTE, "dim" } })
       end
-      local reply = reply_text(llm_output)
       view:finish()
 
       ctx:finish({ llm_output = reply, is_error = is_error, body = buf })
@@ -661,8 +731,9 @@ maki.api.register_tool({
         return
       end
       finished = true
-      local cut = partial.cut(view, final_output(), reason, timeout_secs, started_at)
-      cut.llm_output = reply_text(cut.llm_output)
+      local out, _, retained_path = final_output(true)
+      local cut = partial.cut(view, out, reason, timeout_secs, started_at)
+      cut.llm_output = reply_text(cut.llm_output, retained_path)
       ctx:finish(cut)
     end)
 

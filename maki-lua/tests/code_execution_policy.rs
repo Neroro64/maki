@@ -15,7 +15,7 @@ use maki_agent::tools::test_support::stub_ctx;
 use maki_agent::tools::{
     DescriptionContext, ToolAudience, ToolContext, ToolFilter, ToolRegistry, local_tool,
 };
-use maki_config::{PluginFileConfig, PluginsConfig};
+use maki_config::PluginsConfig;
 use maki_lua::PluginHost;
 use maki_lua::test_support::runtime;
 
@@ -61,9 +61,9 @@ const BLOCKING_READ_HOOK: &str =
     r#"maki.api.set_slot("tool.read.input", function() return nil, "blocked" end)"#;
 /// Points reads at a file that exists, so the read tool says yes.
 const REWRITING_READ_HOOK: &str = concat!(
-    r#"maki.api.set_slot("tool.read.input", function(prev, input) input.path = ""#,
+    r#"maki.api.set_slot("tool.read.input", function(prev, input) input.path = [["#,
     env!("CARGO_MANIFEST_DIR"),
-    r#"/Cargo.toml" return input end)"#
+    r#"/Cargo.toml]] return input end)"#
 );
 const WILDCARD_INPUT_HOOK: &str =
     r#"maki.api.set_slot("tool.*.input", function(prev, input) return input end)"#;
@@ -237,6 +237,21 @@ fn run_code(code: &str) -> Result<String, String> {
     run_code_with(code, |_| {})
 }
 
+#[test_case::test_case("assert re.sub(r'[0-9]+', 'N', 'a12b34') == 'aNbN'\nassert len(list(re.finditer(r'[0-9]+', 'a12b34'))) == 2" ; "regex_replace_and_count")]
+#[test_case::test_case("values = (x * 2 for x in [1, 2, 3])\nassert values == [2, 4, 6]\nassert next(iter(values), None) == 2\nassert next(iter([]), None) is None" ; "eager_generator_and_explicit_iterator")]
+#[test_case::test_case("found = None\nfor x in [1, 2, 3]:\n    if x > 1:\n        found = x\n        break\nassert found == 2" ; "first_match_loop")]
+fn sandbox_processing_recipes_execute(code: &str) {
+    run_code(code).expect("the documented processing recipe must execute");
+}
+
+#[test_case::test_case("re.subn('x', 'y', 'x')", "AttributeError" ; "regex_subn_is_unavailable")]
+#[test_case::test_case("next(x for x in [1, 2, 3])", "TypeError" ; "eager_generator_is_not_an_iterator")]
+fn unsupported_cpython_processing_raises(code: &str, error_type: &str) {
+    let err =
+        run_code(code).expect_err("unsupported CPython APIs must not silently work differently");
+    assert!(err.contains(error_type), "got: {err}");
+}
+
 #[test]
 fn describe_main_hides_workflow_and_sub_tools() {
     let (reg, _host) = setup();
@@ -308,7 +323,7 @@ fn parallel_edits_to_one_file_all_apply() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join(EDIT_TARGET);
     std::fs::write(&path, format!("{MARKER_A}\n{MARKER_B}\n")).unwrap();
-    let quoted = path.to_str().expect("utf-8 temp path");
+    let quoted = serde_json::to_string(&path).unwrap();
 
     let reg = Arc::new(ToolRegistry::new());
     let _host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
@@ -317,8 +332,8 @@ fn parallel_edits_to_one_file_all_apply() {
         &shaped_ctx(&reg, |_| {}),
         &format!(
             "await asyncio.gather(\n\
-             \x20 edit(path='{quoted}', old_string='{MARKER_A}', new_string='{EDITED_A}'),\n\
-             \x20 edit(path='{quoted}', old_string='{MARKER_B}', new_string='{EDITED_B}'),\n\
+             \x20 edit(path={quoted}, old_string='{MARKER_A}', new_string='{EDITED_A}'),\n\
+             \x20 edit(path={quoted}, old_string='{MARKER_B}', new_string='{EDITED_B}'),\n\
              )"
         ),
     )
@@ -340,31 +355,34 @@ fn run_on_file(
     shape: fn(&mut ToolContext),
     disabled: &[&str],
 ) -> (Result<String, String>, String) {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = tempfile::tempdir_in(".").unwrap();
     let path = dir.path().join(OPEN_TARGET);
     std::fs::write(&path, OPEN_ORIGINAL).unwrap();
-    let quoted = path.to_str().expect("utf-8 temp path");
+    let quoted = serde_json::to_string(
+        &path
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/"),
+    )
+    .unwrap();
 
     let reg = Arc::new(ToolRegistry::new());
     let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
-    host.load_builtins(&PluginsConfig::from_plugins(
-        disabled
-            .iter()
-            .map(|name| {
-                let off = PluginFileConfig {
-                    enabled: Some(false),
-                    ..PluginFileConfig::default()
-                };
-                ((*name).to_owned(), off)
-            })
+    host.load_builtins(&PluginsConfig {
+        enabled: true,
+        names: ["read", "write", "list", "code_execution"]
+            .into_iter()
+            .filter(|name| !disabled.contains(name))
+            .map(str::to_owned)
             .collect(),
-    ))
+        ..PluginsConfig::default()
+    })
     .unwrap();
     host.load_source("policy", policy).unwrap();
     let out = exec_code(
         &reg,
         &shaped_ctx(&reg, shape),
-        &format!("path = '{quoted}'\n{code}"),
+        &format!("path = {quoted}\n{code}"),
     );
     (out, std::fs::read_to_string(&path).unwrap())
 }
@@ -375,6 +393,23 @@ fn open_reads_and_writes_through_the_file_tools(code: &str, expected: &str) {
     let (out, content) = run_on_file(code, NO_POLICY, |_| {}, &[]);
     out.expect("open must be served");
     assert_eq!(content, expected);
+}
+
+#[test_case::test_case("assert open(path, encoding='utf-8').read() == 'hello\\n'" ; "open_utf8_encoding")]
+#[test_case::test_case("from pathlib import Path\nassert Path(path).read_text() == 'hello\\n'" ; "path_read_text_without_encoding")]
+fn sandbox_text_read_recipes_execute(code: &str) {
+    let (out, content) = run_on_file(code, NO_POLICY, |_| {}, &[]);
+    out.expect("the documented text read must execute");
+    assert_eq!(content, OPEN_ORIGINAL);
+}
+
+#[test_case::test_case("from pathlib import Path\nPath(path).read_text(encoding='utf-8')" ; "path_encoding_keyword")]
+#[test_case::test_case("open(path, encoding='latin-1').read()" ; "non_utf8_encoding")]
+fn unsupported_text_encoding_arguments_raise(code: &str) {
+    let (out, content) = run_on_file(code, NO_POLICY, |_| {}, &[]);
+    let err = out.expect_err("unsupported encodings must not be silently ignored");
+    assert!(err.contains("TypeError"), "got: {err}");
+    assert_eq!(content, OPEN_ORIGINAL);
 }
 
 /// Validation drops the `append` flag a replacement tool does not declare, so
@@ -391,16 +426,30 @@ fn open_append_is_refused_when_the_write_tool_cannot_append() {
 /// `open()` reads the file itself, so it cannot follow a hook that points the
 /// read somewhere else. Refusing is the only answer that never hands the
 /// script a file the hook steered it away from.
-#[test_case::test_case(BLOCKING_READ_HOOK ; "blocking_hook")]
-#[test_case::test_case(REWRITING_READ_HOOK ; "rewriting_hook")]
-#[test_case::test_case(WILDCARD_INPUT_HOOK ; "wildcard_hook")]
-fn open_reads_are_refused_while_the_read_tool_is_hooked(policy: &str) {
+#[test_case::test_case("open(path).read()", BLOCKING_READ_HOOK ; "open_blocking_hook")]
+#[test_case::test_case("open(path).read()", REWRITING_READ_HOOK ; "open_rewriting_hook")]
+#[test_case::test_case("open(path).read()", WILDCARD_INPUT_HOOK ; "open_wildcard_hook")]
+#[test_case::test_case("Path(path).read_text()", BLOCKING_READ_HOOK ; "path_blocking_hook")]
+#[test_case::test_case("Path(path).read_text()", REWRITING_READ_HOOK ; "path_rewriting_hook")]
+#[test_case::test_case("Path(path).read_text()", WILDCARD_INPUT_HOOK ; "path_wildcard_hook")]
+fn native_reads_are_refused_while_the_read_tool_is_hooked(read: &str, policy: &str) {
     let code = format!(
-        "try:\n    out = open(path).read()\nexcept OSError:\n    out = '{OPEN_REFUSED}'\nout"
+        "from pathlib import Path\ntry:\n    out = {read}\nexcept OSError:\n    out = '{OPEN_REFUSED}'\nout"
     );
     let (out, _) = run_on_file(&code, policy, |_| {}, &[]);
     let out = out.expect("the refusal must reach the script as OSError");
     assert!(out.contains(OPEN_REFUSED), "got: {out}");
+}
+
+#[test]
+fn hooked_read_tool_remains_callable_after_native_read_is_refused() {
+    let code = format!(
+        "try:\n    open(path).read()\n    raise AssertionError('native read bypassed hook')\nexcept OSError:\n    text = await read(path=path, offset=1, limit=1)\nassert '{word}' in text",
+        word = OPEN_ORIGINAL.trim(),
+    );
+    let (out, content) = run_on_file(&code, WILDCARD_INPUT_HOOK, |_| {}, &[]);
+    out.expect("the async read tool must remain usable with input hooks");
+    assert_eq!(content, OPEN_ORIGINAL);
 }
 
 #[test_case::test_case(|ctx| ctx.audience = ToolAudience::RESEARCH_SUB ; "write_tool_not_callable")]
@@ -417,6 +466,9 @@ fn open_for_writing_is_refused_where_the_write_tool_is(shape: fn(&mut ToolContex
 #[test_case::test_case("os.path.exists(path)", LIST_HOOK, &[] ; "list_tool_hooked")]
 #[test_case::test_case("os.path.exists(path)", NO_POLICY, &["list"] ; "list_tool_disabled")]
 #[test_case::test_case("os.makedirs(path + '.d', exist_ok=True)", NO_POLICY, &["list"] ; "mkdir_with_list_tool_disabled")]
+#[test_case::test_case("from pathlib import Path\nPath(path).stat()", LIST_HOOK, &[] ; "path_stat_with_list_hook")]
+#[test_case::test_case("from pathlib import Path\nlist(Path(path).parent.glob('*.txt'))", LIST_HOOK, &[] ; "path_glob_with_list_hook")]
+#[test_case::test_case("from pathlib import Path\nPath(path + '.d').mkdir()", WILDCARD_INPUT_HOOK, &[] ; "path_mkdir_with_wildcard_hook")]
 fn os_metadata_is_refused_where_the_list_tool_is(code: &str, policy: &str, disabled: &[&str]) {
     let (out, _) = run_on_file(code, policy, |_| {}, disabled);
     let err = out.expect_err("the query must be refused");
@@ -429,7 +481,7 @@ fn os_metadata_is_refused_where_the_list_tool_is(code: &str, policy: &str, disab
 #[test_case::test_case(|ctx| ctx.audience = ToolAudience::RESEARCH_SUB, false ; "write_tool_not_callable")]
 fn os_makedirs_goes_where_the_write_tool_would(shape: fn(&mut ToolContext), made: bool) {
     let code = format!(
-        "target = os.path.join(os.path.dirname(path), '{MADE_DIR}')\ntry:\n    os.makedirs(target)\nexcept OSError:\n    pass\nos.path.isdir(target)"
+        "target = os.path.join(os.path.dirname(path), '{MADE_DIR}')\ntry:\n    os.makedirs(target)\nexcept OSError as error:\n    print(error)\nos.path.isdir(target)"
     );
     let (out, _) = run_on_file(&code, NO_POLICY, shape, &[]);
     let out = out.expect("a refused mkdir raises OSError, which the script catches");

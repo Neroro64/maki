@@ -26,6 +26,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::text_buffer::TextBuffer;
 
+use super::PREFIX_WIDTH;
+
 /// A drawn row: bytes {bytes} of the display line at {text}, the {index}th
 /// row that line wraps into. {line} is the line it starts on. {shape} is the
 /// one the line was wrapped with, so drawing and clicks walk the row with
@@ -37,6 +39,56 @@ pub(super) struct Row {
     pub last: bool,
     pub text: Range<usize>,
     pub shape: Rc<Shape>,
+}
+
+impl Row {
+    fn prefix_width(&self) -> usize {
+        if self.index == 0 {
+            PREFIX_WIDTH.into()
+        } else {
+            0
+        }
+    }
+
+    fn column(&self, buffer: &TextBuffer) -> usize {
+        let caret = buffer.cursor_byte() - self.text.start;
+        let line = &buffer.value()[self.text.clone()];
+        self.prefix_width()
+            + self
+                .shape
+                .pieces(line, self.bytes.clone())
+                .take_while(|piece| piece.bytes.end <= caret)
+                .map(|piece| piece.virt + piece.width)
+                .sum::<usize>()
+    }
+
+    fn byte_at_column(&self, buffer: &TextBuffer, column: usize) -> usize {
+        let mut column = column.saturating_sub(self.prefix_width());
+        let line = &buffer.value()[self.text.clone()];
+        let mut last_start = self.bytes.start;
+        for piece in self.shape.pieces(line, self.bytes.clone()) {
+            last_start = piece.bytes.start;
+            let width = piece.virt + piece.width;
+            if column < width {
+                let at = if column >= piece.virt
+                    && (column - piece.virt) * 2 >= piece.width
+                    && (self.last || piece.bytes.end < self.bytes.end)
+                {
+                    piece.bytes.end
+                } else {
+                    piece.bytes.start
+                };
+                return self.text.start + at;
+            }
+            column -= width;
+        }
+        self.text.start
+            + if self.last {
+                self.bytes.end
+            } else {
+                last_start
+            }
+    }
 }
 
 #[derive(Default)]
@@ -57,6 +109,8 @@ pub(super) struct Layout {
     /// A caret past a completely full last row gets a row of its own, so the
     /// count of {cursor_line} carries one more row than its text wraps into.
     cursor_extra_row: bool,
+    /// Expected cursor byte and screen column for consecutive vertical motions.
+    vertical_goal: Option<(usize, usize)>,
 }
 
 impl Layout {
@@ -66,6 +120,13 @@ impl Layout {
         let width = width.max(1);
         let same_decor = buffer.decor_epoch() == self.decor_epoch;
         let cursor = buffer.cursor_byte();
+        if width != self.width
+            || buffer.version() != self.version
+            || !same_decor
+            || self.vertical_goal.is_some_and(|(at, _)| at != cursor)
+        {
+            self.vertical_goal = None;
+        }
         if width == self.width
             && buffer.version() == self.version
             && cursor == self.cursor
@@ -90,6 +151,41 @@ impl Layout {
         );
     }
 
+    pub fn sync_current(&mut self, buffer: &TextBuffer) {
+        self.sync(
+            buffer,
+            if self.width == 0 {
+                usize::MAX
+            } else {
+                self.width
+            },
+        );
+    }
+
+    pub fn reset_vertical_goal(&mut self) {
+        self.vertical_goal = None;
+    }
+
+    pub fn vertical_target(&mut self, buffer: &TextBuffer, down: bool) -> Option<usize> {
+        self.sync_current(buffer);
+        let current = self.cursor_row(buffer);
+        let target = if down {
+            (current + 1 < self.total_rows()).then_some(current + 1)?
+        } else {
+            current.checked_sub(1)?
+        };
+        let column = match self.vertical_goal {
+            Some((_, column)) => column,
+            None => self.rows(buffer, current, 1).next()?.column(buffer),
+        };
+        let byte = self
+            .rows(buffer, target, 1)
+            .next()?
+            .byte_at_column(buffer, column);
+        self.vertical_goal = Some((byte, column));
+        Some(byte)
+    }
+
     /// Recounts the lines of bytes {at}, after marks changed how they are
     /// drawn while the text stayed the same. The cursor stayed too, so a
     /// conceal it reveals now or no longer is one of the marks in {at}.
@@ -98,6 +194,7 @@ impl Layout {
             return;
         }
         self.sync(buffer, self.width);
+        self.vertical_goal = None;
         self.set_cursor_extra_row(false);
         for bytes in at {
             self.recount(buffer, lines_of(buffer, bytes), true);

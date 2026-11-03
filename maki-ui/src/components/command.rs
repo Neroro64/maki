@@ -1,4 +1,5 @@
 use std::mem;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -71,6 +72,13 @@ pub struct BuiltinCommand {
 }
 
 pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
+    BuiltinCommand {
+        name: "/review",
+        description: "Explore call-graph diffs, annotate changes, and send review notes to the agent",
+        max_args: 0,
+        bang: false,
+        plugin_access: PluginAccess::Needs(&[Permission::FsRead]),
+    },
     BuiltinCommand {
         name: "/compact",
         description: COMPACT_DESCRIPTION,
@@ -245,7 +253,7 @@ pub struct ParsedCommand {
 pub enum CommandAction {
     Consumed,
     Execute(ParsedCommand),
-    Complete(String),
+    Complete { text: String, cursor: usize },
     Passthrough,
 }
 
@@ -373,7 +381,13 @@ impl CommandPalette {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, input: &TextBuffer) -> CommandAction {
-        if !self.is_active(input) {
+        self.follow(input);
+        if !self.is_open() || (key.code != KeyCode::Enter && !self.is_active(input)) {
+            return CommandAction::Passthrough;
+        }
+        if matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && (input.line_count() > 1 || !key.modifiers.is_empty())
+        {
             return CommandAction::Passthrough;
         }
         match key.code {
@@ -402,10 +416,17 @@ impl CommandPalette {
                     if self.current_bang {
                         text.push('!');
                     }
-                    if self.item_has_args(item) {
+                    let Some(token) = command_token(input.value()) else {
+                        return CommandAction::Passthrough;
+                    };
+                    let suffix = &input.value()[token.end..];
+                    if suffix.is_empty() && self.item_has_args(item) {
                         text.push(' ');
                     }
-                    CommandAction::Complete(text)
+                    let cursor = token.start + text.len();
+                    text.insert_str(0, &input.value()[..token.start]);
+                    text.push_str(suffix);
+                    CommandAction::Complete { text, cursor }
                 } else {
                     CommandAction::Consumed
                 }
@@ -416,7 +437,8 @@ impl CommandPalette {
 
     /// The command Enter would run on {input}, looked up before it does.
     pub fn enter_target(&mut self, input: &TextBuffer) -> Option<String> {
-        if !self.is_active(input) {
+        self.follow(input);
+        if !self.is_open() {
             return None;
         }
         self.filtered.get(self.selected).map(|m| self.item_name(m))
@@ -425,6 +447,9 @@ impl CommandPalette {
     pub fn is_active(&mut self, input: &TextBuffer) -> bool {
         self.follow(input);
         self.is_open()
+            && command_token(input.value()).is_some_and(|token| {
+                input.cursor_byte() >= token.start && input.cursor_byte() <= token.end
+            })
     }
 
     fn is_open(&self) -> bool {
@@ -705,7 +730,9 @@ impl CommandPalette {
         input_area: Rect,
         input: &TextBuffer,
     ) -> Option<Rect> {
-        self.follow(input);
+        if !self.is_active(input) {
+            return None;
+        }
         self.render(frame, input_area)
     }
 
@@ -821,10 +848,19 @@ fn highlighted_spans<'a>(
     spans
 }
 
+fn command_token(input: &str) -> Option<Range<usize>> {
+    let command = input.trim_start();
+    command.strip_prefix(COMMAND_PREFIX)?;
+    let start = input.len() - command.len();
+    let end = command.find(char::is_whitespace).unwrap_or(command.len());
+    Some(start..start + end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::components::key;
+    use crossterm::event::KeyModifiers;
     use maki_agent::command::COMPACT_NAME;
     use maki_agent::{McpPromptArg, McpSnapshot};
     use maki_lua::PluginPermissions;
@@ -832,6 +868,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};
     use test_case::test_case;
+
+    const TAB_NOT_COMPLETED: &str = "Tab did not complete the command token";
+    const ENTER_NOT_EXECUTED: &str = "Enter did not execute the command";
 
     fn empty_snapshot() -> McpSnapshotReader {
         McpSnapshotReader::empty()
@@ -918,7 +957,7 @@ mod tests {
 
     #[test]
     fn filter_custom_by_substring() {
-        let p = synced_with_custom("/review", sample_custom());
+        let p = synced_with_custom("/project:review", sample_custom());
         assert!(p.is_open());
         assert_eq!(p.filtered.len(), 1);
         assert!(matches!(p.filtered[0].command_type, CommandType::Custom(0)));
@@ -1386,6 +1425,7 @@ mod tests {
     fn reads_follow_the_buffer_and_esc_holds_until_it_changes() {
         let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
         let mut input = TextBuffer::new("/he".into());
+        input.move_to_end();
         assert!(p.is_active(&input));
 
         p.handle_key(key(KeyCode::Esc), &input);
@@ -1396,6 +1436,92 @@ mod tests {
 
         input.set_value("hello");
         assert!(!p.is_active(&input));
+    }
+
+    #[test_case("/cd ", 4 ; "space_after_command")]
+    #[test_case("/cd src/", 8 ; "path_argument")]
+    #[test_case("/btw first\nsecond", 17 ; "multiline_arguments")]
+    #[test_case("  /cd src/", 10 ; "leading_whitespace")]
+    fn argument_keys_pass_through_but_enter_keeps_the_command(text: &str, cursor: usize) {
+        let mut palette = synced(text);
+        let mut input = TextBuffer::new(text.into());
+        input.move_cursor_to(cursor, false);
+        assert!(!palette.is_active(&input));
+        for code in [KeyCode::Tab, KeyCode::Up, KeyCode::Down] {
+            assert!(matches!(
+                palette.handle_key(key(code), &input),
+                CommandAction::Passthrough
+            ));
+        }
+        let expected = palette.confirm(text).unwrap();
+        assert_eq!(palette.enter_target(&input), Some(expected.name.clone()));
+        let CommandAction::Execute(command) = palette.handle_key(key(KeyCode::Enter), &input)
+        else {
+            panic!("{ENTER_NOT_EXECUTED}");
+        };
+        assert_eq!(command.name, expected.name);
+        assert_eq!(command.args, expected.args);
+    }
+
+    #[test_case("/cd", 3, "/cd ", 4 ; "argument_separator_added_once")]
+    #[test_case("/cd src/", 2, "/cd src/", 3 ; "caret_returned_to_command")]
+    #[test_case("  /cd\t界/", 4, "  /cd\t界/", 5 ; "whitespace_and_unicode_args_kept")]
+    #[test_case("/packup! ++lockfile demo", 5, "/packupdate! ++lockfile demo", 12 ; "bang_and_args_kept")]
+    fn tab_completes_only_the_token(
+        text: &str,
+        cursor: usize,
+        expected: &str,
+        expected_cursor: usize,
+    ) {
+        let mut palette = synced(text);
+        let mut input = TextBuffer::new(text.into());
+        input.move_to_end();
+        assert!(!palette.is_active(&input) || !text.contains(char::is_whitespace));
+        input.move_cursor_to(cursor, false);
+        let CommandAction::Complete { text, cursor } =
+            palette.handle_key(key(KeyCode::Tab), &input)
+        else {
+            panic!("{TAB_NOT_COMPLETED}");
+        };
+        assert_eq!(text, expected);
+        assert_eq!(cursor, expected_cursor);
+    }
+
+    #[test]
+    fn a_second_tab_after_command_completion_passes_through() {
+        let mut palette = synced("/cd");
+        let mut input = TextBuffer::new("/cd".into());
+        input.move_to_end();
+        let CommandAction::Complete { text, cursor } =
+            palette.handle_key(key(KeyCode::Tab), &input)
+        else {
+            panic!("{TAB_NOT_COMPLETED}");
+        };
+        input.set_value(&text);
+        input.move_cursor_to(cursor, false);
+        assert!(matches!(
+            palette.handle_key(key(KeyCode::Tab), &input),
+            CommandAction::Passthrough
+        ));
+        assert_eq!(input.value(), "/cd ");
+    }
+
+    #[test]
+    fn multiline_and_shift_arrows_never_navigate_the_palette() {
+        let mut palette = synced("/btw first\nsecond");
+        let mut input = TextBuffer::new("/btw first\nsecond".into());
+        input.move_cursor_to(2, false);
+        for code in [KeyCode::Up, KeyCode::Down] {
+            assert!(matches!(
+                palette.handle_key(key(code), &input),
+                CommandAction::Passthrough
+            ));
+        }
+        input.set_value("/he");
+        assert!(matches!(
+            palette.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT), &input),
+            CommandAction::Passthrough
+        ));
     }
 
     fn many_custom(n: usize) -> Arc<[CustomCommand]> {

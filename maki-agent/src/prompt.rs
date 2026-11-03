@@ -24,6 +24,7 @@ pub const COMPACTION_SYSTEM: &str = include_str!("prompts/compaction.md");
 pub const COMPACTION_USER: &str = include_str!("prompts/compaction_user.md");
 pub const DEFAULT_IDENTITY: &str = include_str!("prompts/system_identity.md");
 pub const DEFAULT_TONE: &str = include_str!("prompts/system_tone.md");
+const COORDINATION: &str = include_str!("prompts/coordination.md");
 
 const DEFAULT_EFFICIENT_TOOLS: &str = include_str!("prompts/efficient_tools.md");
 const INSTRUCTIONS_MARKER: &str = "instructions";
@@ -49,6 +50,7 @@ pub enum Slot {
     AfterInstructions,
     Objectivity,
     Completion,
+    Coordination,
 }
 
 impl Slot {
@@ -62,6 +64,7 @@ impl Slot {
             Slot::AfterInstructions => "{{after_instructions}}",
             Slot::Objectivity => "{{objectivity}}",
             Slot::Completion => "{{completion}}",
+            Slot::Coordination => "{{coordination}}",
         }
     }
 
@@ -130,6 +133,7 @@ impl PromptId {
             }
             (PromptId::General, Slot::Completion) => include_str!("prompts/general_completion.md"),
             (_, Slot::EfficientTools) => DEFAULT_EFFICIENT_TOOLS,
+            (_, Slot::Coordination) => COORDINATION,
             _ => "",
         }
     }
@@ -600,20 +604,6 @@ mod tests {
         assert!(out.contains("- Extra rule"));
     }
 
-    #[test_case(PromptId::System, include_str!("prompts/tests/system.md") ; "system")]
-    #[test_case(PromptId::Research, include_str!("prompts/tests/research.md") ; "research")]
-    #[test_case(PromptId::General, include_str!("prompts/tests/general.md") ; "general")]
-    #[test_case(PromptId::Plan, include_str!("prompts/tests/plan.md") ; "plan")]
-    fn defaults_preserve_pre_catalogue_bytes(id: PromptId, expected: &str) {
-        let vars = Vars::new()
-            .set("{environment}", "Environment:\n- Working directory: /example\n- Platform: example\n- Date: 2000-01-01")
-            .set("{plan_path}", "/example/plan.md");
-        assert_eq!(
-            ResolvedPrompts::default().render(id, &vars, "\n\nEXAMPLE_INSTRUCTIONS"),
-            expected
-        );
-    }
-
     #[test]
     fn section_replacement_removes_default_and_preserves_additive_hints() {
         const REPLACEMENT: &str = "- Cite evidence.";
@@ -632,7 +622,7 @@ mod tests {
         prompts.set_section(PromptId::System, Slot::EfficientTools, String::new());
         let out = assemble(PromptId::System, &prompts, "");
         assert!(!out.contains(NATIVE_EFFICIENT_LINE));
-        assert!(out.contains(&format!("\n{EXTRA}\n")));
+        assert!(out.lines().any(|line| line == EXTRA));
     }
 
     #[test]

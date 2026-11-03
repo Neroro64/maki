@@ -880,7 +880,11 @@ pub(crate) fn parse_csi_bracketed_paste(buffer: &[u8]) -> io::Result<Option<Inte
     if !buffer.ends_with(b"\x1b[201~") {
         Ok(None)
     } else {
-        let paste = String::from_utf8_lossy(&buffer[6..buffer.len() - 6]).to_string();
+        let payload = &buffer[6..buffer.len() - 6];
+        #[cfg(windows)]
+        let paste = decode_win32_paste(payload);
+        #[cfg(not(windows))]
+        let paste = String::from_utf8_lossy(payload).into_owned();
         Ok(Some(InternalEvent::Event(Event::Paste(paste))))
     }
 }
@@ -1767,6 +1771,50 @@ fn parse_win32_input(buffer: &[u8]) -> io::Result<KeyEventRecord> {
     }
 }
 
+#[cfg(all(windows, feature = "bracketed-paste"))]
+fn decode_win32_paste(mut payload: &[u8]) -> String {
+    let mut decoded = Vec::with_capacity(payload.len());
+    let mut surrogate = None;
+    while let Some(start) = payload.iter().position(|byte| *byte == b'\x1b') {
+        decoded.extend_from_slice(&payload[..start]);
+        if start != 0 {
+            surrogate = None;
+        }
+        let sequence = &payload[start..];
+        let end = sequence
+            .iter()
+            .skip(2)
+            .position(|byte| !byte.is_ascii_digit() && *byte != b';')
+            .map(|end| end + 2);
+        let record = end
+            .filter(|&end| sequence.starts_with(b"\x1b[") && sequence[end] == b'_')
+            .and_then(|end| {
+                parse_win32_input(&sequence[..=end])
+                    .ok()
+                    .map(|record| (end, record))
+            });
+        let Some((end, record)) = record else {
+            decoded.push(b'\x1b');
+            surrogate = None;
+            payload = &sequence[1..];
+            continue;
+        };
+        if record.key_down && record.u_char != 0 {
+            if let Some(character) = decode_utf16_char(&mut surrogate, record.u_char) {
+                let mut utf8 = [0; 4];
+                let bytes = character.encode_utf8(&mut utf8).as_bytes();
+                for _ in 0..record.repeat_count.max(1) {
+                    decoded.extend_from_slice(bytes);
+                }
+            }
+        }
+        payload = &sequence[end + 1..];
+    }
+    decoded.extend_from_slice(payload);
+    String::from_utf8(decoded)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
 #[derive(Debug)]
 pub(crate) struct Parser {
     buffer: Vec<u8>,
@@ -2167,6 +2215,50 @@ mod parser_flush_tests {
 #[cfg(all(test, windows))]
 mod win32_input_tests {
     use super::{Event, InternalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Parser};
+
+    #[test]
+    fn win32_records_inside_paste_are_text_not_keys() {
+        const INPUT: &[u8] = b"\x1b[200~first\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_second\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_third\x1b[201~\x1b[13;28;13;1;0;1_";
+        for split in 0..=INPUT.len() {
+            let mut parser = Parser::default();
+            parser.advance_with_raw_mode(&INPUT[..split], true, true);
+            parser.advance_with_raw_mode(&INPUT[split..], false, true);
+            assert_eq!(
+                parser.collect::<Vec<_>>(),
+                [
+                    InternalEvent::Event(Event::Paste("first\rsecond\rthird".into())),
+                    InternalEvent::Event(Event::Key(KeyCode::Enter.into())),
+                ],
+                "split at {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn win32_paste_decodes_repeats_tabs_and_utf16() {
+        const INPUT: &[u8] = b"\x1b[200~\x1b[65;30;97;1;0;2_\x1b[65;30;97;0;0;1_\x1b[9;15;9;1;0;1_\x1b[9;15;9;0;0;1_\x1b[0;0;55357;1;0;1_\x1b[0;0;55357;0;0;1_\x1b[0;0;56832;1;0;1_\x1b[0;0;56832;0;0;1_\x1b[201~";
+        let mut parser = Parser::default();
+        for byte in INPUT {
+            parser.advance_with_raw_mode(&[*byte], true, true);
+        }
+        assert_eq!(
+            parser.collect::<Vec<_>>(),
+            [InternalEvent::Event(Event::Paste("aa\t😀".into()))]
+        );
+    }
+
+    #[test]
+    fn win32_paste_preserves_literal_escape_sequences_and_invalid_utf8() {
+        const INPUT: &[u8] = b"\x1b[200~\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\x1b[31mred\x1b[0m\x1b[13;28;13;2;0;1_ [13;28;13;1;0;1_\xff\x1b[201~";
+        let mut parser = Parser::default();
+        parser.advance_with_raw_mode(INPUT, false, true);
+        assert_eq!(
+            parser.collect::<Vec<_>>(),
+            [InternalEvent::Event(Event::Paste(
+                "日本語\x1b[31mred\x1b[0m\x1b[13;28;13;2;0;1_ [13;28;13;1;0;1_�".into()
+            ))]
+        );
+    }
 
     #[test]
     fn ctrl_m_and_enter_remain_distinct_across_every_chunk_boundary() {

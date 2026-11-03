@@ -2,6 +2,32 @@ local th = require("maki.test_helpers")
 local helpers = require("tests.helpers")
 local case = th.case
 local idx_with_meta = helpers.idx_with_meta
+local indexer = require("indexer")
+
+case("core_file_eligibility_handles_extensions_and_exact_filenames", function()
+  local cases = {
+    { "/src/main.rs", "rust" },
+    { "C:\\src\\main.rs", "rust" },
+    { "/repo/BUILD.bazel", "bazel_build" },
+    { "C:\\repo\\MODULE.bazel", "bazel_module" },
+    { "/repo/Makefile", "make" },
+    { "C:\\repo\\Dockerfile", "containerfile" },
+    { "/repo/notes.md", "markdown" },
+  }
+  for _, c in ipairs(cases) do
+    th.eq(indexer.language_for_path(c[1]), c[2])
+  end
+end)
+
+case("core_unsupported_file_types_have_no_index_language", function()
+  for _, path in ipairs({ "build.ps1", "C:\\repo\\module.psm1", "data.psd1", "notes.txt", "LICENSE", "MAIN.RS" }) do
+    local lang = indexer.language_for_path(path)
+    th.eq(lang, nil)
+  end
+  local skeleton, err = indexer.index_source("function Invoke-Build {}", "powershell")
+  th.eq(skeleton, nil)
+  assert(err ~= nil)
+end)
 
 local function meta_count(meta)
   local n = 0

@@ -5876,9 +5876,14 @@ fn cancelled_bash_keeps_streamed_output_as_partial() {
         .recv_timeout(CANCEL_TEST_TIMEOUT)
         .expect("cancelled bash must settle")
         .expect_err("a partial reply is an error reply");
-    let marker = err
-        .strip_prefix(&format!("{BASH_PARTIAL_PROBE}\n"))
-        .expect("streamed output precedes the marker");
+    let retained = err
+        .strip_prefix(&format!("{BASH_PARTIAL_PROBE}\nFull output: "))
+        .expect("streamed output precedes its retained log path");
+    let (path, marker) = retained
+        .split_once('\n')
+        .expect("cancel status follows the log");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), BASH_PARTIAL_PROBE);
+    std::fs::remove_file(path).unwrap();
     assert!(
         marker.starts_with(BASH_PARTIAL_MARKER_HEAD) && marker.ends_with(BASH_PARTIAL_MARKER_TAIL),
         "unexpected marker: {marker}"

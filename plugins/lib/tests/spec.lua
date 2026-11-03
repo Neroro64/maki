@@ -171,6 +171,20 @@ case("collector_fits_until_it_would_cut_and_newest_has_no_gap", function()
   eq(before, 4)
 end)
 
+case("tail_preserves_selected_line_boundaries", function()
+  for _, vector in ipairs({
+    { "a\nb\nc", 2, "b\nc" },
+    { "a\nb\nc", 1, "c" },
+    { "a\nb\n", 2, "b\n" },
+    { "a\n\nc", 2, "\nc" },
+    { "é\n你好\nlast", 2, "你好\nlast" },
+    { "a\nb", 5, "a\nb" },
+    { "", 1, "" },
+  }) do
+    eq(output_limits.tail(vector[1], vector[2]), vector[3])
+  end
+end)
+
 -- ToolView tests
 
 case("tool_view_line_nr_fmt_right_aligns_to_max_width", function()

@@ -50,6 +50,11 @@ impl App {
     /// handler so an alias cycle keeps counting. 0 when the user typed it.
     pub(super) fn execute_command(&mut self, cmd: ParsedCommand, depth: u8) -> Vec<Action> {
         match cmd.name.as_str() {
+            "/review" => {
+                let cwd = PathBuf::from(&self.state.session.cwd);
+                self.open_prompt(|app| app.review.open(cwd));
+                vec![]
+            }
             "/compact" => {
                 let instructions = (!cmd.args.is_empty()).then(|| cmd.args.clone());
                 if self.status == Status::Streaming {

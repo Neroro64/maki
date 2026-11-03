@@ -9,7 +9,7 @@
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_providers::strip_provider_keys;
 use maki_storage::id::MakiId;
-use mlua::{Lua, Result as LuaResult, Table};
+use mlua::{Function, Lua, Result as LuaResult, Table};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -286,6 +286,10 @@ fn parse_marker(line: &str, seq: u32) -> Option<Option<i32>> {
 ///   - session (string): session id owning this shell. Required.
 ///   - command (string): PowerShell command to run. Required.
 ///   - timeout (integer): seconds to wait, including queued time. Default 120.
+///   - on_output (function?): synchronous callback receiving each output line,
+///     including the blank separator before completion. Must not yield.
+///   - collect_output (boolean): include output in the result. Default true;
+///     set false when on_output already owns the capture to avoid duplicating it.
 /// @return (table, string?) Pair: `{ output, exit_code, timed_out, dead }` on
 ///   success, `(nil, err)` on failure. `exit_code` is the native exit code,
 ///   or 1 for a PowerShell error and 0 for success.
@@ -300,6 +304,8 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
         return Ok((None, Some(COMMAND_REQUIRED.to_owned())));
     };
     let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let on_output: Option<Function> = opts.opt("on_output")?;
+    let collect_output = opts.opt_bool("collect_output").unwrap_or(true);
 
     let deadline = TokioInstant::now() + Duration::from_secs(timeout);
     let prepared = timeout_at(deadline, async {
@@ -368,14 +374,21 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
                     call.completed = true;
                     exit_code = code;
                     // Strip the line ending and the marker's separating newline.
-                    output.pop();
-                    if output.ends_with('\n') {
+                    if collect_output {
                         output.pop();
+                        if output.ends_with('\n') {
+                            output.pop();
+                        }
                     }
                     break;
                 }
-                output.push_str(&line);
-                output.push('\n');
+                if let Some(callback) = &on_output {
+                    callback.call::<()>(line.as_str())?;
+                }
+                if collect_output {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
             }
             Tick::Closed => {
                 dead = true;
@@ -389,7 +402,9 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     }
 
     let tbl = lua.create_table()?;
-    tbl.set("output", output)?;
+    if collect_output {
+        tbl.set("output", output)?;
+    }
     tbl.set("exit_code", exit_code)?;
     tbl.set("timed_out", timed_out)?;
     tbl.set("dead", dead)?;

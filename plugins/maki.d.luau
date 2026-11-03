@@ -93,6 +93,7 @@ declare maki: {
     jobattach: @checked (job_id: number, opts: any) -> (boolean?, string?),
     jobfind: @checked (name: string) -> (number?, string?),
     executable: @checked (name: string) -> (number),
+    retain_output: @checked (output: string) -> (string?, string?),
     winsaveview: @checked () -> (any, string?),
     winrestview: @checked (view: any) -> (boolean?, string?),
     mode: @checked () -> (string),

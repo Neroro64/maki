@@ -49,10 +49,12 @@ impl App {
         input: Option<Position>,
         prompt: Option<Position>,
         picker: Option<Position>,
+        review: Option<Position>,
     ) -> Option<Position> {
         match owner {
             KeyboardOwner::Chat => input,
             KeyboardOwner::Permission => prompt,
+            KeyboardOwner::Review => review,
             KeyboardOwner::FocusedWindow => self.float_mgr.focused_caret(),
             KeyboardOwner::Search
             | KeyboardOwner::FilePicker
@@ -103,25 +105,28 @@ impl App {
         let render_chat = self.active_chat;
         let owner = self.keyboard_owner();
 
-        let ((overlay_rect, caret, prompt_caret, picker_caret), thumbs) = Thumbs::record(|| {
-            self.render_background(frame);
-            self.render_messages(frame, &layout, render_chat);
-            let (caret, prompt_caret) = self.render_bottom_panel(frame, &layout);
-            self.render_splits(frame, &layout);
-            let (overlay_rect, picker_caret) = self.render_picker_overlays(frame, &layout, owner);
-            self.render_status_bar(frame, layout.status_area, render_chat);
-            let overlay_rect = self.render_top_modals(frame, overlay_rect, caret);
-            (overlay_rect, caret, prompt_caret, picker_caret)
-        });
+        let ((overlay_rect, caret, prompt_caret, picker_caret, review_caret), thumbs) =
+            Thumbs::record(|| {
+                self.render_background(frame);
+                self.render_messages(frame, &layout, render_chat);
+                let (caret, prompt_caret) = self.render_bottom_panel(frame, &layout);
+                self.render_splits(frame, &layout);
+                let (overlay_rect, picker_caret) =
+                    self.render_picker_overlays(frame, &layout, owner);
+                self.render_status_bar(frame, layout.status_area, render_chat);
+                let (overlay_rect, review_caret) =
+                    self.render_top_modals(frame, overlay_rect, caret, layout.bottom_area);
+                (overlay_rect, caret, prompt_caret, picker_caret, review_caret)
+            });
         self.register_zones(&layout, overlay_rect);
         self.apply_selection(frame, render_chat, &thumbs);
-        self.keyboard_caret(owner, caret, prompt_caret, picker_caret)
+        self.keyboard_caret(owner, caret, prompt_caret, picker_caret, review_caret)
     }
 
     /// Whether the terminal draws the caret. Only the chat input stopped
     /// painting its own; every other field still paints one.
     pub(crate) fn shows_terminal_cursor(&self) -> bool {
-        self.keyboard_owner() == KeyboardOwner::Chat
+        matches!(self.keyboard_owner(), KeyboardOwner::Chat | KeyboardOwner::Review)
     }
 
     /// The shape a plugin set with `maki.ui.set_cursor_shape`, None if no
@@ -384,8 +389,10 @@ impl App {
         frame: &mut Frame,
         mut overlay_rect: Rect,
         caret: Option<Position>,
-    ) -> Rect {
+        bottom_area: Rect,
+    ) -> (Rect, Option<Position>) {
         let full = frame.area();
+        let mut review_caret = None;
         let r = self.btw_modal.view(frame, full);
         if r.width > 0 {
             overlay_rect = r;
@@ -409,15 +416,25 @@ impl App {
                 overlay_rect = r;
             }
         }
-        let r = self.float_mgr.view(frame, full, caret);
-        if r.width > 0 {
-            overlay_rect = r;
+        if self.review.is_open() {
+            review_caret = self.review.view(frame);
+            overlay_rect = full;
+            if self.permission_prompt.is_open() {
+                self.permission_prompt.view(frame, bottom_area);
+            } else if self.pack_review.is_open() {
+                self.pack_review.view(frame, bottom_area);
+            }
+        } else {
+            let r = self.float_mgr.view(frame, full, caret);
+            if r.width > 0 {
+                overlay_rect = r;
+            }
         }
         let r = self.alert_modal.view(frame, full);
         if r.width > 0 {
             overlay_rect = r;
         }
-        overlay_rect
+        (overlay_rect, review_caret)
     }
 
     fn render_status_bar(&mut self, frame: &mut Frame, status_area: Rect, render_chat: usize) {

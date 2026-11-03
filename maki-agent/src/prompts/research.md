@@ -10,6 +10,9 @@
 
 {{efficient_tools}}
 
+# Coordination
+{{coordination}}
+
 # Guidelines
 {{completion}}
 {{instructions}}

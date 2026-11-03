@@ -9249,6 +9249,8 @@ const TAB_FILE: &str = "completed.txt";
 
 #[test_case("./comp", "./completed.txt" ; "relative_path")]
 #[test_case(".\\comp", "./completed.txt" ; "windows_path")]
+#[test_case("/cd ./comp", "/cd ./completed.txt" ; "command_argument_path")]
+#[test_case("/cd .\\comp", "/cd ./completed.txt" ; "command_argument_windows_path")]
 #[test_case("/skill:complete", "/skill:complete-code" ; "skill_name")]
 fn tab_completes_the_token_while_typing(text: &str, completed: &str) {
     let tmp = TempDir::new().unwrap();

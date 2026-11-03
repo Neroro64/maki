@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use maki_storage::snapshot::Snapshots;
-use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, RwLock, RwLockReadGuard};
 use tracing::{debug, warn};
 
@@ -17,7 +16,6 @@ const REWOUND_MSG: &str = "session was rewound; this task can no longer modify f
 const FILE_SYMBOL: &str = "<file>";
 const MAX_READ_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REWIND_TRAJECTORY_BYTES: usize = 12 * 1024;
-const MAX_MUTATION_PATHS: usize = 512;
 
 /// Dead `Weak`s are only ever cleared once the map grows to this many entries,
 /// so the map is bounded by construction instead of by a drop hook.
@@ -44,38 +42,12 @@ type FileLock = Arc<AsyncMutex<()>>;
 pub type FileGuard = OwnedMutexGuard<()>;
 type FileLocks = Mutex<HashMap<FileKey, Weak<AsyncMutex<()>>>>;
 
-#[derive(Serialize)]
-pub struct DiffSnapshot {
-    pub captured: bool,
-    pub mutated: bool,
-    pub root: Option<PathBuf>,
-    pub reference: Option<String>,
-    pub attributes: Option<String>,
-    pub paths: Option<Vec<PathBuf>>,
-}
-
-#[derive(Default)]
-struct DiffBase {
-    root: Option<PathBuf>,
-    reference: Option<String>,
-    attributes: Option<String>,
-}
-
-#[derive(Default)]
-struct Mutations {
-    attempted: bool,
-    unscoped: bool,
-    paths: HashSet<FileKey>,
-    baseline: Option<Arc<DiffBase>>,
-}
-
 #[derive(Default)]
 struct SnapshotState {
     session: String,
     turn: usize,
     captured: bool,
     repository: Option<Snapshots>,
-    base: Option<Arc<DiffBase>>,
 }
 
 struct SymbolOwner {
@@ -224,7 +196,6 @@ pub struct FileAccess {
     symbols: Arc<SymbolLockTable>,
     owner: Option<Arc<SymbolOwner>>,
     rewind_trajectory: Arc<Mutex<Option<Arc<str>>>>,
-    mutations: Mutex<Mutations>,
 }
 
 fn get_mtime(path: &Path) -> Option<SystemTime> {
@@ -252,7 +223,6 @@ impl FileAccess {
             symbols: Arc::clone(&self.symbols),
             rewind_trajectory: Arc::clone(&self.rewind_trajectory),
             owner: None,
-            mutations: Mutex::default(),
         })
     }
 
@@ -274,7 +244,6 @@ impl FileAccess {
             symbols: Arc::clone(&self.symbols),
             rewind_trajectory: Arc::clone(&self.rewind_trajectory),
             owner: Some(Arc::clone(&owner)),
-            mutations: Mutex::default(),
         });
         let lease = SymbolLease {
             table: Arc::clone(&self.symbols),
@@ -299,62 +268,6 @@ impl FileAccess {
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
-    pub fn note_mutation(&self, path: Option<&FileKey>) {
-        let mut mutations = self
-            .mutations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        mutations.attempted = true;
-        if let Some(path) = path {
-            if self.owner.is_some() && !mutations.unscoped {
-                if mutations.paths.len() >= MAX_MUTATION_PATHS && !mutations.paths.contains(path) {
-                    mutations.unscoped = true;
-                    mutations.paths.clear();
-                } else {
-                    mutations.paths.insert(path.clone());
-                }
-            }
-        } else {
-            mutations.unscoped = true;
-            mutations.paths.clear();
-        }
-    }
-
-    pub fn diff_snapshot(&self) -> DiffSnapshot {
-        let snapshots = self
-            .snapshots
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mutations = self
-            .mutations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let base = if self.owner.is_some() {
-            mutations.baseline.as_ref().or(snapshots.base.as_ref())
-        } else {
-            snapshots.base.as_ref()
-        };
-        let paths = if self.owner.is_some() && !mutations.unscoped {
-            let mut paths: Vec<_> = mutations
-                .paths
-                .iter()
-                .map(|key| key.as_path().to_path_buf())
-                .collect();
-            paths.sort_unstable();
-            Some(paths)
-        } else {
-            None
-        };
-        DiffSnapshot {
-            captured: base.is_some(),
-            mutated: mutations.attempted || (self.owner.is_none() && snapshots.captured),
-            root: base.and_then(|base| base.root.clone()),
-            reference: base.and_then(|base| base.reference.clone()),
-            attributes: base.and_then(|base| base.attributes.clone()),
-            paths,
-        }
-    }
-
     pub fn claim_symbols(
         &self,
         key: &FileKey,
@@ -427,12 +340,7 @@ impl FileAccess {
             turn,
             captured: false,
             repository: None,
-            base: None,
         };
-        *self
-            .mutations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Mutations::default();
     }
 
     pub fn prepare_snapshot(&self) -> Result<(), String> {
@@ -444,26 +352,10 @@ impl FileAccess {
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             state.repository =
                 Snapshots::discover(&cwd, &state.session).map_err(|e| e.to_string())?;
-            let base = if let Some(snapshots) = &state.repository {
-                DiffBase {
-                    reference: Some(snapshots.capture(state.turn).map_err(|e| e.to_string())?),
-                    root: Some(snapshots.root().to_path_buf()),
-                    attributes: Some(snapshots.attributes().to_owned()),
-                }
-            } else {
-                DiffBase::default()
-            };
-            state.base = Some(Arc::new(base));
-            state.captured = true;
-        }
-        if self.owner.is_some() {
-            let mut mutations = self
-                .mutations
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if mutations.baseline.is_none() {
-                mutations.baseline = state.base.clone();
+            if let Some(snapshots) = &state.repository {
+                snapshots.capture(state.turn).map_err(|e| e.to_string())?;
             }
+            state.captured = true;
         }
         Ok(())
     }

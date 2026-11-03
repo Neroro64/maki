@@ -37,6 +37,40 @@ A resumed session keeps its prompt across Maki upgrades, as long as the upgrade 
 
 A request carries at most 100 images. Past that, Maki replaces the oldest 25 with a note at once, so the cache breaks once per 25 images rather than on every one.
 
+## Parallel task handoffs
+
+The default coordination policy reuses the experimental `/orchestrate` ledger
+for multi-worker implementation. Small tasks and read-only research do not need
+a ledger. Each run lives under `.maki/orchestrate/<run>/`:
+
+- The manager owns `plan.md`: task IDs, dependencies, file ownership, acceptance
+  criteria, status, and one verification owner per worktree.
+- The manager owns `notes.md` for shared decisions and findings.
+- Each worker owns `tasks/<id>.md`, containing its brief and compact handoff.
+  Read-only workers return their handoff for the manager to record.
+
+The `task` tool accepts a `ledger` path so a fresh worker can read established
+findings instead of rediscovering them. Independent tasks can run together.
+Background execution is available by default and requires `background = true`.
+Use it when the manager has independent work. Otherwise, a blocking batch waits
+for the ready tasks together.
+
+Workers sharing a worktree leave builds, tests, and formatters to the assigned
+verification owner after edits settle. These are agent instructions, not a
+runtime scheduler or filesystem lock.
+
+## Command result captures
+
+When `bash` or `pwsh` shortens output, including through the tool's `tail`
+parameter, it reports a `Full output` path and explicit exit status. Interrupted
+commands retain nonempty partial output too. Read the capture instead of
+repeating a build or test for its diagnostics. Use runner loggers or result
+artifacts for details the runner does not print.
+
+Captures are private, uniquely named OS-temp logs. They survive session shutdown
+until the OS or user removes them. Complete successful output needs no capture
+and stays unchanged for programmatic consumers.
+
 ## Plugin prompt overrides
 
 Plugins can replace a named prompt section or a complete template with
@@ -68,7 +102,7 @@ instructions are appended to a complete replacement.
 | `plan` | Plan entry update |
 
 Sections are `identity`, `tone`, `objectivity`, `tool_usage`, `efficient_tools`,
-`conventions`, `completion`, and `after_instructions`. A section must occur in
+`coordination`, `conventions`, `completion`, and `after_instructions`. A section must occur in
 the selected template. A known section absent from an explicit target is
 ignored with a warning. Research and general prompts also have identity and
 tone sections. Omitting `prompt` in `set_prompt` targets only `system`.
@@ -319,9 +353,5 @@ file. Whole-file writes retain strict stale-read checks. Main-agent edits check
 active task claims but do not retain their own symbol locks. These claims cover
 the built-in edit and write tools, not arbitrary shell commands or external
 editors.
-
-The [diff integrity gate](/docs/hooks/#diff-integrity-gate) checks changed code
-before a main agent finishes or a task returns its summary. It requires fixes
-or current-diff justifications for removed checks and new suppressions.
 
 Related: [Token Economy](/docs/token-economy/) for why all this frugality exists, [Configuration](/docs/configuration/) for the knobs.

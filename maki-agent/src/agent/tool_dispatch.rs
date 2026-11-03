@@ -1010,9 +1010,6 @@ async fn run_native_tool(
     if snapshots && ctx.cancel.is_cancelled() {
         return done_error(ERROR_CANCELLED.to_owned());
     }
-    if snapshots {
-        ctx.file_access.note_mutation(mutated.as_ref());
-    }
 
     let result = invocation.execute(ctx).await;
 

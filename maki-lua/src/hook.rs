@@ -222,7 +222,7 @@ mod tests {
 
     const MODEL: &str = "test/model";
     const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
-    const WARNING: &str = "[DIFF INTEGRITY WARNING]";
+    const STOP_FAILED: &str = "agent.stop failed: ";
 
     #[test_case(AgentSlot::Stop, true ; "stop_send_closed")]
     #[test_case(AgentSlot::Stop, false ; "stop_reply_closed")]
@@ -259,7 +259,7 @@ mod tests {
         };
         if slot == AgentSlot::Stop {
             assert!(matches!(verdict, Verdict::Denied(warning)
-                if warning.contains(WARNING)));
+                if warning.starts_with(STOP_FAILED)));
         } else {
             assert!(matches!(verdict, Verdict::Unchanged));
         }
@@ -284,6 +284,6 @@ mod tests {
         };
         let verdict = AgentHook::run(&hook, AgentSlot::Stop, json!({}), &call).await;
         assert!(matches!(verdict, Verdict::Denied(warning)
-            if warning.contains(WARNING)));
+            if warning.starts_with(STOP_FAILED)));
     }
 }

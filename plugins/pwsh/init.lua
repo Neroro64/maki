@@ -1,6 +1,7 @@
-local truncate = require("maki.truncate")
 local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
+local command_output = require("maki.command_output")
+local partial = require("maki.partial")
 
 local SEPARATOR = "──────"
 local DEADLINE_GRACE_SECS = 5
@@ -44,7 +45,8 @@ The PowerShell process stays alive for the whole agent session: variables, funct
 - Multiline commands and here-strings are supported, including blank lines.
 - PowerShell errors and nonzero native exit codes are reported as failures. Ordinary errors leave the session usable.
 - A running command that times out kills the process. The next call starts fresh with no state. A timeout while queued leaves the running command alone.
-- Output sent to the model is truncated beyond 2000 lines or 50KB.
+- Output beyond 2000 lines or 50KB, or hidden by `tail`, is retained in the reported `Full output` log. Read that capture instead of rerunning.
+- Run builds/tests once, unfiltered (no shell tail/filter). Use the tool's `tail` for a bounded view; use a test logger/result artifact for diagnostics the runner does not print.
 - Provide a short `description` (3-5 words).
 - Use the `tail` param to return the last N output lines without changing the command.]]
 
@@ -70,7 +72,7 @@ maki.api.register_tool({
     properties = {
       command = { type = "string", description = "The PowerShell command to execute", required = true },
       timeout = { type = "integer", description = "Timeout in seconds, including queued time (default 120)" },
-      tail = { type = "integer", description = "Return only the last N lines" },
+      tail = { type = "integer", description = "Return only the last N output lines, retaining the full capture" },
       reset = { type = "boolean", description = "Kill the persistent session first, discarding all state" },
       description = { type = "string", description = "Short description (3-5 words) of what the command does" },
     },
@@ -134,6 +136,7 @@ maki.api.register_tool({
       return { llm_output = "error: tail must be >= 1", is_error = true }
     end
 
+    local started_at = os.time()
     local timeout_secs = input.timeout or opts.timeout_secs
     local max_lines, max_bytes = output_limits.resolve(opts, ctx)
 
@@ -145,7 +148,22 @@ maki.api.register_tool({
     end
 
     local buf, view = create_pwsh_view(input.command, ctx)
+    local output_parts = {}
+    local has_output = false
+    local finished = false
+    local function final_output(interrupted)
+      return command_output.render(table.concat(output_parts, "\n"), max_lines, max_bytes, input.tail, interrupted)
+    end
+
+    maki.async.on_cancel(function(reason)
+      if finished then
+        return
+      end
+      finished = true
+      ctx:finish(partial.cut(view, final_output(true), reason, timeout_secs, started_at))
+    end)
     view:append({ { "Waiting for output...", "dim" } })
+    ctx:live_buf(buf)
 
     if input.reset then
       maki.pwsh.reset({ session = session })
@@ -155,39 +173,51 @@ maki.api.register_tool({
       session = session,
       command = input.command,
       timeout = timeout_secs,
+      collect_output = false,
+      on_output = function(line)
+        if finished then
+          return
+        end
+        if not has_output then
+          has_output = true
+          view:clear()
+        end
+        output_parts[#output_parts + 1] = line
+        view:append(line)
+      end,
     })
+    finished = true
     if not r then
-      view:clear()
-      view:append({ { "Error: " .. err, "dim" } })
+      local output = final_output(true)
+      local message = "error: " .. err
+      if output == "" then
+        view:clear()
+      end
+      view:append({ { message, "dim" } })
       view:finish()
-      return { llm_output = "error: " .. err, is_error = true }
+      return { llm_output = output .. (output ~= "" and "\n" or "") .. message, is_error = true, body = buf }
     end
 
-    local output = r.output or ""
-    view:clear()
-    if output ~= "" then
-      view:append_text(output)
-    elseif not r.timed_out and not r.dead then
+    if not r.timed_out and not r.dead and output_parts[#output_parts] == "" then
+      table.remove(output_parts)
+    end
+    if #output_parts == 0 and not r.timed_out and not r.dead then
+      view:clear()
       view:append({ { "No output", "dim" } })
     end
-    if input.tail then
-      output = output_limits.tail(output, input.tail)
-    end
-    output = truncate(output, max_lines, max_bytes)
-
-    local is_error = (r.exit_code or 0) ~= 0 or r.timed_out or r.dead
+    local output, reduced = final_output(r.timed_out or r.dead)
+    local is_error = r.exit_code ~= 0 or r.timed_out or r.dead
     local llm_output
     if r.timed_out then
-      llm_output = (output .. "\ntool pwsh timed out after " .. timeout_secs .. "s; the persistent session was killed"):gsub(
-        "^\n",
-        ""
-      )
+      llm_output = output .. (output ~= "" and "\n" or "")
+        .. "tool pwsh timed out after " .. timeout_secs .. "s; the persistent session was killed"
     elseif r.dead then
-      llm_output = (output .. "\nthe persistent session died; the next call starts a fresh one"):gsub("^\n", "")
-    elseif is_error then
-      llm_output = output == "" and ("Exit code: " .. r.exit_code) or (output .. "\nExit code: " .. r.exit_code)
+      llm_output = output .. (output ~= "" and "\n" or "")
+        .. "the persistent session died; the next call starts a fresh one"
+    elseif r.exit_code == nil then
+      llm_output = output .. (output ~= "" and "\n" or "") .. "Exit code unavailable"
     else
-      llm_output = output == "" and "Exit code: 0" or output
+      llm_output = command_output.exited(output, r.exit_code, reduced)
     end
 
     if r.timed_out then
@@ -200,6 +230,6 @@ maki.api.register_tool({
     end
     view:finish()
 
-    return { llm_output = llm_output, is_error = is_error }
+    return { llm_output = llm_output, is_error = is_error, body = buf }
   end,
 })

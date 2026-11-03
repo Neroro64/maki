@@ -145,6 +145,26 @@ impl InputBox {
         self.follow_cursor = true;
         let insert = mode == InputMode::Insert;
 
+        if matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            let down = key.code == KeyCode::Down;
+            let select = key.modifiers.contains(KeyModifiers::SHIFT);
+            if let Some(byte) = self.layout.get_mut().vertical_target(&self.buffer, down) {
+                self.buffer.move_cursor_to(byte, select);
+            } else if !select {
+                self.buffer.deselect();
+                if down {
+                    self.history_down();
+                } else {
+                    self.history_up();
+                }
+            }
+            return InputAction::None;
+        }
+        self.layout.get_mut().reset_vertical_goal();
         if key.modifiers.contains(KeyModifiers::SHIFT)
             && self.buffer.handle_motion_key(key, true) == EditResult::Moved
         {
@@ -152,14 +172,6 @@ impl InputBox {
         }
         match key.code {
             KeyCode::Esc if self.buffer.deselect() => return InputAction::None,
-            KeyCode::Up if self.is_at_first_line() => {
-                self.history_up();
-                return InputAction::None;
-            }
-            KeyCode::Down if self.is_at_last_line() => {
-                self.history_down();
-                return InputAction::None;
-            }
             KeyCode::Tab | KeyCode::Esc => return InputAction::Passthrough(key),
             _ if is_newline_key(&key) => {
                 if !insert {
@@ -343,11 +355,15 @@ impl InputBox {
     }
 
     pub fn is_at_first_line(&self) -> bool {
-        self.buffer.display_lines(self.buffer.y()).start == 0
+        let mut layout = self.layout.borrow_mut();
+        layout.sync_current(&self.buffer);
+        layout.cursor_row(&self.buffer) == 0
     }
 
     pub fn is_at_last_line(&self) -> bool {
-        self.buffer.display_lines(self.buffer.y()).end == self.buffer.line_count()
+        let mut layout = self.layout.borrow_mut();
+        layout.sync_current(&self.buffer);
+        layout.cursor_row(&self.buffer) + 1 == layout.total_rows()
     }
 
     pub fn char_before_cursor_is_backslash(&self) -> bool {
@@ -750,6 +766,7 @@ impl InputBox {
         };
         self.buffer.set_cursor(y, x);
         self.buffer.deselect();
+        self.layout.get_mut().reset_vertical_goal();
         self.follow_cursor = true;
     }
 
@@ -1107,6 +1124,120 @@ mod tests {
             .unwrap();
 
         assert_eq!(input.draft_text(), parked);
+    }
+
+    const NAV_WIDTH: u16 = 12;
+    const WRAPPED_DRAFT: &str = "abcdefghijklmno";
+
+    #[test_case(InputMode::Insert ; "insert")]
+    #[test_case(InputMode::Normal ; "normal")]
+    fn vertical_keys_walk_wrapped_rows_before_history(mode: InputMode) {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, RECALLED);
+        input.set_input(WRAPPED_DRAFT);
+        input.buffer.move_to_end();
+        input.height(NAV_WIDTH);
+        assert!(!input.is_at_first_line());
+        assert!(input.is_at_last_line());
+
+        input.handle_key(KeyCode::Up.into(), mode);
+        assert_eq!(input.buffer.cursor_byte(), 3);
+        assert_eq!(input.buffer.value(), WRAPPED_DRAFT);
+        assert!(input.is_at_first_line());
+        assert!(!input.is_at_last_line());
+        input.handle_key(KeyCode::Down.into(), mode);
+        assert_eq!(input.buffer.cursor_byte(), WRAPPED_DRAFT.len());
+        input.handle_key(KeyCode::Up.into(), mode);
+        input.handle_key(KeyCode::Up.into(), mode);
+        assert_eq!(input.buffer.value(), RECALLED);
+        input.handle_key(KeyCode::Down.into(), mode);
+        assert_eq!(input.buffer.value(), WRAPPED_DRAFT);
+    }
+
+    #[test_case(InputMode::Insert ; "insert")]
+    #[test_case(InputMode::Normal ; "normal")]
+    fn visual_selection_preserves_unicode_and_never_recalls_history(mode: InputMode) {
+        const TEXT: &str = "ab界cd界ef";
+        const WIDTH: u16 = 8;
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, RECALLED);
+        input.set_input(TEXT);
+        input.buffer.move_to_end();
+        input.height(WIDTH);
+        input.handle_key(shift(KeyCode::Up), mode);
+        assert_eq!(input.buffer.cursor_byte(), 2);
+        assert_eq!(input.buffer.selection(), Some(2..TEXT.len()));
+        input.handle_key(shift(KeyCode::Up), mode);
+        assert_eq!(input.buffer.value(), TEXT);
+        assert_eq!(input.buffer.selection(), Some(2..TEXT.len()));
+        input.handle_key(shift(KeyCode::Down), mode);
+        assert_eq!(input.buffer.cursor_byte(), TEXT.len());
+        assert_eq!(input.buffer.selection(), None);
+    }
+
+    #[test]
+    fn vertical_motion_keeps_the_goal_column_across_short_lines() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        input.set_input("abcdef\nx\nuvwxyz");
+        input.buffer.set_cursor(0, 5);
+        input.height(TEST_WIDTH);
+        input.handle_key(KeyCode::Down.into(), InputMode::Insert);
+        assert_eq!((input.buffer.y(), input.buffer.x()), (1, 1));
+        input.handle_key(KeyCode::Down.into(), InputMode::Insert);
+        assert_eq!((input.buffer.y(), input.buffer.x()), (2, 5));
+        input.handle_key(KeyCode::Up.into(), InputMode::Insert);
+        input.handle_key(KeyCode::Left.into(), InputMode::Insert);
+        input.handle_key(KeyCode::Down.into(), InputMode::Insert);
+        assert_eq!((input.buffer.y(), input.buffer.x()), (2, 0));
+    }
+
+    #[test]
+    fn up_from_the_extra_caret_row_moves_into_the_full_text_row() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        let text = "x".repeat(effective_width(NAV_WIDTH.into()));
+        input.set_input(&text);
+        input.buffer.move_to_end();
+        input.height(NAV_WIDTH);
+        input.handle_key(KeyCode::Up.into(), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), 0);
+        input.handle_key(KeyCode::Down.into(), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), text.len());
+    }
+
+    #[test]
+    fn a_plain_vertical_key_at_the_boundary_drops_the_selection() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        input.set_input(DRAFT);
+        input.buffer.move_to_end();
+        input.handle_key(shift(KeyCode::Home), InputMode::Insert);
+        assert_eq!(input.buffer.selection(), Some(0..DRAFT.len()));
+        input.handle_key(KeyCode::Up.into(), InputMode::Insert);
+        assert_eq!(input.buffer.selection(), None);
+        assert_eq!(input.buffer.value(), DRAFT);
+    }
+
+    #[test]
+    fn changing_the_width_recomputes_vertical_motion() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        input.set_input(WRAPPED_DRAFT);
+        input.buffer.move_to_end();
+        input.height(NAV_WIDTH);
+        input.handle_key(KeyCode::Up.into(), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), 3);
+        input.height(NAV_WIDTH - 2);
+        input.handle_key(KeyCode::Down.into(), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), 13);
+    }
+
+    #[test_case(KeyModifiers::CONTROL ; "control")]
+    #[test_case(KeyModifiers::ALT ; "alt")]
+    #[test_case(KeyModifiers::SUPER ; "super")]
+    fn modified_vertical_keys_do_not_recall_history(modifiers: KeyModifiers) {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, RECALLED);
+        input.set_input(DRAFT);
+        input.handle_key(KeyEvent::new(KeyCode::Up, modifiers), InputMode::Insert);
+        assert_eq!(input.buffer.value(), DRAFT);
     }
 
     #[test]
@@ -1808,6 +1939,19 @@ mod tests {
     }
 
     #[test]
+    fn vertical_motion_accounts_for_inline_virtual_columns() {
+        let mut input = marked(
+            "abcdefgh",
+            vec![mark(4..4, virt("XYZ", VirtTextPos::Inline))],
+        );
+        input.height(NAV_WIDTH);
+        input.handle_key(KeyCode::Up.into(), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), 0);
+        input.handle_key(KeyCode::Down.into(), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), 8);
+    }
+
+    #[test]
     fn eol_virtual_text_is_cut_rather_than_wrapped() {
         let mut input = marked("abcdefgh", vec![mark(0..0, virt("TAIL", VirtTextPos::Eol))]);
         let terminal = render_input(&mut input, CURSOR_WIDTH, CURSOR_HEIGHT);
@@ -1926,6 +2070,25 @@ mod tests {
             ..Decoration::default()
         };
         marked(CHIP_TEXT, vec![mark(CHIP, decoration)])
+    }
+
+    #[test_case(3, CHIP.start ; "near_chip_start")]
+    #[test_case(5, CHIP.end ; "near_chip_end")]
+    fn vertical_selection_lands_on_a_concealed_chips_edges(column: usize, target: usize) {
+        let text = format!("{CHIP_TEXT}\nabcdefgh");
+        let decoration = Decoration {
+            conceal: Some("[go]".into()),
+            reveal: Reveal::Never,
+            atomic: true,
+            ..Decoration::default()
+        };
+        let mut input = marked(&text, vec![mark(CHIP, decoration)]);
+        input.buffer.set_cursor(1, column);
+        let anchor = input.buffer.cursor_byte();
+        input.height(TEST_WIDTH);
+        input.handle_key(shift(KeyCode::Up), InputMode::Insert);
+        assert_eq!(input.buffer.cursor_byte(), target);
+        assert_eq!(input.buffer.selection(), Some(target..anchor));
     }
 
     #[test]

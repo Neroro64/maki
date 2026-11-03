@@ -2217,6 +2217,9 @@ fn input_layer_may_ask_the_user(answer: &str, rewritten: Option<&str>) {
 const AGENT_MODEL: &str = "anthropic/claude-sonnet-4";
 const KEEP_GOING: &str = "keep going";
 const CONTINUE_FIELD: &str = "continue";
+const STOP_FAILED: &str = "agent.stop failed: ";
+const INNER_STOP_FAILURE: &str = "inner stop failure";
+const STOP_HITS: &str = "stop_hits";
 
 fn agent_layer(slot: &str) -> String {
     format!(
@@ -2274,8 +2277,8 @@ fn agent_slot_layers_pay_the_prompt_price(
     );
 }
 
-#[test_case(r#"error('early integrity failure')"#, 0 ; "exception_before_prev")]
-#[test_case(r#"prev(value, ctx); error('late integrity failure')"#, 1 ; "exception_after_prev")]
+#[test_case(r#"error('early stop failure')"#, 0 ; "exception_before_prev")]
+#[test_case(r#"prev(value, ctx); error('late stop failure')"#, 1 ; "exception_after_prev")]
 #[test_case(r#"return { continuation = function() end }"#, 0 ; "non_json_table")]
 #[test_case(r#"local cycle = {}; cycle.self = cycle; return cycle"#, 0 ; "recursive_json")]
 #[test_case(r#"return true"#, 0 ; "invalid_value")]
@@ -2294,7 +2297,7 @@ maki.api.set_slot("agent.stop", function(prev, value, ctx)
     {body}
 end)
 {}"#,
-            probe_tool("integrity_hits", "return tostring(hits)"),
+            probe_tool(STOP_HITS, "return tostring(hits)"),
         ),
         PluginPermissions::trusted(),
     );
@@ -2310,10 +2313,8 @@ end)
         deadline: Instant::now() + DISPATCH_TIMEOUT,
     };
     let verdict = within(hook.run(AgentSlot::Stop, serde_json::json!({}), &call));
-    assert!(
-        matches!(verdict, Verdict::Denied(warning) if warning.contains("[DIFF INTEGRITY WARNING]"))
-    );
-    assert_eq!(exec_tool(&reg, "integrity_hits"), expected_hits.to_string());
+    assert!(matches!(verdict, Verdict::Denied(warning) if warning.starts_with(STOP_FAILED)));
+    assert_eq!(exec_tool(&reg, STOP_HITS), expected_hits.to_string());
 }
 
 #[test]
@@ -2322,14 +2323,16 @@ fn an_outer_stop_layer_cannot_catch_a_failing_inner_gate() {
     load_granted(
         &host,
         LAYER_PLUGIN,
-        r#"
-maki.api.set_slot("agent.stop", function() error("inner integrity failure") end)
+        &format!(
+            r#"
+maki.api.set_slot("agent.stop", function() error("{INNER_STOP_FAILURE}") end)
 maki.api.set_slot("agent.stop", function(prev, value, ctx)
     local ok = pcall(prev, value, ctx)
     assert(not ok)
     return value
 end)
 "#,
+        ),
         PluginPermissions::trusted(),
     );
     let cancel = CancelToken::none();
@@ -2348,7 +2351,7 @@ end)
         &call,
     ));
     assert!(
-        matches!(verdict, Verdict::Denied(warning) if warning.contains("inner integrity failure"))
+        matches!(verdict, Verdict::Denied(warning) if warning.starts_with(STOP_FAILED) && warning.contains(INNER_STOP_FAILURE))
     );
 }
 
@@ -2375,9 +2378,7 @@ fn a_dropped_host_denies_stop_instead_of_completing() {
         deadline: Instant::now() + DISPATCH_TIMEOUT,
     };
     let verdict = within(hook.run(AgentSlot::Stop, serde_json::json!({}), &call));
-    assert!(
-        matches!(verdict, Verdict::Denied(warning) if warning.contains("[DIFF INTEGRITY WARNING]"))
-    );
+    assert!(matches!(verdict, Verdict::Denied(warning) if warning.starts_with(STOP_FAILED)));
 }
 
 /// Entitlement is per layer, not per slot. The plugin holding the tool's

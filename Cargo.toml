@@ -63,6 +63,7 @@ members = [
   "maki-providers",
   "maki-storage",
   "maki-ui",
+  "vendor/calldive",
 ]
 exclude = ["vendor/crossterm"]
 resolver = "3"
@@ -78,6 +79,10 @@ rust-version = "1.99"
 [workspace.lints.clippy]
 
 [workspace.dependencies]
+calldive = { path = "vendor/calldive" }
+aho-corasick = "1"
+anyhow = "1"
+blake3 = "1"
 maki-agent = { path = "maki-agent" }
 maki-acp = { path = "maki-acp" }
 maki-config = { path = "maki-config" }

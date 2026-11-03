@@ -15,6 +15,8 @@ mod mouse;
 mod orchestrate;
 mod plan_form;
 mod queue;
+#[cfg(test)]
+mod review_tests;
 mod session;
 pub(crate) mod session_state;
 pub(crate) mod shell;
@@ -54,6 +56,7 @@ use crate::components::model_picker::{ModelPicker, ModelPickerAction, PickerMemo
 use crate::components::pack_review::{PackReview, PackReviewAction};
 use crate::components::permission_prompt::PermissionPrompt;
 use crate::components::plan_form::{PlanForm, PlanFormAction};
+use crate::components::review::{Review, ReviewAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
@@ -234,6 +237,7 @@ enum KeyboardOwner {
     /// review also up it goes first. The pack review waits on nothing.
     Permission,
     PackReview,
+    Review,
     /// Hands `<Tab>` on to the owner under it, see [`PlanFormAction::Passthrough`].
     PlanForm,
     Help,
@@ -532,6 +536,7 @@ pub struct App {
     pub(super) model_picker: ModelPicker,
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
+    pub(super) review: Review,
     pub(super) rewind_picker: RewindPicker,
     pub(super) copy_picker: ListPicker<CopyEntry>,
     pub(super) alert_modal: AlertModal,
@@ -698,6 +703,7 @@ impl App {
             model_picker: ModelPicker::new(available_models).sharing(picker_memory),
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
+            review: Review::default(),
             rewind_picker: RewindPicker::new(),
             copy_picker: ListPicker::new().with_footer(COPY_FOOTER),
             alert_modal: AlertModal::new(),
@@ -1376,6 +1382,17 @@ impl App {
     }
 
     fn scroll_at(&mut self, column: u16, row: u16, delta: i32) -> Option<SelectionZone> {
+        if self.review.is_open() {
+            let code = if delta > 0 {
+                KeyCode::Up
+            } else {
+                KeyCode::Down
+            };
+            for _ in 0..delta.unsigned_abs() {
+                self.review.handle_key(KeyEvent::from(code));
+            }
+            return None;
+        }
         if self.btw_modal.is_open() {
             self.btw_modal.scroll(delta);
             return None;
@@ -1512,6 +1529,10 @@ impl App {
                     Vec::new()
                 }
                 None => Vec::new(),
+            }),
+            KeyboardOwner::Review => Some(match self.review.handle_key(key) {
+                Some(ReviewAction::Submit(text)) => self.submit_review(text),
+                None => vec![],
             }),
             KeyboardOwner::PlanForm => match self.plan_form.handle_key(key) {
                 PlanFormAction::Passthrough => None,
@@ -1656,6 +1677,12 @@ impl App {
                 // is answered here with the rest of them rather than below the claims:
                 // a plugin holding `<Tab>` or `<CR>` must not take them from the `/`
                 // command the user is typing into.
+                if key.code == KeyCode::Enter
+                    && !self.command_palette.is_active(&self.input_box.buffer)
+                    && self.dispatch_on_screen_windows(&Pressed::Key(key, sight), turn)
+                {
+                    return Some(vec![]);
+                }
                 match self.dispatch_command_palette(key, sight, None) {
                     PaletteKey::Passthrough => None,
                     PaletteKey::Swallowed => Some(vec![]),
@@ -1713,6 +1740,11 @@ impl App {
         if !self.input_focused() || is_ctrl(&key) {
             return PaletteKey::Passthrough;
         }
+        if matches!(key.code, KeyCode::Up | KeyCode::Down)
+            && (!self.input_box.is_at_first_line() || !self.input_box.is_at_last_line())
+        {
+            return PaletteKey::Passthrough;
+        }
         if key.code == KeyCode::Enter
             && let Some(name) = self.command_palette.enter_target(&self.input_box.buffer)
         {
@@ -1731,12 +1763,14 @@ impl App {
                 // front. Clear the box first, or the command would stay
                 // behind as the subagent chat's draft.
                 self.input_box.discard();
-                self.set_active_chat(MAIN_CHAT);
+                if cmd.name != "/review" {
+                    self.set_active_chat(MAIN_CHAT);
+                }
                 PaletteKey::Handled(self.execute_command(cmd, 0))
             }
-            CommandAction::Complete(text) => {
+            CommandAction::Complete { text, cursor } => {
                 self.input_box.rewrite_input(&text);
-                self.input_box.buffer.move_to_end();
+                self.input_box.buffer.move_cursor_to(cursor, false);
                 self.input_changed(InputWriter::Anyone);
                 PaletteKey::Handled(vec![])
             }
@@ -2512,6 +2546,51 @@ impl App {
         }
     }
 
+    fn submit_review(&mut self, text: String) -> Vec<Action> {
+        if self.pending_input != PendingInput::None {
+            self.review.submission_failed(INPUT_NOT_LIVE_ERR.into());
+            return vec![];
+        }
+        if self
+            .review
+            .repository()
+            .is_some_and(|repo| repo != &PathBuf::from(&self.state.session.cwd))
+        {
+            self.review.submission_failed(
+                "Review belongs to another repository; return to its session before sending."
+                    .into(),
+            );
+            return vec![];
+        }
+        let msg = QueuedMessage {
+            text,
+            images: vec![],
+        };
+        if !self.is_main_chat() {
+            if self.chats[self.active_chat].inbox.is_none() {
+                self.review.submission_failed(queue::NO_INBOX_ERR.into());
+                return vec![];
+            }
+            let actions = self.queue_for_subagent(msg);
+            self.review.submitted();
+            return actions;
+        }
+        match self.submit_prompt(msg) {
+            SubmitOutcome::Started(actions) => {
+                self.review.submitted();
+                actions
+            }
+            SubmitOutcome::Queued => {
+                self.review.submitted();
+                vec![]
+            }
+            SubmitOutcome::Rejected(error) => {
+                self.review.submission_failed(error.into());
+                vec![]
+            }
+        }
+    }
+
     fn run_shell_line(&mut self, prefix: ShellPrefix) -> Vec<Action> {
         // The shell belongs to the session, not to the subagent being watched,
         // so the main chat comes to front where the output lands.
@@ -2565,6 +2644,7 @@ impl App {
             KeyboardOwner::Alert => &self.alert_modal,
             KeyboardOwner::Permission => &self.permission_prompt,
             KeyboardOwner::PackReview => &self.pack_review,
+            KeyboardOwner::Review => &self.review,
             KeyboardOwner::Help => &self.help_modal,
             KeyboardOwner::Usage => &self.usage_modal,
             KeyboardOwner::Btw => &self.btw_modal,
@@ -2586,6 +2666,7 @@ impl App {
             KeyboardOwner::Alert => &mut self.alert_modal,
             KeyboardOwner::Permission => &mut self.permission_prompt,
             KeyboardOwner::PackReview => &mut self.pack_review,
+            KeyboardOwner::Review => &mut self.review,
             KeyboardOwner::Help => &mut self.help_modal,
             KeyboardOwner::Usage => &mut self.usage_modal,
             KeyboardOwner::Btw => &mut self.btw_modal,
@@ -2669,6 +2750,7 @@ impl App {
             | self.poll_paste()
             | self.poll_mouse_paste()
             | self.btw_modal.poll()
+            | Dirty::from(self.review.tick())
             | self.status_bar.poll_branch_update()
             | self.status_bar.clear_expired_hint()
             | self.mcp_picker.refresh()
@@ -2812,6 +2894,7 @@ impl App {
             | KeyboardOwner::Btw
             | KeyboardOwner::Queue => {}
             KeyboardOwner::Permission => self.permission_prompt.handle_paste(text),
+            KeyboardOwner::Review => self.review.handle_paste(text),
             KeyboardOwner::FocusedWindow => {
                 self.dispatch_focused_window(&Pressed::Paste(text.to_owned()), turn);
             }
