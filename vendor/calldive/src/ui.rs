@@ -36,6 +36,7 @@ pub struct App {
     pub focus: Focus,
     pub detail_scroll: usize,
     pub detail_cursor: Option<usize>,
+    pub detail_selection: Option<usize>,
     pub detail_viewport: usize,
     pub tree_horizontal: u16,
     pub detail_horizontal: u16,
@@ -59,6 +60,7 @@ impl App {
             focus: Focus::Tree,
             detail_scroll: 0,
             detail_cursor: None,
+            detail_selection: None,
             detail_viewport: 0,
             tree_horizontal: 0,
             detail_horizontal: 0,
@@ -105,6 +107,7 @@ impl App {
         self.detail.clear();
         self.detail_anchors.clear();
         self.detail_cursor = None;
+        self.detail_selection = None;
         let Some(key) = self.selected_key().cloned() else {
             return;
         };
@@ -462,6 +465,7 @@ impl App {
                 self.rebuild();
             }
             KeyCode::Tab => {
+                self.detail_selection = None;
                 self.focus = match self.focus {
                     Focus::Tree => Focus::Detail,
                     Focus::Detail => Focus::Tree,
@@ -650,8 +654,12 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .iter()
         .enumerate()
         .map(|(index, line)| {
-            let selected =
-                app.focus == Focus::Detail && app.detail_cursor == Some(app.detail_scroll + index);
+            let row = app.detail_scroll + index;
+            let selected = app.focus == Focus::Detail
+                && app.detail_cursor.is_some_and(|cursor| {
+                    let anchor = app.detail_selection.unwrap_or(cursor);
+                    (anchor.min(cursor)..=anchor.max(cursor)).contains(&row)
+                });
             Line::from(
                 line.spans
                     .iter()
