@@ -17,7 +17,7 @@ local Skills = require("maki.skills")
 
 Skills.declare()
 
-maki.keymap.set("n", "<Tab>", function()
+maki.keymap.set("i", "<Tab>", function()
   if Menu.session_id() then
     return
   end
