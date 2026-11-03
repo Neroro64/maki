@@ -221,7 +221,7 @@ Execute a PowerShell command in a persistent session.
 | `description` | string | no |  | Short description (3-5 words) of what the command does |
 | `reset` | boolean | no |  | Kill the persistent session first, discarding all state |
 | `tail` | integer | no |  | Return only the last N lines |
-| `timeout` | integer | no | 120 | Timeout in seconds |
+| `timeout` | integer | no | 120 | Timeout in seconds, including queued time |
 
 ### `question` {#question}
 

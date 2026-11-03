@@ -1,30 +1,55 @@
 //! Persistent PowerShell sessions, one per maki session.
 //!
-//! pwsh runs a loop script that reads one command block per call from stdin,
-//! so the process stays alive across tool calls and variables, functions, and
-//! cwd persist. Each call sends the command followed by a blank line and a
-//! sentinel `Write-Output` line; the reply ends when the sentinel comes back
-//! with `$LASTEXITCODE`. A call that times out or dies leaves the session in
-//! an unknown state, so it is killed: the next call starts a fresh process.
+//! Requests are single-line JSON, so blank lines and here-strings stay intact.
+//! Commands are dot-sourced into the same scope to preserve variables, functions,
+//! and cwd. All PowerShell streams precede a completion marker on stdout. Calls
+//! sharing a session serialize command submission and response consumption. A
+//! command that times out or dies is killed so the next call starts fresh.
 
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_providers::strip_provider_keys;
 use maki_storage::id::MakiId;
 use mlua::{Lua, Result as LuaResult, Table};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::process::{ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
 use crate::api::util::convert::TableExt;
 use crate::api::util::pair::Pair;
 use crate::plugin_permissions::PluginPermissions;
 
-const REPL_SCRIPT: &str = r#"$PSStyle.OutputRendering='PlainText'; while ($true) { $l=[Console]::In.ReadLine(); if ($null -eq $l) { break }; $b=[System.Collections.Generic.List[string]]::new(); while ($l -ne '') { $b.Add($l); $l=[Console]::In.ReadLine(); if ($null -eq $l) { break } }; if ($b.Count -eq 0) { continue }; Invoke-Expression ($b -join "`n") | Out-String -Stream }"#;
+const REPL_SCRIPT: &str = r#"
+[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$PSStyle.OutputRendering = 'PlainText'
+while ($null -ne ($__makiLine = [Console]::In.ReadLine())) {
+    $__makiRequest = ConvertFrom-Json -InputObject $__makiLine -AsHashtable
+    $global:LASTEXITCODE = $null
+    $__makiExitCode = 0
+    try {
+        . ([scriptblock]::Create($__makiRequest.command)) *>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -notlike 'NativeCommandError*') {
+                $__makiExitCode = 1
+            }
+            $_
+        } | Out-String -Stream
+        if (-not $?) { $__makiExitCode = 1 }
+        if ($null -ne $global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0) {
+            $__makiExitCode = $global:LASTEXITCODE
+        }
+    } catch {
+        $__makiExitCode = 1
+        $_ | Out-String -Stream
+    }
+    [Console]::Out.WriteLine("`n__MAKI_PWSH_EXIT__ {0} {1}", $__makiRequest.seq, $__makiExitCode)
+}
+"#;
 const PWSH_ARGS: [&str; 4] = ["-NoProfile", "-NonInteractive", "-Command", REPL_SCRIPT];
 const MARKER: &str = "__MAKI_PWSH_EXIT__";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -33,14 +58,42 @@ const PWSH_NOT_FOUND: &str = "PowerShell (pwsh) is not installed or not on PATH"
 const SESSION_REQUIRED: &str = "session is required";
 const COMMAND_REQUIRED: &str = "command is required";
 const SESSION_DEAD: &str = "pwsh session died between calls";
+const SESSION_WAIT_TIMEOUT: &str = "pwsh timed out waiting for another command in the session";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[derive(Serialize)]
+struct PwshRequest<'a> {
+    command: &'a str,
+    seq: u32,
+}
 
 struct PwshSession {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<AsyncMutex<ChildStdin>>,
     lines: Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>,
     pid: u32,
     started: Instant,
     seq: AtomicU32,
     reaped: Arc<AtomicBool>,
+}
+
+struct PwshCall<'a> {
+    lua: &'a Lua,
+    session: &'a str,
+    pwsh: &'a Arc<PwshSession>,
+    completed: bool,
+}
+
+impl Drop for PwshCall<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            with_pwsh(self.lua, |store| {
+                if store.is_current(self.session, self.pwsh) {
+                    store.kill(self.session);
+                }
+            });
+        }
+    }
 }
 
 #[derive(Default)]
@@ -61,6 +114,11 @@ impl PwshStore {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         strip_provider_keys(&mut command);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -79,7 +137,7 @@ impl PwshStore {
             Err(e) => return Err(e.to_string()),
         };
         let pid = child.id();
-        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("piped stdin")));
+        let stdin = Arc::new(AsyncMutex::new(child.stdin.take().expect("piped stdin")));
         let (tx, rx) = mpsc::unbounded_channel();
 
         macro_rules! spawn_reader {
@@ -136,6 +194,12 @@ impl PwshStore {
         Ok(pwsh)
     }
 
+    fn is_current(&self, session: &str, pwsh: &Arc<PwshSession>) -> bool {
+        self.sessions
+            .get(session)
+            .is_some_and(|current| Arc::ptr_eq(current, pwsh))
+    }
+
     fn kill(&mut self, session: &str) {
         if let Some(pwsh) = self.sessions.remove(session) {
             kill_pwsh(&pwsh);
@@ -150,6 +214,14 @@ impl PwshStore {
         self.sessions
             .get(session)
             .map(|s| (s.pid, s.started.elapsed().as_secs()))
+    }
+}
+
+impl Drop for PwshStore {
+    fn drop(&mut self) {
+        for session in self.sessions.values() {
+            kill_pwsh(session);
+        }
     }
 }
 
@@ -176,7 +248,7 @@ fn kill_pwsh(pwsh: &PwshSession) {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .status();
     }
 }
 
@@ -205,16 +277,18 @@ fn parse_marker(line: &str, seq: u32) -> Option<Option<i32>> {
 ///
 /// The process is spawned on first use and kept alive for the session, so
 /// variables, functions, and the working directory carry over between calls.
-/// A timeout kills the process: the next call starts a fresh one with no
-/// leftover state.
+/// Calls sharing a session run one at a time. The timeout includes time spent
+/// waiting for an earlier call. A timeout while waiting leaves the running
+/// command alone. A running command that times out is killed: the next call
+/// starts a fresh process with no leftover state.
 ///
 /// @param opts table Options. Fields:
 ///   - session (string): session id owning this shell. Required.
 ///   - command (string): PowerShell command to run. Required.
-///   - timeout (integer): seconds to wait for the reply. Default 120.
+///   - timeout (integer): seconds to wait, including queued time. Default 120.
 /// @return (table, string?) Pair: `{ output, exit_code, timed_out, dead }` on
-///   success, `(nil, err)` on failure. `exit_code` is nil when PowerShell
-///   tracked no native command exit code.
+///   success, `(nil, err)` on failure. `exit_code` is the native exit code,
+///   or 1 for a PowerShell error and 0 for success.
 #[lua_fn(guard = Run, name = "exec")]
 async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     let session: Option<String> = opts.opt("session")?;
@@ -227,31 +301,46 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     };
     let timeout: u64 = opts.opt::<u64>("timeout")?.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-    let prepared = with_pwsh(&lua, |store| {
-        store.ensure(&session).ok().map(|pwsh| {
-            let seq = pwsh.seq.fetch_add(1, Ordering::Relaxed);
-            (pwsh.stdin.clone(), pwsh.lines.clone(), seq)
-        })
-    });
-    let Some((stdin, rx, seq)) = prepared else {
-        return Ok((None, Some(PWSH_NOT_FOUND.to_owned())));
+    let deadline = TokioInstant::now() + Duration::from_secs(timeout);
+    let prepared = timeout_at(deadline, async {
+        loop {
+            let pwsh = with_pwsh(&lua, |store| store.ensure(&session))?;
+            let stdin = Arc::clone(&pwsh.stdin).lock_owned().await;
+            // A reset or timeout may replace the process while this call waits.
+            if with_pwsh(&lua, |store| store.is_current(&session, &pwsh)) {
+                return Ok((pwsh, stdin));
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(SESSION_WAIT_TIMEOUT.to_owned()));
+    let (pwsh, mut stdin) = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => return Ok((None, Some(err))),
     };
-
-    let sentinel = format!("Write-Output \"{MARKER} {seq} $LASTEXITCODE\"");
-    let script = format!("{command}\n\n{sentinel}\n\n");
-    let write = {
-        let mut guard = stdin.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .write_all(script.as_bytes())
-            .and_then(|()| guard.flush())
+    let mut call = PwshCall {
+        lua: &lua,
+        session: &session,
+        pwsh: &pwsh,
+        completed: false,
     };
+    let seq = pwsh.seq.fetch_add(1, Ordering::Relaxed);
+    let rx = &pwsh.lines;
+    let mut script = serde_json::to_string(&PwshRequest {
+        command: &command,
+        seq,
+    })
+    .map_err(mlua::Error::external)?;
+    script.push('\n');
+    let write = stdin
+        .write_all(script.as_bytes())
+        .and_then(|()| stdin.flush());
     if write.is_err() {
-        with_pwsh(&lua, |store| store.kill(&session));
         return Ok((None, Some(SESSION_DEAD.to_owned())));
     }
 
     let mut rx = rx.lock().await;
-    let deadline = tokio::time::sleep(Duration::from_secs(timeout));
+    let deadline = sleep_until(deadline);
     tokio::pin!(deadline);
 
     let mut output = String::new();
@@ -276,13 +365,17 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
         match tick {
             Tick::Line(line) => {
                 if let Some(code) = parse_marker(&line, seq) {
+                    call.completed = true;
                     exit_code = code;
+                    // Strip the line ending and the marker's separating newline.
+                    output.pop();
+                    if output.ends_with('\n') {
+                        output.pop();
+                    }
                     break;
                 }
-                if !output.is_empty() {
-                    output.push('\n');
-                }
                 output.push_str(&line);
+                output.push('\n');
             }
             Tick::Closed => {
                 dead = true;
@@ -293,10 +386,6 @@ async fn pwsh_exec(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
                 break;
             }
         }
-    }
-
-    if timed_out || dead {
-        with_pwsh(&lua, |store| store.kill(&session));
     }
 
     let tbl = lua.create_table()?;
@@ -359,10 +448,24 @@ lua_table! {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+    use super::{SESSION_WAIT_TIMEOUT, parse_marker, pwsh_exec, with_pwsh};
+    use futures::FutureExt;
+    use mlua::{Lua, Table};
     use test_case::test_case;
 
     const SEQ: u32 = 3;
+    const SESSION: &str = "test-session";
+    const PROBE_VALUE: &str = "42";
+    const TIMEOUT_SECS: u64 = 10;
+
+    fn command_opts(lua: &Lua, command: &str, timeout: u64) -> Table {
+        let opts = lua.create_table().unwrap();
+        opts.set("session", SESSION).unwrap();
+        opts.set("command", command).unwrap();
+        opts.set("timeout", timeout).unwrap();
+        opts
+    }
 
     #[test_case("__MAKI_PWSH_EXIT__ 3 0" => Some(Some(0)); "exit_zero")]
     #[test_case("__MAKI_PWSH_EXIT__ 3 1" => Some(Some(1)); "exit_one")]
@@ -373,24 +476,69 @@ mod tests {
         parse_marker(line, SEQ)
     }
 
-    #[test]
-    fn store_kill_is_idempotent() {
-        let mut store = PwshStore::default();
-        store.kill("missing");
-        assert!(store.sessions.is_empty());
+    #[test_case(false; "cancelled_command")]
+    #[test_case(true; "reset_command")]
+    fn queued_call_recovers_after_interruption(reset: bool) {
+        crate::test_support::runtime().block_on(async {
+            let lua = Lua::new();
+            let mut active = Box::pin(pwsh_exec(
+                lua.clone(),
+                command_opts(&lua, "[Console]::In.ReadLine()", TIMEOUT_SECS),
+            ));
+            assert!(active.as_mut().now_or_never().is_none());
+            let mut queued = Box::pin(pwsh_exec(
+                lua.clone(),
+                command_opts(&lua, "$probe = 42; $probe", TIMEOUT_SECS),
+            ));
+            assert!(queued.as_mut().now_or_never().is_none());
+            if reset {
+                with_pwsh(&lua, |store| {
+                    store.kill(SESSION);
+                    store.ensure(SESSION).unwrap();
+                });
+            }
+            drop(active);
+            let (output, error) = queued.await.unwrap();
+            assert!(error.is_none(), "{error:?}");
+            let output = output.unwrap();
+            assert_eq!(output.get::<String>("output").unwrap(), PROBE_VALUE);
+            assert_eq!(output.get::<i32>("exit_code").unwrap(), 0);
+            let (output, error) =
+                pwsh_exec(lua.clone(), command_opts(&lua, "$probe", TIMEOUT_SECS))
+                    .await
+                    .unwrap();
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(
+                output.unwrap().get::<String>("output").unwrap(),
+                PROBE_VALUE
+            );
+        });
     }
 
-    #[test]
-    fn ensure_spawns_a_live_session() {
-        let mut store = PwshStore::default();
-        let Ok(pwsh) = store.ensure("test-session") else {
-            return;
-        };
-        assert_eq!(
-            store.status("test-session").map(|(pid, _)| pid),
-            Some(pwsh.pid)
-        );
-        store.kill("test-session");
-        assert!(store.status("test-session").is_none());
+    #[test_case(0; "expired_queue_deadline")]
+    fn queued_timeout_preserves_the_running_session(timeout: u64) {
+        crate::test_support::runtime().block_on(async {
+            let lua = Lua::new();
+            pwsh_exec(lua.clone(), command_opts(&lua, "$probe = 42", TIMEOUT_SECS))
+                .await
+                .unwrap();
+            let pwsh = with_pwsh(&lua, |store| store.ensure(SESSION)).unwrap();
+            let held = Arc::clone(&pwsh.stdin).lock_owned().await;
+            let (output, error) = pwsh_exec(lua.clone(), command_opts(&lua, "$probe = 0", timeout))
+                .await
+                .unwrap();
+            assert!(output.is_none());
+            assert_eq!(error.as_deref(), Some(SESSION_WAIT_TIMEOUT));
+            drop(held);
+            let (output, error) =
+                pwsh_exec(lua.clone(), command_opts(&lua, "$probe", TIMEOUT_SECS))
+                    .await
+                    .unwrap();
+            assert!(error.is_none(), "{error:?}");
+            assert_eq!(
+                output.unwrap().get::<String>("output").unwrap(),
+                PROBE_VALUE
+            );
+        });
     }
 }

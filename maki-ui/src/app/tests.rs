@@ -9240,6 +9240,80 @@ fn tab_composed_in_init_lua_accepts_a_completion_or_falls_back(
     assert_ne!(app.state.mode, mode, "the built-in Tab toggled the mode");
 }
 
+const TAB_SKILLS: &str = r#"
+require("maki.skills").publish(function()
+  return { { name = "complete-code" }, { name = "complete-disabled", enabled = false } }
+end)
+"#;
+const TAB_FILE: &str = "completed.txt";
+
+#[test_case("./comp", "./completed.txt" ; "relative_path")]
+#[test_case(".\\comp", "./completed.txt" ; "windows_path")]
+#[test_case("/skill:complete", "/skill:complete-code" ; "skill_name")]
+fn tab_completes_the_token_while_typing(text: &str, completed: &str) {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join(TAB_FILE), "").unwrap();
+    let mut host = new_host();
+    host.load_builtins(&PluginsConfig {
+        enabled: true,
+        names: vec!["tabcomplete".into()],
+        ..PluginsConfig::default()
+    })
+    .unwrap();
+    host.load_source("skills", TAB_SKILLS).unwrap();
+    let (mut app, ui) = hosted_app(&host);
+    type_keys(&mut app, text);
+    let mode = app.state.mode;
+
+    app.update(Msg::Key(key(KeyCode::Tab)));
+    assert_eq!(app.state.mode, mode);
+    let mut _popup = None;
+    loop {
+        match ui.recv_timeout(HANDLER_TIMEOUT).expect(POPUP_NEVER_SHOWN) {
+            UiAction::Input {
+                req: InputRequest::Read,
+                reply_tx,
+            } => {
+                let _ = reply_tx.send(Ok(app.input_snapshot()));
+            }
+            UiAction::Session { reply_tx, .. } => {
+                let _ = reply_tx.send(Ok(serde_json::json!({ "cwd": tmp.path() })));
+            }
+            UiAction::KeybindDone(ticket) => {
+                app.keybind_done(ticket);
+            }
+            UiAction::OpenWin {
+                event_tx, cmd_rx, ..
+            } => {
+                while !matches!(
+                    cmd_rx
+                        .recv_timeout(HANDLER_TIMEOUT)
+                        .expect(POPUP_NEVER_SHOWN),
+                    WinCommand::SetVisible(true)
+                ) {}
+                event_tx
+                    .send(WinEvent::Key {
+                        key: plugin_key(KeyCode::Tab, KeyModifiers::NONE),
+                    })
+                    .unwrap();
+                _popup = Some((event_tx, cmd_rx));
+            }
+            UiAction::Input {
+                req: InputRequest::Edit(edit),
+                reply_tx,
+            } => {
+                let reply = app.apply_input_edit(edit, TEST_AREA);
+                assert!(reply.is_ok(), "{reply:?}");
+                let _ = reply_tx.send(reply);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(app.input_box.buffer.value(), completed);
+    assert_eq!(app.state.mode, mode);
+}
+
 /// A vim plugin's `u`. In normal mode the key itself would never edit, so
 /// only the action can, and its answer travels back to the handler.
 const UNDO_PLUGIN: &str = r#"

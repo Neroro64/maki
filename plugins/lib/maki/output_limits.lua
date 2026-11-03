@@ -48,6 +48,25 @@ function M.line_bytes(opts, ctx)
   return ctx:output_mode() == "full" and 0 or opts.max_line_bytes
 end
 
+local function split_lines(text)
+  local lines, pos = {}, 1
+  while true do
+    local newline = text:find("\n", pos, true)
+    if not newline then
+      lines[#lines + 1] = text:sub(pos)
+      return lines
+    end
+    lines[#lines + 1] = text:sub(pos, newline - 1)
+    pos = newline + 1
+  end
+end
+
+function M.tail(text, count)
+  local lines = split_lines(text)
+  return table.concat(lines, "\n", math.max(1, #lines - count + 1))
+end
+
+
 local function utf8_prefix(line, max_bytes)
   local cut = max_bytes
   while cut > 0 and line:find(UTF8_CONTINUATION, cut + 1) do

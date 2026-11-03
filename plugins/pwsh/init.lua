@@ -36,25 +36,28 @@ end
 
 local description = [[Execute a PowerShell command in a persistent session.
 
-The PowerShell process stays alive for the whole agent session: variables, functions, and the working directory carry over between calls. Use it for PowerShell-specific work (cmdlets, $variables, object pipelines) and on Windows; use bash for everything else.
+The PowerShell process stays alive for the whole agent session: variables, functions, and the working directory carry over between calls. Use it on Windows and for PowerShell-specific work (cmdlets, $variables, object pipelines). Use bash for POSIX shell commands.
 
 - Read, list, search, and edit files with dedicated tools, not PowerShell cmdlets.
 - State persists: set a variable in one call, read it in the next.
-- A timed-out call kills the process; the next call starts fresh with no state.
+- Concurrent calls in the same session run one at a time. Their timeout includes queued time.
+- Multiline commands and here-strings are supported, including blank lines.
+- PowerShell errors and nonzero native exit codes are reported as failures. Ordinary errors leave the session usable.
+- A running command that times out kills the process. The next call starts fresh with no state. A timeout while queued leaves the running command alone.
 - Output sent to the model is truncated beyond 2000 lines or 50KB.
 - Provide a short `description` (3-5 words).
-- Use the `tail` param, not `| tail`: piping hides live output.]]
+- Use the `tail` param to return the last N output lines without changing the command.]]
 
 maki.api.register_prompt_hint({
   slot = "tool_usage",
-  content = "- Use pwsh only for PowerShell-specific work; bash covers the rest. pwsh keeps one process alive per session, so variables and cwd persist across calls.",
+  content = "- Use pwsh on Windows and for PowerShell-specific work; use bash for POSIX shell commands. pwsh keeps one process alive per session, so variables and cwd persist across calls.",
 })
 
 local opts = maki.api.register_options(output_limits.extend({
   timeout_secs = {
     default = 120,
     min = 5,
-    desc = "Kill the persistent session after this many seconds. A call's `timeout` param overrides it.",
+    desc = "Maximum seconds per call, including queued time. A running command that times out kills the session. A call's `timeout` param overrides it.",
   },
 }))
 
@@ -66,7 +69,7 @@ maki.api.register_tool({
     type = "object",
     properties = {
       command = { type = "string", description = "The PowerShell command to execute", required = true },
-      timeout = { type = "integer", description = "Timeout in seconds (default 120)" },
+      timeout = { type = "integer", description = "Timeout in seconds, including queued time (default 120)" },
       tail = { type = "integer", description = "Return only the last N lines" },
       reset = { type = "boolean", description = "Kill the persistent session first, discarding all state" },
       description = { type = "string", description = "Short description (3-5 words) of what the command does" },
@@ -161,6 +164,12 @@ maki.api.register_tool({
     end
 
     local output = r.output or ""
+    view:clear()
+    if output ~= "" then
+      view:append_text(output)
+    elseif not r.timed_out and not r.dead then
+      view:append({ { "No output", "dim" } })
+    end
     if input.tail then
       output = output_limits.tail(output, input.tail)
     end
@@ -181,9 +190,10 @@ maki.api.register_tool({
       llm_output = output == "" and "Exit code: 0" or output
     end
 
-    if output == "" and not r.timed_out and not r.dead then
-      view:clear()
-      view:append({ { "No output", "dim" } })
+    if r.timed_out then
+      view:append({ { "Timed out; the persistent session was killed", "dim" } })
+    elseif r.dead then
+      view:append({ { "The persistent session died", "dim" } })
     end
     if (r.exit_code or 0) ~= 0 then
       view:append({ { "Exit code: " .. r.exit_code, "dim" } })

@@ -5882,8 +5882,10 @@ Run one command in the session's persistent PowerShell process.
 
 The process is spawned on first use and kept alive for the session, so
 variables, functions, and the working directory carry over between calls.
-A timeout kills the process: the next call starts a fresh one with no
-leftover state.
+Calls sharing a session run one at a time. The timeout includes time spent
+waiting for an earlier call. A timeout while waiting leaves the running
+command alone. A running command that times out is killed: the next call
+starts a fresh process with no leftover state.
 
 Requires the `run` [plugin permission](#plugin-permissions).
 
@@ -5892,11 +5894,11 @@ Requires the `run` [plugin permission](#plugin-permissions).
 - `{opts}` (`table`) Options. Fields:
   - `session` (`string`) session id owning this shell. Required.
   - `command` (`string`) PowerShell command to run. Required.
-  - `timeout` (`integer`) seconds to wait for the reply. Default 120.
+  - `timeout` (`integer`) seconds to wait, including queued time. Default 120.
 
 **Returns:** (`table`, `string?`) Pair: `{ output, exit_code, timed_out, dead }` on
-  success, `(nil, err)` on failure. `exit_code` is nil when PowerShell
-  tracked no native command exit code.
+  success, `(nil, err)` on failure. `exit_code` is the native exit code,
+  or 1 for a PowerShell error and 0 for success.
 
 ---
 
@@ -10433,6 +10435,7 @@ function M.resolve(opts, ctx)
 
 --- opts.max_line_bytes, or 0 (no limit) in full mode.
 function M.line_bytes(opts, ctx)
+function M.tail(text, count)
 
 --- Cuts streamed lines the way `cut_middle` cuts a whole text, holding no
 --- more than the limits while they arrive. nil limits fall back to the

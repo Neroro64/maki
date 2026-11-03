@@ -30,6 +30,7 @@ Type `/` in the input box to open the command palette.
 | `/yolo` | Toggle YOLO mode (skip all permission prompts) |
 | `/fast` | Toggle fast mode (Anthropic Opus or Codex subscription models) |
 | `/workflow` | Toggle workflow mode (task callable inside code_execution) |
+| `/orchestrate` | Toggle ledger-based multi-agent mode, or `/orchestrate <objective>` to start |
 | `/exit` | Exit the application |
 | `/reload` | Reload plugins and config (! stops background tasks) |
 | `/trust` | Trust this folder: load its project config and save project answers |
@@ -148,7 +149,7 @@ Aliasing adds a name, so both stay in the palette. Any command works as a target
 - Needs `fs_read`, `fs_write`, `net`, `run`, `session_write`: `/design`, `/design-note`, `/design-view`.
 - Needs `fs_read`, `fs_write`, `agent`, `session_read`, `session_write`: `/reflect`.
 - Needs `run`, `agent`, `session_write`: `/review`.
-- Needs `agent`: `/btw`.
+- Needs `agent`: `/btw`, `/orchestrate`.
 - Needs `agent`, `session_write`: `/compact`, custom commands, MCP prompts.
 - Needs `session_read`: `/copy`.
 - Needs `session_write`: `/new`, `/fork`, `/checkpoint`.

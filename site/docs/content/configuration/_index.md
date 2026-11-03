@@ -383,7 +383,7 @@ maki.setup({
 |-------|------|---------|-----|-------------|
 | `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
 | `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
-| `timeout_secs` | integer | `120` | 5 | Kill the persistent session after this many seconds. A call's `timeout` param overrides it. |
+| `timeout_secs` | integer | `120` | 5 | Maximum seconds per call, including queued time. A running command that times out kills the session. A call's `timeout` param overrides it. |
 
 ### `plugins.read`
 
