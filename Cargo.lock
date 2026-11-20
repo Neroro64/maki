@@ -3931,6 +3931,7 @@ version = "0.7.3"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.23.1",
  "bitflags 2.13.2",
  "futures",
  "grep-regex",

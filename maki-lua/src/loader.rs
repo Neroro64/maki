@@ -3558,6 +3558,14 @@ mod bundled_manifests {
                                 .or_insert_with(|| AGENT_SESSION.to_owned());
                         }
                     }
+                    // The ctx-less overload (`maki.agent.session({ ... })`)
+                    // spawns a standalone session outside a tool call and
+                    // enforces `Permission::Agent`.
+                    if source.contains("maki.agent.session({") {
+                        needed
+                            .entry(Permission::Agent)
+                            .or_insert_with(|| AGENT_SESSION.to_owned());
+                    }
                 }
             }
 

@@ -510,7 +510,7 @@ impl App {
     /// index is wiped every turn, and a plugin task would come back as a
     /// second chat at the main chat's next turn end. A plugin event naming a
     /// subagent's chat adopts it, see [`Self::adopt_subagent`].
-    fn resolve_or_create_chat(
+    pub(super) fn resolve_or_create_chat(
         &mut self,
         subagent: &SubagentInfo,
         plugin: &Option<Arc<str>>,

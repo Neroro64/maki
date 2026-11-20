@@ -162,35 +162,47 @@ impl App {
     /// without an inbox shows no input box, see `App::chat_accepts_input`.
     /// A session can end before its chat hears about it, so a refused message
     /// flashes the reason instead of vanishing.
-    pub(super) fn queue_for_subagent(&mut self, msg: QueuedMessage) -> Vec<Action> {
+    pub(super) fn try_queue_for_subagent(
+        &mut self,
+        msg: QueuedMessage,
+    ) -> Result<Vec<Action>, String> {
         let chat = &self.chats[self.active_chat];
         let Some(control) = chat.control.as_ref() else {
-            return vec![];
+            return Err(super::INPUT_NOT_LIVE_ERR.to_owned());
         };
         let (thinking, fast) = chat
             .opts
             .map_or((self.state.thinking, self.state.fast), |o| {
                 (o.thinking, o.fast)
             });
-        let sent = control.send(
-            AgentInput {
-                message: msg.text,
-                mode: AgentMode::Build,
-                images: msg.images,
-                preamble: Vec::new(),
-                earlier: Vec::new(),
-                thinking,
-                fast,
-                workflow: false,
-                prompt: None,
-                source: InputSource::Tui,
-            },
-            Delivery::NextTurn,
-        );
-        if let Err(reason) = sent {
-            self.flash(format!("{SUBAGENT_REFUSED_PREFIX}{reason}"));
+        control
+            .send(
+                AgentInput {
+                    message: msg.text,
+                    mode: AgentMode::Build,
+                    images: msg.images,
+                    preamble: Vec::new(),
+                    earlier: Vec::new(),
+                    thinking,
+                    fast,
+                    workflow: false,
+                    prompt: None,
+                    source: InputSource::Tui,
+                },
+                Delivery::NextTurn,
+            )
+            .map_err(|reason| format!("{SUBAGENT_REFUSED_PREFIX}{reason}"))?;
+        Ok(vec![])
+    }
+
+    pub(super) fn queue_for_subagent(&mut self, msg: QueuedMessage) -> Vec<Action> {
+        match self.try_queue_for_subagent(msg) {
+            Ok(actions) => actions,
+            Err(error) => {
+                self.flash(error);
+                vec![]
+            }
         }
-        vec![]
     }
 
     /// The panel above the input shows the queue of the chat in front: the

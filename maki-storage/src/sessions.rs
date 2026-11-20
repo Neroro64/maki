@@ -624,12 +624,7 @@ pub fn session_files(storage: &StateDir) -> Result<Vec<SessionFile>, StorageErro
         let Some(path) = locate_session_file(&dir, id) else {
             continue;
         };
-        let header = if is_jsonl(&path) {
-            scan_jsonl_header(&path)
-        } else {
-            scan_legacy_header(&path)
-        };
-        let Some(header) = header.filter(|header| header.id == id) else {
+        let Some(header) = scan_jsonl_header(&path).filter(|header| header.id == id) else {
             continue;
         };
         let Ok(metadata) = fs::metadata(&path) else {
@@ -945,7 +940,7 @@ enum LogRecord<M, U, T> {
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         usage_by_model: HashMap<String, StoredTokenUsage>,
         #[serde(flatten)]
-        meta: SessionMeta,
+        meta: Box<SessionMeta>,
     },
 }
 
@@ -1497,7 +1492,7 @@ where
             updated_at: session.updated_at,
             subagents: session.subagents.clone(),
             usage_by_model: session.usage_by_model.clone(),
-            meta: session.meta.clone(),
+            meta: Box::new(session.meta.clone()),
         },
     )?;
     Ok(buf)
@@ -1675,7 +1670,7 @@ where
                 updated_at = m_updated;
                 subagents = m_subagents;
                 usage_by_model = m_usage_by_model;
-                meta = m_meta;
+                meta = *m_meta;
             }
         }
     }

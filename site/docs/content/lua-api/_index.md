@@ -127,8 +127,8 @@ The rules:
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
 | [`maki.async.Task`](#maki-async-Task) | Handle returned by `maki.async.spawn`. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
-| [`maki.browser`](#maki-browser) | Chrome over CDP: `maki.browser.open` launches a browser (headless by |
-| [`maki.computer`](#maki-computer) | Desktop control: `maki.computer.screenshot` captures the screen, |
+| [`maki.browser`](#maki-browser) | Chrome over CDP: `maki.browser.open` launches a browser (headless by default) and navigates, `snapshot` indexes interactive elements for `click`/`type`, `press`/`scroll`/`eval` drive the page, `screenshot` captures it, `close` kills the process. |
+| [`maki.computer`](#maki-computer) | Desktop control: `maki.computer.screenshot` captures the screen, `mouse`/`keyboard` drive pointer and keys, `position`/`display` report state, `clipboard` reads and writes the system clipboard. |
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job control. |
 | [`maki.fs`](#maki-fs) | File-system utilities, modelled after `vim.fs` and `vim.uv`. |
@@ -147,7 +147,7 @@ The rules:
 | [`maki.net.Conn`](#maki-net-Conn) | A TCP or Unix socket connection, from `maki.net.connect`, `maki.net.connect_unix` or `Listener:accept`. |
 | [`maki.net.Listener`](#maki-net-Listener) | A Unix socket listener opened by `maki.net.listen_unix`. |
 | [`maki.provider`](#maki-provider) | Providers implemented in Lua. |
-| [`maki.pwsh`](#maki-pwsh) | Persistent PowerShell sessions: `maki.pwsh.exec` runs a command in a |
+| [`maki.pwsh`](#maki-pwsh) | Persistent PowerShell sessions: `maki.pwsh.exec` runs a command in a process that stays alive across tool calls, so variables and cwd persist. |
 | [`maki.provider.auth`](#maki-provider-auth) | Credential storage for the providers this plugin registered. |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.Timer`](#maki-Timer) | Handle returned by `maki.defer_fn`. |
@@ -2628,12 +2628,8 @@ Requires the `net` [plugin permission](#plugin-permissions).
 **Parameters:**
 
 - `{opts}` (`table`) Fields: session (string, required), width and height
-
   (integer CSS pixels, required, 1..=16384), mobile (boolean, default false),
-
-
   timeout (integer seconds, default 30).
-
 
 **Returns:** (`boolean?`, `string?`) true, or nil and an error.
 

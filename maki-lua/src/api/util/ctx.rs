@@ -580,7 +580,8 @@ impl UserData for LuaCtx {
             };
             let access = Arc::clone(&agent.file_access);
             drop(this);
-            let _ = spawn_blocking(move || access.record_read(&FileKey::new(Path::new(&path)))).await;
+            let _ =
+                spawn_blocking(move || access.record_read(&FileKey::new(Path::new(&path)))).await;
             Ok((Some(true), None))
         });
 

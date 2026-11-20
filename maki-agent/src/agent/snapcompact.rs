@@ -667,14 +667,15 @@ pub fn history(
     let summary_len = new_history.len();
     new_history.extend_from_slice(&history.as_slice()[summarized..]);
     history.restart(new_history);
+    let duration = compact_start.elapsed();
     info!(
-        duration_ms = compact_start.elapsed().as_millis() as u64,
+        duration_ms = duration.as_millis() as u64,
         "snapcompact completed"
     );
 
     Ok(Compacted {
-        usage: TokenUsage::default(),
         summary,
+        duration,
         carried: history.len() - summary_len,
     })
 }

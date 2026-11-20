@@ -165,12 +165,14 @@ impl LspManager {
         if input.command.first().is_none_or(String::is_empty) {
             return Err("LSP server command must not be empty".into());
         }
-        let root = tokio::fs::canonicalize(&input.root).await.map_err(|error| {
-            format!(
-                "Cannot resolve LSP workspace {}: {error}",
-                input.root.display()
-            )
-        })?;
+        let root = tokio::fs::canonicalize(&input.root)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Cannot resolve LSP workspace {}: {error}",
+                    input.root.display()
+                )
+            })?;
         if !tokio::fs::metadata(&root)
             .await
             .map_err(|error| format!("Cannot inspect LSP workspace {}: {error}", root.display()))?
@@ -422,12 +424,14 @@ impl Client {
         self.change(uri, &patch.text).await?;
         let candidate = self.diagnostics(uri, timeout).await?;
         let diagnostics = filter_diagnostics(&baseline, candidate, uri, patch)?;
-        let disk_source = tokio::fs::read_to_string(file_path).await.map_err(|error| {
-            format!(
-                "Cannot read LSP source for restoration {}: {error}",
-                file_path.display()
-            )
-        })?;
+        let disk_source = tokio::fs::read_to_string(file_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Cannot read LSP source for restoration {}: {error}",
+                    file_path.display()
+                )
+            })?;
         self.change(uri, &disk_source).await?;
         self.diagnostics(uri, timeout).await?;
         self.notify(
@@ -1018,8 +1022,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use std::io::Cursor;
     use serde_json::{Value, json};
+    use std::io::Cursor;
     use test_case::test_case;
     use url::Url;
 
@@ -1117,7 +1121,9 @@ mod tests {
     #[test_case(b"Content-Length: 1\r\n".as_slice(), "LSP server unavailable while reading header:"; "truncated_header")]
     #[tokio::test]
     async fn incomplete_protocol_messages_are_errors(bytes: &[u8], prefix: &str) {
-        let error = read_frame(&mut Cursor::new(bytes)).await.expect_err("invalid frame");
+        let error = read_frame(&mut Cursor::new(bytes))
+            .await
+            .expect_err("invalid frame");
         assert!(error.starts_with(prefix), "{error}");
     }
 

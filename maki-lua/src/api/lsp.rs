@@ -174,11 +174,14 @@ async fn speculate(lua: Lua, opts: Table) -> LuaResult<Pair<Table>> {
     }
     let timeout =
         Duration::from_millis(timeout.map_or(DEFAULT_TIMEOUT_MS, |timeout| timeout as u64));
-    let command = try_pair!(parse_command(opts.get("command")?)?);
+    let command = try_pair!(parse_command(opts.get::<Value>("command")?)?);
     let language_id = opts.opt::<String>("language_id")?;
     let root = opts.opt::<String>("root")?;
-    let (file_path, root) =
-        try_pair!(tokio::task::spawn_blocking(move || resolve_paths(file_path, root)).await.unwrap());
+    let (file_path, root) = try_pair!(
+        tokio::task::spawn_blocking(move || resolve_paths(file_path, root))
+            .await
+            .unwrap()
+    );
     let language_id = match language_id {
         Some(language_id) if !language_id.trim().is_empty() => language_id,
         Some(_) => return Ok(err_pair("language_id must not be empty")),

@@ -376,7 +376,10 @@ mod tests {
     fn rewind_mode_selects_the_same_prompt(code: KeyCode, chat_only: bool) {
         let mut picker = RewindPicker::new();
         picker
-            .open(&[user_msg("first"), assistant_msg(), user_msg("second")])
+            .open(
+                &[user_msg("first"), assistant_msg(), user_msg("second")],
+                &[],
+            )
             .unwrap();
         let action = picker.handle_key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE));
         let entry = match (action, chat_only) {

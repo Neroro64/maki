@@ -10,8 +10,7 @@ use maki_storage::paths;
 use super::{
     AGENT_BUSY_MSG, App, BTW_USAGE_MSG, COMMAND_DEPTH_MSG, EXIT_COMMAND, FAST_OFF_MSG, FAST_ON_MSG,
     FAST_PENDING_MSG, MAX_COMMAND_DEPTH, MCP_AUTH_USAGE, QueuedMessage, UNKNOWN_COMMAND_PREFIX,
-    WORKFLOW_OFF_MSG,
-    WORKFLOW_ON_MSG, YOLO_OFF_MSG, YOLO_ON_MSG,
+    WORKFLOW_OFF_MSG, WORKFLOW_ON_MSG, YOLO_OFF_MSG, YOLO_ON_MSG,
 };
 use crate::components::command::ParsedCommand;
 use crate::components::{Action, ExitRequest, Status};

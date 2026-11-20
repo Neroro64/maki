@@ -949,7 +949,7 @@ async fn run_native_tool(
         || entry
             .tool
             .reach()
-            .is_some_and(|reach| reach.permission == Permission::FsWrite);
+            .is_some_and(|reach| reach.permission() == Some(Permission::FsWrite));
     let _mutation_guard = if snapshots {
         match ctx.file_access.mutation_guard().await {
             Ok(guard) => Some(guard),
@@ -968,13 +968,13 @@ async fn run_native_tool(
     // both pass before either writes.
     let _guard = match &mutated {
         Some(key) => {
-            let guard = ctx.file_access.acquire(key).await;
-            if ctx.cancel.is_cancelled() {
+            let (guard, waited) = ctx.file_access.acquire_checked(key).await;
+            if waited && ctx.cancel.is_cancelled() {
                 return done_error(ERROR_CANCELLED.to_owned());
             }
             if ctx.config.stale_read_check {
                 let check = match &entry.source {
-                    ToolSource::Lua { plugin } if plugin.as_ref() == "edit" => match name {
+                    ToolSource { plugin } if plugin.as_ref() == "edit" => match name {
                         "edit" | "multiedit" => {
                             ctx.file_access.check_before_targeted_edit(key, false)
                         }
@@ -994,7 +994,7 @@ async fn run_native_tool(
         None => None,
     };
 
-    if snapshots {
+    if snapshots && ctx.file_access.needs_snapshot() {
         let access = Arc::clone(&ctx.file_access);
         match spawn_blocking(move || access.prepare_snapshot()).await {
             Ok(Ok(())) => {}
@@ -1005,10 +1005,9 @@ async fn run_native_tool(
                 return done_error(format!("snapshot failed before mutation: {error}"));
             }
         }
-    }
-
-    if snapshots && ctx.cancel.is_cancelled() {
-        return done_error(ERROR_CANCELLED.to_owned());
+        if ctx.cancel.is_cancelled() {
+            return done_error(ERROR_CANCELLED.to_owned());
+        }
     }
 
     let result = invocation.execute(ctx).await;

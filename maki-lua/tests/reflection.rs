@@ -13,6 +13,7 @@ use maki_agent::tools::{CallOrigin, FileKey, ToolContext, ToolRegistry};
 use maki_agent::{AgentSeed, CancelToken, ModelSlot, SessionMailbox, ToolDoneEvent};
 use maki_config::PluginsConfig;
 use maki_lua::agent_autocmd::HostEvent;
+use maki_lua::test_support::{runtime, wait_next};
 use maki_lua::{PluginHost, UiAction};
 use maki_providers::test_support::{Canned, Requests, register_bundled, serve};
 use maki_providers::{
@@ -23,6 +24,7 @@ use maki_storage::id::MakiId;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use test_case::test_case;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 const PLUGIN: &str = "reflect";
 const COMMAND: &str = "/reflect";
@@ -45,6 +47,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     host: PluginHost,
+    ui: UnboundedReceiver<UiAction>,
     registry: Arc<ToolRegistry>,
     directory: TempDir,
     path: PathBuf,
@@ -109,7 +112,8 @@ impl Fixture {
             }),
             "127.0.0.1",
         );
-        model_registry::set_and_persist(format!("{PROVIDER}/{WEAK_ID}"), ModelTier::Weak, &state);
+        let overrides = model_registry::set(format!("{PROVIDER}/{WEAK_ID}"), ModelTier::Weak);
+        model_registry::persist_overrides(&state, &overrides);
         let session = MakiId::generate();
         let mailbox = SessionMailbox::register(session);
         let seed = mailbox.publish_seed(stub_seed(session));
@@ -128,8 +132,10 @@ impl Fixture {
         });
         host.event_handle()
             .install_session_snapshot(Box::new(move |_| Ok(snapshot.clone())));
+        let ui = host.take_ui_action_rx().unwrap();
         Self {
             host,
+            ui,
             registry,
             directory,
             path,
@@ -186,6 +192,7 @@ impl Fixture {
                     ContentBlock::Thinking {
                         thinking: THINKING_SECRET.into(),
                         signature: None,
+                        reasoning_id: None,
                     },
                     ContentBlock::tool_use(
                         "bad",
@@ -251,16 +258,15 @@ impl Fixture {
         ]);
     }
 
-    fn reflect(&self, correction: &str) -> String {
+    fn reflect(&mut self, correction: &str) -> String {
         self.host.event_handle().run_command(
             Arc::from(PLUGIN),
             Arc::from(COMMAND),
             correction.to_owned(),
             0,
         );
-        let ui = self.host.ui_action_rx();
         loop {
-            match ui.recv_timeout(COMMAND_TIMEOUT).unwrap() {
+            match wait_next(&mut self.ui, COMMAND_TIMEOUT).unwrap() {
                 UiAction::Flash(message) => return message,
                 UiAction::PluginTaskOpened { session, info, .. } => {
                     assert_eq!(session, self.session);
@@ -294,11 +300,8 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        model_registry::unset_and_persist(
-            &format!("{PROVIDER}/{WEAK_ID}"),
-            ModelTier::Weak,
-            &self.state,
-        );
+        let overrides = model_registry::unset(&format!("{PROVIDER}/{WEAK_ID}"), ModelTier::Weak);
+        model_registry::persist_overrides(&self.state, &overrides);
     }
 }
 
@@ -322,7 +325,7 @@ fn proposal() -> Value {
 
 #[test]
 fn reflection_uses_configured_weak_model_and_enforces_saved_guard() {
-    let fixture = Fixture::new(&proposal().to_string());
+    let mut fixture = Fixture::new(&proposal().to_string());
     fixture.mistakes();
     let outcome = fixture.reflect("");
     assert!(outcome.starts_with(SAVED), "{outcome}");
@@ -361,7 +364,7 @@ fn reflection_uses_configured_weak_model_and_enforces_saved_guard() {
 #[test_case(r#"{"kind":"guard","rule":"Use std::path::Path when importing Path in Rust.","guard":{"kind":"regex","pattern":"missing::Path","file_pattern":"*.rs","failed_example":"use missing::Path;","fixed_example":"use std::path::Path;"}}"#; "invented_example")]
 #[test_case(r#"{"kind":"behavioral","rule":"Use std::path::Path when importing Path in Rust.","command":"rm source.rs"}"#; "executable_extra_key")]
 fn invalid_synthesis_never_persists_or_notifies(synthesis: &str) {
-    let fixture = Fixture::new(synthesis);
+    let mut fixture = Fixture::new(synthesis);
     fixture.mistakes();
     let outcome = fixture.reflect("");
     assert!(outcome.starts_with(FAILED), "{outcome}");
@@ -372,7 +375,7 @@ fn invalid_synthesis_never_persists_or_notifies(synthesis: &str) {
 
 #[test]
 fn provider_failure_never_saves_partial_synthesis() {
-    let fixture = Fixture::with_response(
+    let mut fixture = Fixture::with_response(
         r#"{"error":{"message":"reflection model unavailable"}}"#,
         400,
     );
@@ -387,7 +390,7 @@ fn provider_failure_never_saves_partial_synthesis() {
 fn historical_nonfinal_fix_cannot_be_saved_as_a_guard() {
     let mut synthesis = proposal();
     synthesis["guard"]["fixed_example"] = json!(INVALID_OLD);
-    let fixture = Fixture::new(&synthesis.to_string());
+    let mut fixture = Fixture::new(&synthesis.to_string());
     fixture.mistakes();
     let outcome = fixture.reflect("");
     assert!(outcome.starts_with(FAILED), "{outcome}");
@@ -398,7 +401,7 @@ fn historical_nonfinal_fix_cannot_be_saved_as_a_guard() {
 #[test_case(CORRECTION, ""; "correction_without_working_fix")]
 #[test_case("Explain this module", CORRECTION; "argument_without_working_fix")]
 fn no_error_evidence_skips_model_and_persistence(text: &str, correction: &str) {
-    let fixture = Fixture::new(&proposal().to_string());
+    let mut fixture = Fixture::new(&proposal().to_string());
     fixture.history(vec![Message::user(text.into())]);
     let outcome = fixture.reflect(correction);
     assert!(outcome.contains(NO_EVIDENCE), "{outcome}");
@@ -408,7 +411,7 @@ fn no_error_evidence_skips_model_and_persistence(text: &str, correction: &str) {
 
 #[test]
 fn command_argument_can_supply_the_correction_for_a_grounded_fix() {
-    let fixture = Fixture::new(&proposal().to_string());
+    let mut fixture = Fixture::new(&proposal().to_string());
     fixture.mistakes();
     fixture.history(vec![
         blocks(
@@ -443,7 +446,7 @@ fn user_correction_and_actual_working_fix_are_meaningful_evidence(
     observation: bool,
     meaningful: bool,
 ) {
-    let fixture = Fixture::new(&proposal().to_string());
+    let mut fixture = Fixture::new(&proposal().to_string());
     let bad = fixture.edit(FIXED_IMPORT, BAD_IMPORT);
     assert!(!bad.is_error, "{}", bad.output.as_text());
     let fix = fixture.edit(BAD_IMPORT, FIXED_IMPORT);
@@ -496,7 +499,7 @@ fn user_correction_and_actual_working_fix_are_meaningful_evidence(
 #[test]
 fn oversized_synthesized_rule_never_persists() {
     let synthesis = json!({ "kind": "behavioral", "rule": format!("Use std::path::Path in Rust source files {}", "always ".repeat(100)) });
-    let fixture = Fixture::new(&synthesis.to_string());
+    let mut fixture = Fixture::new(&synthesis.to_string());
     fixture.mistakes();
     assert!(fixture.reflect("").starts_with(FAILED));
     fixture.no_policy();
@@ -505,7 +508,7 @@ fn oversized_synthesized_rule_never_persists() {
 #[test]
 fn behavioral_reflection_appends_rule_and_current_context_without_waking_chat() {
     let synthesis = json!({ "kind": "behavioral", "rule": RULE });
-    let fixture = Fixture::new(&synthesis.to_string());
+    let mut fixture = Fixture::new(&synthesis.to_string());
     fixture.mistakes();
     let outcome = fixture.reflect("");
     assert!(outcome.starts_with(SAVED), "{outcome}");
@@ -523,7 +526,7 @@ fn behavioral_reflection_appends_rule_and_current_context_without_waking_chat() 
 
 #[test]
 fn latest_rewind_is_session_scoped_and_cleared_on_session_end() {
-    let fixture = Fixture::new(&proposal().to_string());
+    let mut fixture = Fixture::new(&proposal().to_string());
     fixture.history(vec![Message::user(
         "Please reflect on the corrected import".into(),
     )]);

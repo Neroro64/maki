@@ -53,7 +53,8 @@ fn execute(
 ) -> Result<String, String> {
     let tool = registry.get(name).expect("builtin tool registered");
     let invocation = tool.tool.parse(&input).expect("valid tool input");
-    runtime().block_on(invocation.execute(ctx))
+    runtime()
+        .block_on(invocation.execute(ctx))
         .output
         .map(|output| match output {
             ToolOutput::Plain(text) | ToolOutput::Markdown(text) => text.text,

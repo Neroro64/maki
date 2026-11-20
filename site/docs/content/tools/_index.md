@@ -7,7 +7,7 @@ group = "Reference"
 
 # Tools
 
-Maki ships with 32 built-in tools in this reference (31 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
+Maki ships with 34 built-in tools in this reference (33 on by default, 1 opt-in via plugin options). Tools marked **opt-in** are off until you enable them under `plugins` in [Configuration](/docs/configuration/).
 
 **Permission** is the [plugin permission](/docs/lua-api/#plugin-permissions) a tool declares. A plugin must hold it to [hook](/docs/hooks/#rules) the tool or to give the tool to a `maki.agent` session. A tool marked none reaches nothing past the conversation. A tool marked undeclared may reach anything, so it costs every permission except `agent` and `input`.
 
@@ -153,6 +153,8 @@ Return a compact overview of a source file: imports, type definitions, function 
 
 Diagnose a candidate line replacement with a real language server, entirely in memory. Never writes the file.
 
+**Permission:** `fs_read`
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `end_line` | integer | yes | Last source line to replace (inclusive, 1-based). |
@@ -197,6 +199,8 @@ Execute the Monty Python subset in a sandbox where every tool is an async functi
 
 Control the desktop: mouse, keyboard, screenshots, clipboard.
 
+**Permission:** `run`
+
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `action` | string | yes |  | One of: screenshot, mouse, keyboard, position, display, clipboard |
@@ -215,6 +219,8 @@ Control the desktop: mouse, keyboard, screenshots, clipboard.
 ### `pwsh` {#pwsh}
 
 Execute a PowerShell command in a persistent session.
+
+**Permission:** `run`
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -248,7 +254,7 @@ Launch an autonomous subagent to perform tasks independently. Best combined with
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `background` | boolean | no | Run in the background and continue other work. The result arrives later in a notice. End your turn to wait for it. Background tasks cannot ask for permissions. |
+| `background` | boolean | no | Run in the background. The result arrives as a message. Default to true unless your next step needs the result. Launch all in one batch. Never sleep or poll, end your turn when idle. |
 | `description` | string | yes | Short (3-5 words) description of the task |
 | `ledger` | string | no | Path to this task's ledger brief, usually .maki/orchestrate/<run>/tasks/<id>.md. Read it and the run's plan.md/notes.md before work. Record a compact handoff in your task file; read-only workers return it for the manager to record. |
 | `model_tier` | string | no | Model tier (optional, omit to use current model, capped at current tier):<br>- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.<br>- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.<br>- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits. |
@@ -317,6 +323,8 @@ Load a skill that provides instructions and workflows for specific tasks.
 
 Read or replace the persistent context notebook for this session. Omit text to read; supply text to replace the whole notebook; empty string clears it. The notebook survives compaction and is re-injected into context. Keep it a compact index: task state, decisions, changed files, evidence, blockers, next steps — one line per item, no copied logs or file bodies. Cap 16 KiB.
 
+**Permission:** undeclared
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `text` | string | no | The whole new notebook. Omit to read the current one, pass "" to clear it |
@@ -324,6 +332,8 @@ Read or replace the persistent context notebook for this session. Omit text to r
 ### `session_index` {#session_index}
 
 Search stored chat sessions without opening or resuming them.
+
+**Permission:** undeclared
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -334,6 +344,8 @@ Search stored chat sessions without opening or resuming them.
 ### `session_read` {#session_read}
 
 Read the newest normalized messages of a stored session, without opening or resuming it.
+
+**Permission:** undeclared
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -369,6 +381,8 @@ Search the web for real-time information using Exa AI.
 
 Drive a Chrome browser over the DevTools protocol.
 
+**Permission:** `net`
+
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `action` | string | yes |  | One of: open, snapshot, click, type, press, scroll, screenshot, viewport, eval, status, close |
@@ -390,6 +404,8 @@ Drive a Chrome browser over the DevTools protocol.
 
 Start or reuse a local website preview using native managed processes. Auto-detects npm dev/start/serve scripts, or accepts a shell command. Returns only after the loopback HTTP URL answers without a server error. The process survives tool calls and stops on cancellation during startup, design_preview_stop, session end or plugin reload. Existing external servers are reused but never stopped. Startup errors include .maki/design/preview.log. Pass the server's actual port or URL. No port flag is injected into framework commands. For desktop applications use computer screenshots and view_image instead.
 
+**Permission:** `run`
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `command` | string | no | Shell command to start the server. Default: detected npm script. |
@@ -400,12 +416,16 @@ Start or reuse a local website preview using native managed processes. Auto-dete
 
 Stop the dev-server process tree started by design_preview. External servers are left running.
 
+**Permission:** `run`
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 
 ### `design_viewports` {#design_viewports}
 
 Read the saved responsive viewport matrix and design notes. Defaults: mobile 390x844, tablet 834x1112, desktop 1440x900. Pass viewports to replace and save the matrix in .maki/design/viewports.json. For each viewport use browser action=viewport (width, height, mobile), screenshot to a file, and view_image to inspect it. For native applications inspect computer screenshots instead of treating web viewports as desktop verification.
+
+**Permission:** `fs_write`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -415,6 +435,8 @@ Read the saved responsive viewport matrix and design notes. Defaults: mobile 390
 ### `design_note` {#design_note}
 
 Append a design note with text and optional author, or omit text to read notes. Saved in .maki/design/notes.md across sessions. Human feedback remains available with design_viewports and /design-view.
+
+**Permission:** `fs_write`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

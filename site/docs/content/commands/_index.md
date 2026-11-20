@@ -13,6 +13,7 @@ Type `/` in the input box to open the command palette.
 
 | Command | Description |
 |---------|-------------|
+| `/review` | Explore call-graph diffs, annotate changes, and send review notes to the agent |
 | `/compact` | Summarize and compact conversation history (optional guidance) |
 | `/new` | Start a new session (! stops background tasks) |
 | `/fork` | Fork this session and switch to the copy |
@@ -42,7 +43,6 @@ Type `/` in the input box to open the command palette.
 | `/memory` | View, edit, and delete memory files |
 | `/reflect` | Learn one concise project rule or edit guard from recent mistakes and fixes. Optionally include a correction. |
 | `/rename` | Rename the current session |
-| `/review` | Review changes vs HEAD, comment on diff lines, send fixes to maki |
 | `/sessions` | Browse and switch sessions |
 | `/skills` | Browse skills, view details, and disable them |
 | `/tasks` | Browse and search tasks |
@@ -144,11 +144,10 @@ Aliasing adds a name, so both stay in the palette. Any command works as a target
 
 `run_command` only runs what the calling plugin's grants cover. Your `init.lua` counts as a plugin, and its grants come from `~/.config/maki/plugin.toml` (see [plugin permissions](/docs/lua-api/#plugin-permissions)). Commands not listed here run for any plugin. A command sent with [`maki.ui.input_submit`](/docs/lua-api/#maki-ui-input_submit) follows the same rules.
 
+- Needs `fs_read`: `/review`.
 - Needs `fs_read`, `fs_write`: `/memory`, `/skills`.
-- Needs `fs_read`, `fs_write`, `net`, `run`, `env`, `agent`, `session_read`, `session_write`, `session_settings`: `/tasks`.
+- Needs `fs_read`, `fs_write`, `net`, `run`, `env`, `agent`, `session_read`, `session_write`, `session_settings`: `/reflect`, `/tasks`.
 - Needs `fs_read`, `fs_write`, `net`, `run`, `session_write`: `/design`, `/design-note`, `/design-view`.
-- Needs `fs_read`, `fs_write`, `agent`, `session_read`, `session_write`: `/reflect`.
-- Needs `run`, `agent`, `session_write`: `/review`.
 - Needs `agent`: `/btw`, `/orchestrate`.
 - Needs `agent`, `session_write`: `/compact`, custom commands, MCP prompts.
 - Needs `session_read`: `/copy`.

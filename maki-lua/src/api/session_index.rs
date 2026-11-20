@@ -481,6 +481,7 @@ mod tests {
                 ContentBlock::Thinking {
                     thinking: PRIVATE_THOUGHT.to_owned(),
                     signature: None,
+                    reasoning_id: None,
                 },
                 ContentBlock::RedactedThinking {
                     data: PRIVATE_THOUGHT.to_owned(),
@@ -497,6 +498,7 @@ mod tests {
                 ContentBlock::tool_result("error", " file\nnot found ", true),
                 ContentBlock::Unknown(json!({ "type": "future", "text": PRIVATE_OUTPUT })),
             ],
+            ..Default::default()
         };
         let normalized = normalize(&message);
         assert_eq!(normalized.role, "assistant");
@@ -683,14 +685,19 @@ mod tests {
         let mut index = SessionIndex::default();
         assert_eq!(index.search(&storage, None, "", 30).unwrap(), NO_SESSIONS);
         assert!(!storage.path().exists());
-        let mut stored = StoredSession::new("test/model", PROJECT);
-        stored.id = ID_A.parse().unwrap();
-        stored.push_message(Message::user(TEXT.to_owned()));
-        let dir = storage.ensure_subdir(SESSIONS_DIR).unwrap();
-        let legacy = dir.join(format!("{ID_A}.json"));
-        fs::write(&legacy, serde_json::to_vec(&stored).unwrap()).unwrap();
-        assert!(index.read(&storage, ID_A, 4).unwrap().contains(TEXT));
+        let stored = save(&storage, ID_A, PROJECT, &[TEXT]);
+        let dir = storage.path().join(SESSIONS_DIR);
+        let canonical = dir.join(format!("{}.jsonl", stored.id));
+        let legacy = dir.join(format!("{ID_A}.jsonl"));
+        fs::rename(&canonical, &legacy).unwrap();
+        let _ = fs::remove_file(dir.join("cwd_index.json"));
+        assert!(
+            index
+                .read(&storage, &stored.id.to_string(), 4)
+                .unwrap()
+                .contains(TEXT)
+        );
         assert!(legacy.exists());
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(!canonical.exists());
     }
 }

@@ -271,10 +271,11 @@ fn parse_scope(lua: &Lua, plugin: &Arc<str>, scope: Value) -> LuaResult<JobOwner
 
 /// Snapshot a job this plugin can see. Live jobs report tails collected
 /// so far; session-owned jobs still answer after they exit.
+/// `read_error` describes failed output capture, including non-UTF-8 output.
 ///
 /// @param job_id integer Job id returned by `jobstart`.
 /// @return (table|nil, string|nil) `{ id, command, name, pid, session, status,
-///   exit_code, elapsed_secs, stdout_lines, stderr_lines }`, or nil and
+///   exit_code, elapsed_secs, read_error, stdout_lines, stderr_lines }`, or nil and
 ///   an error. `status` is `"running"` or `"exited"`.
 /// @example
 /// local info = maki.fn.jobinfo(id)
@@ -351,7 +352,7 @@ fn callback_update(lua: &Lua, opts: &Table, key: &str) -> LuaResult<CallbackUpda
 ///
 /// @param session string? Session id filter.
 /// @return (table) array of `{ id, command, name, pid, session, status,
-///   exit_code, elapsed_secs }`.
+///   exit_code, elapsed_secs, read_error }`.
 /// @example
 /// local jobs = maki.fn.joblist(maki.session.current())
 #[lua_fn(guard = Run)]
@@ -451,7 +452,7 @@ fn jobforget(lua: &Lua, #[ctx] plugin: Arc<str>, job_id: u32) -> LuaResult<()> {
 /// @param job_id integer Job id returned by `jobstart`.
 /// @param timeout_ms integer? Maximum wait in milliseconds (default 30000).
 /// @return (table?, string?) `{ stdout, stderr, exit_code, truncated }`, or
-///   nil plus an error on timeout or an unknown job.
+///   nil plus an error on timeout, unreadable/non-UTF-8 output, or an unknown job.
 /// @example
 /// local id = maki.fn.jobstart("echo hello")
 /// local result, err = maki.fn.jobwait(id, 5000)

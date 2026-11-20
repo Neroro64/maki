@@ -8,7 +8,6 @@ use arc_swap::ArcSwap;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::task::spawn_blocking;
 use tracing::{debug, error, info, warn};
 
 use maki_providers::provider::Provider;
@@ -1410,7 +1409,7 @@ impl<'h> Agent<'h> {
                     });
                     if message.is_some() {
                         if self.task_id.is_none()
-                            && self.background_for.is_none()
+                            && self.background_for.chat().is_none()
                             && let Some(session) = &self.session_id
                         {
                             self.file_access
@@ -1475,7 +1474,7 @@ pub(crate) mod testing {
     use crate::permissions::PermissionManager;
     use crate::prompt::ResolvedPrompts;
     use crate::tools::{BackgroundFor, FileAccess, RequestTools, ToolAudience};
-    use crate::{AgentConfig, RunLedger, ToolOutputLines};
+    use crate::{AgentConfig, NotesCell, RunLedger, ToolOutputLines};
 
     const TEST_DIR: &str = "/tmp";
     const SYSTEM: &str = "system";
@@ -4307,6 +4306,13 @@ mod tests {
             .any(|b| matches!(b, ContentBlock::Image { source } if *source.data == *data))
     }
 
+    fn vision_model() -> Model {
+        Model {
+            supports_vision_override: Some(true),
+            ..default_model()
+        }
+    }
+
     fn image_input(data: &str) -> AgentInput {
         AgentInput {
             images: vec![ImageSource::new(ImageMediaType::Png, data.into())],
@@ -4326,15 +4332,17 @@ mod tests {
         recovers: bool,
         notices: bool,
     ) {
+        let model = vision_model();
         let mut history = History::new(Vec::new());
-        fit_frame(&mut history, fixed_context(), None, &default_model());
+        fit_frame(&mut history, fixed_context(), None, &model);
         let provider = ImageRefusingProvider {
             status,
             always,
             mid_stream,
             ..ImageRefusingProvider::refusing(BAD_PNG)
         };
-        let (mut agent, mut event_rx) = make_agent(provider, &mut history);
+        let (mut agent, mut event_rx) =
+            make_agent_with(Arc::new(provider), model.clone(), &mut history);
 
         let recovered = agent.run(image_input(BAD_PNG)).await.is_ok();
         drop(agent);
@@ -4351,7 +4359,7 @@ mod tests {
             )),
             notices
         );
-        let next = adapt_images_for_model(&default_model(), history.as_slice()).await;
+        let next = adapt_images_for_model(&model, history.as_slice()).await;
         assert_eq!(
             carries_image(&next, BAD_PNG),
             !recovers,
@@ -4371,7 +4379,7 @@ mod tests {
         };
         let switched = Model {
             id: SWITCHED_MODEL.into(),
-            ..default_model()
+            ..vision_model()
         };
         let mut history = History::new(Vec::new());
         fit_frame(&mut history, fixed_context(), None, &switched);
@@ -5124,7 +5132,11 @@ mod tests {
             assert_append_only(&pair[0], &pair[1]);
         }
         drop(agent);
-        assert_continued(&drain_events(&mut event_rx), &history, resolved_at as usize - 1);
+        assert_continued(
+            &drain_events(&mut event_rx),
+            &history,
+            resolved_at as usize - 1,
+        );
     }
 
     /// The user is told about every continuation and the model reads each one.

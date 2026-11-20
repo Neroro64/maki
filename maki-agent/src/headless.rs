@@ -1175,6 +1175,7 @@ mod tests {
             model,
             config: AgentConfig {
                 max_turns: Some(0),
+                compaction_strategy: maki_config::CompactionStrategy::Summarize,
                 ..AgentConfig::default()
             },
             permissions_config: PermissionsConfig::default(),

@@ -5,6 +5,7 @@ use std::time::Duration;
 use maki_agent::prompt::{PromptId, Slot, assemble};
 use maki_agent::tools::ToolRegistry;
 use maki_config::PluginsConfig;
+use maki_lua::test_support::{runtime, wait_next};
 use maki_lua::{PluginHost, UiAction};
 
 const CUSTOM_IDENTITY: &str = "Keep the user's custom identity.";
@@ -32,8 +33,8 @@ fn design_toggle_adds_dynamic_conventions_without_replacing_identity_or_tone() {
     })
     .unwrap();
     let events = host.event_handle();
-    let ui = host.ui_action_rx();
-    let before = events.collect_prompt_slots();
+    let mut ui = host.take_ui_action_rx().unwrap();
+    let before = runtime().block_on(events.collect_prompt_slots(None));
     let original = assemble(PromptId::System, &before, "");
     assert!(before.get(PromptId::System, Slot::Conventions).is_empty());
 
@@ -52,13 +53,13 @@ fn design_toggle_adds_dynamic_conventions_without_replacing_identity_or_tone() {
         );
         loop {
             if matches!(
-                ui.recv_timeout(COMMAND_TIMEOUT).unwrap(),
+                wait_next(&mut ui, COMMAND_TIMEOUT).unwrap(),
                 UiAction::Flash(_)
             ) {
                 break;
             }
         }
-        let slots = events.collect_prompt_slots();
+        let slots = runtime().block_on(events.collect_prompt_slots(None));
         assert_eq!(
             slots.get(PromptId::System, Slot::Identity)[0].content,
             CUSTOM_IDENTITY

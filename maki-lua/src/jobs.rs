@@ -1220,6 +1220,7 @@ mod tests {
             tail_cap: DEFAULT_TAIL,
             dropped_output: false,
             reaped: Arc::new(AtomicBool::new(false)),
+            read_error: Arc::new(OnceLock::new()),
             exit_code: None,
             elapsed_secs: None,
             replay_exit: None,

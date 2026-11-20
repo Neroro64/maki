@@ -859,7 +859,11 @@ mod tests {
         let mut review = review();
         review.app = Some(app);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| { review.view(frame); }).unwrap();
+        terminal
+            .draw(|frame| {
+                review.view(frame);
+            })
+            .unwrap();
         let text: String = terminal
             .backend()
             .buffer()
@@ -876,10 +880,18 @@ mod tests {
         }
         review.handle_key(key(KeyCode::Char('c')));
         review.handle_paste(COMMENT);
-        terminal.draw(|frame| { review.view(frame); }).unwrap();
+        terminal
+            .draw(|frame| {
+                review.view(frame);
+            })
+            .unwrap();
         review.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         review.handle_key(key(KeyCode::Char('a')));
-        terminal.draw(|frame| { review.view(frame); }).unwrap();
+        terminal
+            .draw(|frame| {
+                review.view(frame);
+            })
+            .unwrap();
         let text: String = terminal
             .backend()
             .buffer()
@@ -1022,11 +1034,19 @@ mod tests {
             .collect::<String>();
         let mut review = diff_review(None, Some(&source));
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        terminal.draw(|frame| review.view(frame)).unwrap();
+        terminal
+            .draw(|frame| {
+                review.view(frame);
+            })
+            .unwrap();
         review.handle_key(key(KeyCode::End));
         review.handle_key(key(KeyCode::Char('v')));
         review.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        terminal.draw(|frame| review.view(frame)).unwrap();
+        terminal
+            .draw(|frame| {
+                review.view(frame);
+            })
+            .unwrap();
         let app = review.app.as_ref().unwrap();
         let cursor = app.detail_cursor.unwrap();
         assert!(cursor < app.detail_selection.unwrap());
@@ -1090,7 +1110,11 @@ mod tests {
             buffer: TextBuffer::new(COMMENT.into()),
         });
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| { review.view(frame); }).unwrap();
+        terminal
+            .draw(|frame| {
+                review.view(frame);
+            })
+            .unwrap();
         let contents: String = terminal
             .backend()
             .buffer()

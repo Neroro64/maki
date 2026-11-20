@@ -69,7 +69,8 @@ mod tests {
     #[tokio::test]
     async fn without_ui_returns_error_pair() {
         let lua = lua_with_mcp(None);
-        let (val, err): (Value, Option<String>) = lua.load(SERVERS_CALL).eval_async().await.unwrap();
+        let (val, err): (Value, Option<String>) =
+            lua.load(SERVERS_CALL).eval_async().await.unwrap();
         assert!(val.is_nil());
         assert_eq!(err.as_deref(), Some(NO_UI_ERR));
     }

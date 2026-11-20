@@ -2547,7 +2547,7 @@ impl App {
     }
 
     fn submit_review(&mut self, text: String) -> Vec<Action> {
-        if self.pending_input != PendingInput::None {
+        if self.turn_awaits_auth() {
             self.review.submission_failed(INPUT_NOT_LIVE_ERR.into());
             return vec![];
         }
@@ -2567,13 +2567,20 @@ impl App {
             images: vec![],
         };
         if !self.is_main_chat() {
-            if self.chats[self.active_chat].inbox.is_none() {
-                self.review.submission_failed(queue::NO_INBOX_ERR.into());
+            if !self.chats[self.active_chat].takes_messages() {
+                self.review.submission_failed(INPUT_NOT_LIVE_ERR.into());
                 return vec![];
             }
-            let actions = self.queue_for_subagent(msg);
-            self.review.submitted();
-            return actions;
+            return match self.try_queue_for_subagent(msg) {
+                Ok(actions) => {
+                    self.review.submitted();
+                    actions
+                }
+                Err(error) => {
+                    self.review.submission_failed(error);
+                    vec![]
+                }
+            };
         }
         match self.submit_prompt(msg) {
             SubmitOutcome::Started(actions) => {

@@ -116,7 +116,13 @@ impl App {
                 self.render_status_bar(frame, layout.status_area, render_chat);
                 let (overlay_rect, review_caret) =
                     self.render_top_modals(frame, overlay_rect, caret, layout.bottom_area);
-                (overlay_rect, caret, prompt_caret, picker_caret, review_caret)
+                (
+                    overlay_rect,
+                    caret,
+                    prompt_caret,
+                    picker_caret,
+                    review_caret,
+                )
             });
         self.register_zones(&layout, overlay_rect);
         self.apply_selection(frame, render_chat, &thumbs);
@@ -126,7 +132,10 @@ impl App {
     /// Whether the terminal draws the caret. Only the chat input stopped
     /// painting its own; every other field still paints one.
     pub(crate) fn shows_terminal_cursor(&self) -> bool {
-        matches!(self.keyboard_owner(), KeyboardOwner::Chat | KeyboardOwner::Review)
+        matches!(
+            self.keyboard_owner(),
+            KeyboardOwner::Chat | KeyboardOwner::Review
+        )
     }
 
     /// The shape a plugin set with `maki.ui.set_cursor_shape`, None if no

@@ -31,7 +31,8 @@ fn index_file(name: &str, content: &[u8]) -> Result<String, String> {
     ctx.registry = Arc::clone(&reg);
     let entry = reg.get(INDEX).expect("index registered");
     let invocation = entry.tool.parse(&json!({ "path": path })).unwrap();
-    maki_lua::test_support::runtime().block_on(invocation.execute(&ctx))
+    maki_lua::test_support::runtime()
+        .block_on(invocation.execute(&ctx))
         .output
         .map(|out| match out {
             maki_agent::ToolOutput::Plain(s) => s.text,

@@ -302,7 +302,11 @@ pub const KEYBINDS: &[Keybind] = &[
         "Newline",
         Ctx::Editing,
     ),
-    single("Tab", "Switch between plan and build, complete path", Ctx::Editing),
+    single(
+        "Tab",
+        "Switch between plan and build, complete path",
+        Ctx::Editing,
+    ),
     single("/command", "Open command palette", Ctx::Editing),
     kb(
         KeyLabel::MacAlt(key::DELETE_WORD.label, "⌥⌫"),

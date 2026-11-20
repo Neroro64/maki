@@ -156,6 +156,7 @@ impl SymbolLockTable {
 }
 
 /// Retiring this lease releases its claims and permanently revokes its task scope.
+#[derive(Clone)]
 pub struct SymbolLease {
     table: Arc<SymbolLockTable>,
     owner: Arc<SymbolOwner>,
@@ -343,6 +344,11 @@ impl FileAccess {
         };
     }
 
+    pub fn needs_snapshot(&self) -> bool {
+        let state = self.snapshots.lock().unwrap();
+        !state.session.is_empty() && !state.captured
+    }
+
     pub fn prepare_snapshot(&self) -> Result<(), String> {
         let mut state = self.snapshots.lock().unwrap();
         if state.session.is_empty() {
@@ -387,12 +393,16 @@ impl FileAccess {
     /// One path only. A tool mutating several would need a globally sorted
     /// acquire order to avoid lock-order inversion, and none exists yet.
     pub async fn acquire(&self, key: &FileKey) -> FileGuard {
+        self.acquire_checked(key).await.0
+    }
+
+    pub async fn acquire_checked(&self, key: &FileKey) -> (FileGuard, bool) {
         let lock = self.lock_for(key);
         match Arc::clone(&lock).try_lock_owned() {
-            Ok(guard) => guard,
+            Ok(guard) => (guard, false),
             Err(_) => {
                 debug!(path = %key.as_path().display(), "waiting for the file lock");
-                lock.lock_owned().await
+                (lock.lock_owned().await, true)
             }
         }
     }
@@ -654,7 +664,12 @@ mod tests {
             TASK_FINISHED_MSG
         );
         assert_eq!(
-            first.mutation_guard().now_or_never().unwrap().err().unwrap(),
+            first
+                .mutation_guard()
+                .now_or_never()
+                .unwrap()
+                .err()
+                .unwrap(),
             TASK_FINISHED_MSG
         );
     }

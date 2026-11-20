@@ -949,25 +949,32 @@ mod tests {
         let opts = live_opts(&lua).unwrap();
         opts.set("url", LIVE_HTML).unwrap();
         opts.set("headless", true).unwrap();
-        let (out, err) = crate::test_support::runtime().block_on(browser_open(lua.clone(), opts)).unwrap();
+        let (out, err) = crate::test_support::runtime()
+            .block_on(browser_open(lua.clone(), opts))
+            .unwrap();
         assert!(out.is_some(), "{}", err.unwrap_or_default());
         let opened = out.unwrap();
         assert_eq!(opened.get::<String>("title").unwrap(), "BraveSmoke");
 
-        let (out, err) =
-            crate::test_support::runtime().block_on(browser_snapshot(lua.clone(), live_opts(&lua).unwrap())).unwrap();
+        let (out, err) = crate::test_support::runtime()
+            .block_on(browser_snapshot(lua.clone(), live_opts(&lua).unwrap()))
+            .unwrap();
         assert!(out.is_some(), "{}", err.unwrap_or_default());
         let snap = out.unwrap();
         assert!(snap.get::<i64>("count").unwrap() >= 2);
 
         let opts = live_opts(&lua).unwrap();
         opts.set("index", 1).unwrap();
-        let (out, err) = crate::test_support::runtime().block_on(browser_click(lua.clone(), opts)).unwrap();
+        let (out, err) = crate::test_support::runtime()
+            .block_on(browser_click(lua.clone(), opts))
+            .unwrap();
         assert_eq!(out, Some(true), "{}", err.unwrap_or_default());
 
         let opts = live_opts(&lua).unwrap();
         opts.set("source", "document.title").unwrap();
-        let (out, _) = crate::test_support::runtime().block_on(browser_eval(lua.clone(), opts)).unwrap();
+        let (out, _) = crate::test_support::runtime()
+            .block_on(browser_eval(lua.clone(), opts))
+            .unwrap();
         assert_eq!(
             out,
             Some(LuaValue::String(lua.create_string("clicked").unwrap()))
@@ -977,12 +984,16 @@ mod tests {
             let opts = live_opts(&lua).unwrap();
             opts.set("width", width).unwrap();
             opts.set("height", height).unwrap();
-            let (out, err) = crate::test_support::runtime().block_on(browser_viewport(lua.clone(), opts)).unwrap();
+            let (out, err) = crate::test_support::runtime()
+                .block_on(browser_viewport(lua.clone(), opts))
+                .unwrap();
             assert_eq!(out, Some(true), "{}", err.unwrap_or_default());
             let opts = live_opts(&lua).unwrap();
             opts.set("source", "({width: innerWidth, height: innerHeight})")
                 .unwrap();
-            let (out, err) = crate::test_support::runtime().block_on(browser_eval(lua.clone(), opts)).unwrap();
+            let (out, err) = crate::test_support::runtime()
+                .block_on(browser_eval(lua.clone(), opts))
+                .unwrap();
             let Some(LuaValue::Table(size)) = out else {
                 panic!("{}", err.unwrap_or_default());
             };
@@ -994,13 +1005,16 @@ mod tests {
         let opts = live_opts(&lua).unwrap();
         opts.set("path", path.to_string_lossy().into_owned())
             .unwrap();
-        let (out, err) = crate::test_support::runtime().block_on(browser_screenshot(lua.clone(), opts)).unwrap();
+        let (out, err) = crate::test_support::runtime()
+            .block_on(browser_screenshot(lua.clone(), opts))
+            .unwrap();
         assert!(out.is_some(), "{}", err.unwrap_or_default());
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
 
-        let (out, _) =
-            crate::test_support::runtime().block_on(browser_close(lua.clone(), live_opts(&lua).unwrap())).unwrap();
+        let (out, _) = crate::test_support::runtime()
+            .block_on(browser_close(lua.clone(), live_opts(&lua).unwrap()))
+            .unwrap();
         assert_eq!(out, Some(true));
     }
 }

@@ -463,10 +463,10 @@ lua_table! {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::{SESSION_WAIT_TIMEOUT, parse_marker, pwsh_exec, with_pwsh};
     use futures::FutureExt;
     use mlua::{Lua, Table};
+    use std::sync::Arc;
     use test_case::test_case;
 
     const SEQ: u32 = 3;

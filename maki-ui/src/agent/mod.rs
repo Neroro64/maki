@@ -208,7 +208,7 @@ impl AgentHandles {
             frame: app.state.session.frame().cloned(),
             session: None,
         };
-        let mut seed = self.deps.seed(
+        let seed = self.deps.seed(
             &resumed,
             model_slot,
             config,

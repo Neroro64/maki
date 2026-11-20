@@ -405,9 +405,18 @@ pub struct Order {{ pub total: u32 }}
 #[test]
 fn csharp_c_and_cpp_review_changes_and_renames() {
     for (path, source) in [
-        ("src/app.cs", "class App {\nstatic int helper(int x) { return x + 1; }\nstatic int legacy() { return 7; }\nstatic int run() { return helper(1) + legacy(); }\n// EXTRA\n}\n"),
-        ("src/app.c", "int helper(int x) { return x + 1; }\nint legacy(void) { return 7; }\nint run(void) { return helper(1) + legacy(); }\n// EXTRA\n"),
-        ("src/app.cpp", "namespace app {\ntemplate<typename T> T helper(T x) { return x + 1; }\nint legacy() { return 7; }\nint run() { return helper<int>(1) + legacy(); }\n// EXTRA\n}\n"),
+        (
+            "src/app.cs",
+            "class App {\nstatic int helper(int x) { return x + 1; }\nstatic int legacy() { return 7; }\nstatic int run() { return helper(1) + legacy(); }\n// EXTRA\n}\n",
+        ),
+        (
+            "src/app.c",
+            "int helper(int x) { return x + 1; }\nint legacy(void) { return 7; }\nint run(void) { return helper(1) + legacy(); }\n// EXTRA\n",
+        ),
+        (
+            "src/app.cpp",
+            "namespace app {\ntemplate<typename T> T helper(T x) { return x + 1; }\nint legacy() { return 7; }\nint run() { return helper<int>(1) + legacy(); }\n// EXTRA\n}\n",
+        ),
     ] {
         let repo = Repo::new(path.rsplit('/').next().unwrap());
         repo.write(path, source);
@@ -417,7 +426,8 @@ fn csharp_c_and_cpp_review_changes_and_renames() {
         } else {
             "int added() { return 9; }"
         };
-        let head = source.replace("x + 1", "x + 2")
+        let head = source
+            .replace("x + 1", "x + 2")
             .replace("legacy", "renamed")
             .replace("+ renamed();", "+ renamed() + added();")
             .replace("// EXTRA", added);
@@ -426,21 +436,43 @@ fn csharp_c_and_cpp_review_changes_and_renames() {
 
         let (code, out, err) = repo.run(&["HEAD~1", "HEAD", "--dump", "-e", "run"]);
         assert_eq!(code, 0, "{path}: {err}");
-        for (name, status) in [("run", '~'), ("helper", '~'), ("renamed", '>'), ("added", '+')] {
-            let qual = if path.ends_with(".cs") { format!("App::{name}") }
-                else if path.ends_with(".cpp") { format!("app::{name}") }
-                else { name.to_string() };
-            let line = out.lines().find(|line| line.contains(&format!("{status} {qual}")))
+        for (name, status) in [
+            ("run", '~'),
+            ("helper", '~'),
+            ("renamed", '>'),
+            ("added", '+'),
+        ] {
+            let qual = if path.ends_with(".cs") {
+                format!("App::{name}")
+            } else if path.ends_with(".cpp") {
+                format!("app::{name}")
+            } else {
+                name.to_string()
+            };
+            let line = out
+                .lines()
+                .find(|line| line.contains(&format!("{status} {qual}")))
                 .unwrap_or_else(|| panic!("{path}: missing {status} {qual}:\n{out}"));
             if name == "run" {
                 assert!(!line.starts_with(' '), "{path}: root was nested: {line}");
             } else {
-                assert!(line.starts_with("  ") && !line.starts_with("    "), "{path}: callee not nested under run: {line}");
+                assert!(
+                    line.starts_with("  ") && !line.starts_with("    "),
+                    "{path}: callee not nested under run: {line}"
+                );
             }
         }
-        let legacy = if path.ends_with(".cs") { "App::legacy" }
-            else if path.ends_with(".cpp") { "app::legacy" } else { "legacy" };
-        assert!(!out.contains(&format!("- {legacy}")), "{path}: rename reported as removal:\n{out}");
+        let legacy = if path.ends_with(".cs") {
+            "App::legacy"
+        } else if path.ends_with(".cpp") {
+            "app::legacy"
+        } else {
+            "legacy"
+        };
+        assert!(
+            !out.contains(&format!("- {legacy}")),
+            "{path}: rename reported as removal:\n{out}"
+        );
     }
 }
 
@@ -991,10 +1023,12 @@ fn type_rename_and_base_list_change_have_separate_review_spans() {
     assert_eq!(derived["head"]["end"], 4);
     let method = nodes.iter().find(|n| n["name"] == "Worker::Run").unwrap();
     assert_eq!(method["status"], "unchanged");
-    assert!(derived["contracts"]
-        .as_array()
-        .unwrap()
-        .contains(&renamed["key"]));
+    assert!(
+        derived["contracts"]
+            .as_array()
+            .unwrap()
+            .contains(&renamed["key"])
+    );
 }
 
 #[test]
@@ -1188,18 +1222,33 @@ fn cached_review_tracks_same_size_edits_and_untracked_file_lifecycle() {
     let base = "fn run() { alpha(); }\nfn alpha() {}\nfn bravo() {}\nfn delta() {}\n";
     repo.write("src/lib.rs", base);
     repo.commit_all("base");
-    repo.write("src/lib.rs", &base.replace("run() { alpha", "run() { bravo"));
+    repo.write(
+        "src/lib.rs",
+        &base.replace("run() { alpha", "run() { bravo"),
+    );
     let cold = json_review(&repo);
     assert_eq!(json_review(&repo), cold);
-    assert_eq!(json_node(&cold, "run")["callees"], serde_json::json!(["src/lib.rs::bravo"]));
+    assert_eq!(
+        json_node(&cold, "run")["callees"],
+        serde_json::json!(["src/lib.rs::bravo"])
+    );
 
-    repo.write("src/lib.rs", &base.replace("run() { alpha", "run() { delta"));
+    repo.write(
+        "src/lib.rs",
+        &base.replace("run() { alpha", "run() { delta"),
+    );
     let edited = json_review(&repo);
-    assert_eq!(json_node(&edited, "run")["callees"], serde_json::json!(["src/lib.rs::delta"]));
+    assert_eq!(
+        json_node(&edited, "run")["callees"],
+        serde_json::json!(["src/lib.rs::delta"])
+    );
     repo.write("src/fresh.rs", "fn fresh() { run(); }\n");
     let added = json_review(&repo);
     assert_eq!(json_node(&added, "fresh")["status"], "added");
-    assert_eq!(json_node(&added, "fresh")["callees"], serde_json::json!(["src/lib.rs::run"]));
+    assert_eq!(
+        json_node(&added, "fresh")["callees"],
+        serde_json::json!(["src/lib.rs::run"])
+    );
     assert_eq!(json_review(&repo), added);
     fs::remove_file(repo.root.join("src/fresh.rs")).unwrap();
     assert_eq!(json_review(&repo), edited);
@@ -1210,7 +1259,10 @@ fn cached_review_respects_revision_and_test_selection_and_recovers_corruption() 
     let repo = Repo::new("cache-options");
     repo.write("src/lib.rs", "fn stable() {}\n");
     repo.commit_all("base");
-    repo.write("src/lib.rs", "fn stable() {}\nfn added() {}\n#[test] fn check() { added(); }\n");
+    repo.write(
+        "src/lib.rs",
+        "fn stable() {}\nfn added() {}\n#[test] fn check() { added(); }\n",
+    );
     repo.commit_all("head");
     let read = |args: &[&str]| {
         let (code, out, err) = repo.run(args);
@@ -1226,7 +1278,11 @@ fn cached_review_respects_revision_and_test_selection_and_recovers_corruption() 
     assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
     let reverse = read(&["HEAD", "HEAD~1", "--json"]);
     assert_eq!(json_node(&reverse, "added")["status"], "removed");
-    fs::write(repo.root.join(".git/calldive/analysis.json"), "{interrupted").unwrap();
+    fs::write(
+        repo.root.join(".git/calldive/analysis.json"),
+        "{interrupted",
+    )
+    .unwrap();
     assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
     assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
 }

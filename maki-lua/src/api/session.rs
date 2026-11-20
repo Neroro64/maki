@@ -198,8 +198,8 @@ async fn index(lua: Lua, opts: Option<Table>) -> LuaResult<Pair<String>> {
         Some(opts) => opts,
         None => lua.create_table()?,
     };
-    let query = opts.get::<Option<String>>("query")?.unwrap_or_default();
-    let scope = opts.get::<Option<String>>("scope")?;
+    let query = opts.opt::<String>("query")?.unwrap_or_default();
+    let scope = opts.opt::<String>("scope")?;
     let cwd = match scope.as_deref().unwrap_or("cwd") {
         "cwd" => match headless_cwd(&lua) {
             Ok(cwd) => Some(cwd),
@@ -209,7 +209,7 @@ async fn index(lua: Lua, opts: Option<Table>) -> LuaResult<Pair<String>> {
         _ => return Ok(err_pair(INVALID_RECALL_SCOPE)),
     };
     let limit = opts
-        .get::<Option<usize>>("limit")?
+        .opt::<usize>("limit")?
         .unwrap_or(if query.trim().is_empty() { 30 } else { 20 })
         .clamp(1, MAX_ROWS);
     let storage = match state_dir(&lua) {
@@ -244,10 +244,7 @@ async fn index(lua: Lua, opts: Option<Table>) -> LuaResult<Pair<String>> {
 #[lua_fn(guard = SessionRead)]
 async fn recall(lua: Lua, opts: Table) -> LuaResult<Pair<String>> {
     let id = opts.get::<String>("id")?;
-    let last = opts
-        .get::<Option<usize>>("last")?
-        .unwrap_or(4)
-        .clamp(1, MAX_ROWS);
+    let last = opts.opt::<usize>("last")?.unwrap_or(4).clamp(1, MAX_ROWS);
     let storage = match state_dir(&lua) {
         Ok(storage) => storage,
         Err(error) => return Ok(err_pair(error)),

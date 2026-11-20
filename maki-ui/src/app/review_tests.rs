@@ -1,8 +1,10 @@
 use super::tests::test_app;
-use super::{Msg, ParsedCommand, PendingInput, Status};
+use super::{Msg, Status};
+use crate::components::command::ParsedCommand;
+use crate::components::permission_prompt::ProjectAnswers;
 use crate::components::{Action, Overlay};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use maki_agent::SubagentInbox;
+use maki_agent::{Cutter, EndReason, SessionControl};
 use ratatui::{Terminal, backend::TestBackend};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -133,7 +135,7 @@ fn review_submission_queues_while_the_agent_is_busy() {
 #[test]
 fn rejected_review_submission_keeps_the_review_open() {
     let mut app = test_app();
-    app.pending_input = PendingInput::AuthRetry { subagent_id: None };
+    app.chats[0].auth_parked = true;
     app.review.open(PathBuf::from(&app.state.session.cwd));
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert!(app.review.is_open());
@@ -157,8 +159,8 @@ fn review_submission_reaches_the_focused_subagent() {
     let info = super::tests::subagent_info("review-subagent", "Review task");
     app.resolve_or_create_chat(&info, &None);
     app.active_chat = 1;
-    let inbox = Arc::new(SubagentInbox::default());
-    app.chats[1].inbox = Some(Arc::clone(&inbox));
+    let inbox = Arc::new(SessionControl::default());
+    app.chats[1].control = Some(Arc::clone(&inbox));
     app.review.open(PathBuf::from(&app.state.session.cwd));
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert_eq!(inbox.texts(), [REVIEW_PROMPT]);
@@ -181,6 +183,9 @@ fn review_submission_to_a_closed_subagent_keeps_the_review_open() {
     let info = super::tests::subagent_info("review-subagent", "Review task");
     app.resolve_or_create_chat(&info, &None);
     app.active_chat = 1;
+    if let Some(control) = &app.chats[1].control {
+        control.end(EndReason::Stopped(Cutter::Parent));
+    }
     app.review.open(PathBuf::from(&app.state.session.cwd));
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert!(app.review.is_open());
@@ -204,7 +209,7 @@ fn permission_prompt_is_visible_and_answers_keys_above_review() {
         maki_config::ToolKey::native("bash"),
         vec![PERMISSION_SCOPE.into()],
         None,
-        true,
+        ProjectAnswers::Saved,
         None,
     );
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();

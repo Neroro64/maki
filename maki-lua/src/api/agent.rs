@@ -1349,7 +1349,6 @@ async fn session(
         }
     }
 
-    let name = name.unwrap_or_default();
     let (file_access, symbol_lease) = agent_ctx.file_access.task_scope(&ui_id, &name);
     let cancellation = Arc::new(SessionCancellation {
         parent_cancels: Arc::clone(&agent_ctx.subagent_cancels),
@@ -2506,7 +2505,9 @@ mod tests {
             )
         );
         match retirement {
-            "close" => close(lua.clone(), first.borrow().unwrap(), None).await.unwrap(),
+            "close" => close(lua.clone(), first.borrow().unwrap(), None)
+                .await
+                .unwrap(),
             "abort" => first.borrow::<LuaSession>().unwrap().cancellation.close(),
             "drop" => drop(first.take::<LuaSession>().unwrap()),
             _ => unreachable!(),
@@ -2520,7 +2521,9 @@ mod tests {
                 .is_err()
         );
         assert!(first_access.mutation_guard().await.is_err());
-        close(lua.clone(), second.borrow().unwrap(), None).await.unwrap();
+        close(lua.clone(), second.borrow().unwrap(), None)
+            .await
+            .unwrap();
     }
 
     #[test_case(false ; "close")]

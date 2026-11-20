@@ -154,7 +154,14 @@ pub const PROVIDER_BUILTINS: &[&str] = &[
 
 /// The [`DEFAULT_BUILTINS`] that only add UI or commands and register no tool,
 /// so their names stay free for MCP servers and are not valid tool names.
-pub const NON_TOOL_BUILTINS: &[&str] = &["completion", "review", "sessions", "tabcomplete", "thinking"];
+pub const NON_TOOL_BUILTINS: &[&str] = &[
+    "completion",
+    "reflect",
+    "review",
+    "sessions",
+    "tabcomplete",
+    "thinking",
+];
 
 /// Tools the edit plugin provides alongside `edit`, toggled through its options.
 pub const EDIT_SUB_TOOLS: &[&str] = &["edit_lines", "insert_lines", "multiedit"];
@@ -1391,8 +1398,6 @@ impl ToolOutputLines {
         }
     }
 }
-
-
 
 impl Default for ToolOutputLines {
     fn default() -> Self {

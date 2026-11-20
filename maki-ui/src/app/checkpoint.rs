@@ -51,11 +51,14 @@ impl App {
     }
 
     fn spawn_checkpoint(&self, messages_len: usize) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         let mut checkpoints = self.checkpoints();
         let cwd = PathBuf::from(&self.state.session.cwd);
         let session = self.state.session.id.to_string();
         let tx = self.checkpoint_tx.clone();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 if Snapshots::discover(&cwd, &session)?.is_some() {
                     return Ok(None);

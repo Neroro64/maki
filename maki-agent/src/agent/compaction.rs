@@ -1068,37 +1068,38 @@ mod tests {
             },
         ]);
         let registry = ToolRegistry::new();
-        let (raw_tx, _rx) = crate::unbounded_channel();
-            let mut vision_model = default_model();
-            vision_model.supports_vision_override = Some(true);
-            let cancel = CancelToken::none();
-            let compacted = compact_history(
-                &provider,
-                &vision_model,
-                &mut history,
-                &EventSender::new(raw_tx, 0),
-                &test_hooks(&registry, None, &vision_model, &cancel),
-                &AgentConfig::default(),
-                None,
-                0,
-                RetryPolicy::default(),
-            )
-            .await
-            .unwrap();
+        let (raw_tx, _rx) = unbounded_channel();
+        let mut vision_model = default_model();
+        vision_model.supports_vision_override = Some(true);
+        let cancel = CancelToken::none();
+        let compacted = compact_history(
+            &provider,
+            &vision_model,
+            &mut history,
+            &EventSender::new(raw_tx, 0),
+            &test_hooks(&registry, None, &vision_model, &cancel),
+            &AgentConfig::default(),
+            None,
+            0,
+            RetryPolicy::default(),
+            &RunLedger::default(),
+        )
+        .await
+        .unwrap();
 
-            assert!(
-                provider.requests.lock().unwrap().is_empty(),
-                "snapcompact must not call the summarizer"
-            );
-            let msgs = history.as_slice();
-            assert_eq!(msgs.len(), 2);
-            assert!(
-                msgs[1]
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Text { .. })),
-                "the archive keeps a text edge"
-            );
+        assert!(
+            provider.requests.lock().unwrap().is_empty(),
+            "snapcompact must not call the summarizer"
+        );
+        let msgs = history.as_slice();
+        assert_eq!(msgs.len(), 2);
+        assert!(
+            msgs[1]
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { .. })),
+            "the archive keeps a text edge"
+        );
         assert_eq!(compacted.carried, 0);
     }
 

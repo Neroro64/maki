@@ -2361,7 +2361,7 @@ fn a_dropped_host_denies_stop_instead_of_completing() {
     load_granted(
         &host,
         LAYER_PLUGIN,
-        &stop_layer(),
+        &agent_layer("agent.stop"),
         PluginPermissions::trusted(),
     );
     let hook = reg.agent_hook().unwrap();

@@ -4099,6 +4099,7 @@ fn the_cursor_parks_on_the_field_the_keys_reach(setup: fn(&mut App), expected: &
 #[test_case(KeyboardOwner::Alert ; "alert")]
 #[test_case(KeyboardOwner::Permission ; "permission_without_the_deny_field")]
 #[test_case(KeyboardOwner::PackReview ; "pack_review")]
+#[test_case(KeyboardOwner::Review ; "review")]
 #[test_case(KeyboardOwner::PlanForm ; "plan_form")]
 #[test_case(KeyboardOwner::Help ; "help")]
 #[test_case(KeyboardOwner::Usage ; "usage")]
@@ -9263,7 +9264,7 @@ fn tab_completes_the_token_while_typing(text: &str, completed: &str) {
     })
     .unwrap();
     host.load_source("skills", TAB_SKILLS).unwrap();
-    let (mut app, ui) = hosted_app(&host);
+    let (mut app, mut ui) = hosted_app(&mut host);
     type_keys(&mut app, text);
     let mode = app.state.mode;
 
@@ -9271,7 +9272,7 @@ fn tab_completes_the_token_while_typing(text: &str, completed: &str) {
     assert_eq!(app.state.mode, mode);
     let mut _popup = None;
     loop {
-        match ui.recv_timeout(HANDLER_TIMEOUT).expect(POPUP_NEVER_SHOWN) {
+        match wait_next(&mut ui, HANDLER_TIMEOUT).expect(POPUP_NEVER_SHOWN) {
             UiAction::Input {
                 req: InputRequest::Read,
                 reply_tx,
@@ -9285,12 +9286,12 @@ fn tab_completes_the_token_while_typing(text: &str, completed: &str) {
                 app.keybind_done(ticket);
             }
             UiAction::OpenWin {
-                event_tx, cmd_rx, ..
+                event_tx,
+                mut cmd_rx,
+                ..
             } => {
                 while !matches!(
-                    cmd_rx
-                        .recv_timeout(HANDLER_TIMEOUT)
-                        .expect(POPUP_NEVER_SHOWN),
+                    wait_next(&mut cmd_rx, HANDLER_TIMEOUT).expect(POPUP_NEVER_SHOWN),
                     WinCommand::SetVisible(true)
                 ) {}
                 event_tx
@@ -13614,8 +13615,10 @@ fn open_file_picker(app: &mut App) {
 }
 
 fn open_copy(app: &mut App) {
-    app.main_chat()
-        .load_messages(vec![DisplayMessage::new(DisplayRole::Assistant, "response".into())]);
+    app.main_chat().load_messages(vec![DisplayMessage::new(
+        DisplayRole::Assistant,
+        "response".into(),
+    )]);
     app.open_copy_picker();
 }
 
@@ -13625,6 +13628,10 @@ fn open_owner(app: &mut App, owner: KeyboardOwner) {
         KeyboardOwner::Alert => open_alert(app),
         KeyboardOwner::Permission => open_permission_prompt(app),
         KeyboardOwner::PackReview => open_pack_review(app),
+        KeyboardOwner::Review => {
+            let cwd = PathBuf::from(&app.state.session.cwd);
+            app.open_prompt(|app| app.review.open(cwd));
+        }
         KeyboardOwner::PlanForm => open_plan_form(app),
         KeyboardOwner::Help => open_help(app),
         KeyboardOwner::Usage => open_usage(app),
@@ -13646,6 +13653,7 @@ fn open_owner(app: &mut App, owner: KeyboardOwner) {
 #[test_case(KeyboardOwner::Alert ; "alert")]
 #[test_case(KeyboardOwner::Permission ; "permission")]
 #[test_case(KeyboardOwner::PackReview ; "pack_review")]
+#[test_case(KeyboardOwner::Review ; "review")]
 #[test_case(KeyboardOwner::PlanForm ; "plan_form")]
 #[test_case(KeyboardOwner::Help ; "help")]
 #[test_case(KeyboardOwner::Usage ; "usage")]
@@ -13687,7 +13695,8 @@ fn each_owner_alone_holds_the_keyboard(owner: KeyboardOwner) {
 
 #[test_case(KeyboardOwner::Alert, KeyboardOwner::Permission ; "alert_over_permission")]
 #[test_case(KeyboardOwner::Permission, KeyboardOwner::PackReview ; "permission_over_pack_review")]
-#[test_case(KeyboardOwner::PackReview, KeyboardOwner::PlanForm ; "pack_review_over_plan_form")]
+#[test_case(KeyboardOwner::PackReview, KeyboardOwner::Review ; "pack_review_over_review")]
+#[test_case(KeyboardOwner::Review, KeyboardOwner::PlanForm ; "review_over_plan_form")]
 #[test_case(KeyboardOwner::PlanForm, KeyboardOwner::Help ; "plan_form_over_help")]
 #[test_case(KeyboardOwner::Help, KeyboardOwner::Usage ; "help_over_usage")]
 #[test_case(KeyboardOwner::Usage, KeyboardOwner::Btw ; "usage_over_btw")]
@@ -13744,6 +13753,7 @@ const OWNER_LEAKED_A_KEY: &str = "a key the holder of the keyboard answers must 
 #[test_case(KeyboardOwner::Alert ; "alert")]
 #[test_case(KeyboardOwner::Permission ; "permission")]
 #[test_case(KeyboardOwner::PackReview ; "pack_review")]
+#[test_case(KeyboardOwner::Review ; "review")]
 #[test_case(KeyboardOwner::PlanForm ; "plan_form")]
 #[test_case(KeyboardOwner::Usage ; "usage")]
 #[test_case(KeyboardOwner::Btw ; "btw")]
