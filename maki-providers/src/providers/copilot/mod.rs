@@ -39,7 +39,7 @@ const DOC_API_URL: &str =
     "https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)";
 const FEATURES: &str = "Native Copilot Chat HTTP API with model endpoint discovery";
 const AUTH_NOTE: &str = "(or run `maki auth login copilot` to import a token from gh CLI, the Copilot client, or the system keyring)";
-
+const LONG_CONTEXT_NOTE: &str = "Models with a long-context billing tier also list a `-1m` variant, like `gpt-6.1-sol-1m` or `claude-opus-5.5-1m`, with the extended context window and long-context pricing.";
 /// No Aperture route: Copilot's auth is GraphQL-discovered, not a clean proxy
 /// target.
 pub(crate) const SPEC: ProviderSpec = ProviderSpec {
@@ -75,7 +75,7 @@ pub(crate) const SPEC: ProviderSpec = ProviderSpec {
         features: Some(FEATURES),
         auth: AuthDoc::EnvVarWith(AUTH_NOTE),
         catalog: CatalogDoc::Table,
-        trailing_notes: &[],
+        trailing_notes: &[LONG_CONTEXT_NOTE],
     },
 };
 
@@ -187,26 +187,33 @@ impl Copilot {
     }
 
     async fn model_endpoint(&self, model_id: &str) -> Result<Endpoint, AgentError> {
-        if let Some(model) = self.models.lock().unwrap().get(model_id).cloned() {
-            return Ok(model.endpoint());
+        if let Some(endpoint) = self.known_endpoint(model_id) {
+            return Ok(endpoint);
         }
 
         let models = self.fetch_models().await?;
         self.remember(models);
+        self.known_endpoint(model_id).ok_or_else(|| {
+            let known = self.models.lock().unwrap();
+            let mut available = known.keys().map(String::as_str).collect::<Vec<_>>();
+            available.sort_unstable();
+            AgentError::Config {
+                message: format!(
+                    "'{model_id}' is not enabled for this Copilot account. Available: {}",
+                    available.join(", ")
+                ),
+            }
+        })
+    }
+
+    fn known_endpoint(&self, model_id: &str) -> Option<Endpoint> {
         let known = self.models.lock().unwrap();
-        known
-            .get(model_id)
-            .map(CopilotModel::endpoint)
-            .ok_or_else(|| {
-                let mut available = known.keys().map(String::as_str).collect::<Vec<_>>();
-                available.sort_unstable();
-                AgentError::Config {
-                    message: format!(
-                        "'{model_id}' is not enabled for this Copilot account. Available: {}",
-                        available.join(", ")
-                    ),
-                }
-            })
+        if let Some(model) = known.get(model_id) {
+            return Some(model.endpoint());
+        }
+        let base_id = model_id.strip_suffix(shared::LONG_CONTEXT_SUFFIX)?;
+        let model = known.get(base_id)?;
+        model.has_long_context_variant().then(|| model.endpoint())
     }
 
     /// Merges instead of replacing. `/models` sometimes leaves out a model
@@ -267,7 +274,7 @@ impl Copilot {
         let auth = self.auth().await?;
         let wire_tools = openai_compat::convert_tools(tools);
         let mut body = json!({
-            "model": model.id,
+            "model": shared::strip_long_context(&model.id),
             "messages": openai_compat::convert_messages(messages, system),
             "n": 1,
             "stream": true,
@@ -295,12 +302,15 @@ impl Copilot {
     ) -> Result<StreamResponse, AgentError> {
         let auth = self.auth().await?;
         let mut body = responses::build_body(model, messages, system, tools, false);
+        let upstream_id = shared::strip_long_context(&model.id);
+        body["model"] = json!(upstream_id);
         let reasoning_info = model_registry::provider_info::<CopilotModelInfo>(SLUG, &model.id)
+            .or_else(|| model_registry::provider_info::<CopilotModelInfo>(SLUG, upstream_id))
             .or_else(|| {
                 self.models
                     .lock()
                     .unwrap()
-                    .get(&model.id)
+                    .get(upstream_id)
                     .map(CopilotModel::reasoning_info)
                     .map(Arc::new)
             });
@@ -457,6 +467,8 @@ struct CopilotTokenPrices {
     batch_size: u32,
     #[serde(default)]
     default: Option<CopilotTokenPriceTier>,
+    #[serde(default)]
+    long_context: Option<CopilotTokenPriceTier>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -484,7 +496,7 @@ impl CopilotModel {
     }
 
     fn model_info(&self) -> ModelInfo {
-        let reasoning = self.reasoning_info();
+        let reasoning = Arc::new(self.reasoning_info());
         ModelInfo {
             id: self.id.clone(),
             context_window: self.context_window(),
@@ -495,12 +507,36 @@ impl CopilotModel {
             tier: self
                 .model_picker_category
                 .and_then(CopilotModelCategory::tier),
-            provider_info: Some(Arc::new(reasoning)),
+            provider_info: Some(reasoning),
             extra: None,
             effort: None,
         }
     }
 
+    fn has_long_context_variant(&self) -> bool {
+        let Some(long_window) = self.long_context_window() else {
+            return false;
+        };
+        self.context_window().is_none_or(|base| long_window > base)
+    }
+
+    /// Opt-in `-1m` sibling for models that advertise a wider `long_context`
+    /// billing tier. Keeps the base model on the default tier so sessions do
+    /// not silently cross into higher long-context rates; `tier` is `None` so
+    /// auto-tier resolution never picks the costlier variant by default.
+    fn long_context_model_info(&self, base: &ModelInfo) -> Option<ModelInfo> {
+        let context_window = self.long_context_window()?;
+        if base.context_window.is_some_and(|w| context_window <= w) {
+            return None;
+        }
+        Some(ModelInfo {
+            id: format!("{}{}", self.id, shared::LONG_CONTEXT_SUFFIX),
+            context_window: Some(context_window),
+            pricing: self.long_context_pricing().or_else(|| base.pricing.clone()),
+            tier: None,
+            ..base.clone()
+        })
+    }
     /// The chat completions body carries no reasoning field, so declaring
     /// thinking there would offer the user a setting the request drops.
     fn supports_thinking(&self) -> bool {
@@ -536,7 +572,8 @@ impl CopilotModel {
     }
 
     /// `max_context_window_tokens` spans the long-context tier where a model
-    /// has one; the default tier's window is its prompt cap plus the output.
+    /// has one; the default tier's window is its prompt cap plus the output,
+    /// never exceeding the model's total `max_context_window_tokens`.
     fn context_window(&self) -> Option<u32> {
         let limits = &self.capabilities.limits;
         self.billing
@@ -544,25 +581,53 @@ impl CopilotModel {
             .as_ref()
             .and_then(|prices| prices.default.as_ref())
             .and_then(|default| default.max_prompt_tokens)
-            .zip(limits.max_output_tokens)
-            .map(|(prompt, output)| prompt.saturating_add(output))
+            .filter(|&prompt| prompt > 0)
+            .and_then(|prompt| self.tier_window(prompt))
             .or(limits.max_context_window_tokens)
     }
 
+    fn long_context_window(&self) -> Option<u32> {
+        let prompt = self
+            .billing
+            .token_prices
+            .as_ref()
+            .and_then(|prices| prices.long_context.as_ref())
+            .and_then(|tier| tier.max_prompt_tokens)
+            .filter(|&prompt| prompt > 0)?;
+        self.tier_window(prompt)
+            .or(self.capabilities.limits.max_context_window_tokens)
+    }
+
+    fn tier_window(&self, max_prompt_tokens: u32) -> Option<u32> {
+        let limits = &self.capabilities.limits;
+        let combined = max_prompt_tokens.saturating_add(limits.max_output_tokens?);
+        Some(
+            limits
+                .max_context_window_tokens
+                .map_or(combined, |total| combined.min(total)),
+        )
+    }
+
     /// `/models` reports prices in AI credits per billing batch (1 credit =
-    /// $0.01), scaled to USD per 1M tokens for [`ModelPricing`]. Only the
-    /// default context tier is read. A model without a cache write price
-    /// inherits it from the static spec by id prefix, so cost accounting
-    /// matches the offline path.
+    /// $0.01), scaled to USD per 1M tokens for [`ModelPricing`]. A tier without
+    /// a cache write price inherits it from the static spec by id prefix, so
+    /// cost accounting matches the offline path.
     fn pricing(&self) -> Option<ModelPricing> {
         let token_prices = self.billing.token_prices.as_ref()?;
-        let default = token_prices.default.as_ref()?;
-        let batch_size = f64::from(token_prices.batch_size);
-        if batch_size == 0.0 {
+        self.tier_pricing(token_prices.batch_size, token_prices.default.as_ref()?)
+    }
+
+    fn long_context_pricing(&self) -> Option<ModelPricing> {
+        let token_prices = self.billing.token_prices.as_ref()?;
+        self.tier_pricing(token_prices.batch_size, token_prices.long_context.as_ref()?)
+    }
+
+    fn tier_pricing(&self, batch_size: u32, tier: &CopilotTokenPriceTier) -> Option<ModelPricing> {
+        if batch_size == 0 {
             return None;
         }
-        let usd_per_million = AIC_TO_USD_PER_MILLION / batch_size;
-        let cache_write = default.cache_write_price.map_or_else(
+        let usd_per_million = AIC_TO_USD_PER_MILLION / f64::from(batch_size);
+        let cache_write = tier.cache_write_price.map_or_else(
             || {
                 lookup_entry(SPEC.models(), &self.id)
                     .and_then(|entry| entry.pricing.as_ref())
@@ -571,13 +636,12 @@ impl CopilotModel {
             |price| price * usd_per_million,
         );
         Some(ModelPricing::per_million(
-            default.input_price * usd_per_million,
-            default.output_price * usd_per_million,
+            tier.input_price * usd_per_million,
+            tier.output_price * usd_per_million,
             cache_write,
-            default.cache_read_price * usd_per_million,
+            tier.cache_read_price * usd_per_million,
         ))
     }
-
     fn endpoint(&self) -> Endpoint {
         if self
             .supported_endpoints
@@ -783,7 +847,7 @@ fn messages_body(
     }];
     let mut body =
         shared::build_request_body_with_system(model, messages, &system, tools, thinking, None);
-    body["model"] = json!(model.id);
+    body["model"] = json!(shared::strip_long_context(&model.id));
     body["stream"] = json!(true);
     body
 }
@@ -803,6 +867,12 @@ fn effort_dialect(info: &CopilotModelInfo) -> EffortDialect<'_> {
 
 fn sends_thinking(model: &Model, choice: ThinkingConfig) -> ThinkingConfig {
     model_registry::provider_info::<CopilotModelInfo>(SLUG, &model.id)
+        .or_else(|| {
+            model_registry::provider_info::<CopilotModelInfo>(
+                SLUG,
+                shared::strip_long_context(&model.id),
+            )
+        })
         .map_or(choice, |info| listed_sends_thinking(&info, choice))
 }
 
@@ -817,6 +887,23 @@ fn listed_sends_thinking(info: &CopilotModelInfo, choice: ThinkingConfig) -> Thi
     }
 }
 
+fn listed_model_infos(models: &[CopilotModel]) -> Vec<ModelInfo> {
+    let mut infos = Vec::new();
+    let mut variants = Vec::new();
+    for model in models.iter().filter(|m| m.model_picker_enabled) {
+        let base = model.model_info();
+        if let Some(variant) = model.long_context_model_info(&base) {
+            variants.push(variant);
+        }
+        infos.push(base);
+    }
+    for variant in variants {
+        if infos.iter().all(|info| info.id != variant.id) {
+            infos.push(variant);
+        }
+    }
+    infos
+}
 impl Provider for Copilot {
     fn stream_message<'a>(
         &'a self,
@@ -853,11 +940,7 @@ impl Provider for Copilot {
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
         Box::pin(async move {
             let models = self.fetch_models().await?;
-            let infos = models
-                .iter()
-                .filter(|model| model.model_picker_enabled)
-                .map(CopilotModel::model_info)
-                .collect::<Vec<_>>();
+            let infos = listed_model_infos(&models);
             self.remember(models);
             Ok(infos)
         })
@@ -891,7 +974,10 @@ mod tests {
     const OPUS_CACHE_WRITE: f64 = 6.25;
     const HIDDEN_ONLY_CATALOG: &[Canned] = &[Canned::json(
         200,
-        r#"{"data":[{"id":"gpt-4o-hidden","model_picker_enabled":false,"capabilities":{"type":"chat"},"supported_endpoints":["/responses"]}]}"#,
+        r#"{"data":[
+            {"id":"gpt-4o-hidden","model_picker_enabled":false,"capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000,"max_output_tokens":16384}},"supported_endpoints":["/responses"]},
+            {"id":"gpt-6-hidden","model_picker_enabled":false,"capabilities":{"type":"chat","limits":{"max_context_window_tokens":1050000,"max_output_tokens":128000}},"billing":{"token_prices":{"batch_size":1000000,"default":{"max_prompt_tokens":272000},"long_context":{"max_prompt_tokens":922000}}},"supported_endpoints":["/responses"]}
+        ]}"#,
     )];
     const CLAUDE_SPEC: &str = "copilot/claude-opus-5";
     const REPLY: &str = "reply";
@@ -935,6 +1021,8 @@ mod tests {
     }
 
     #[test_case("gpt-4o-hidden", Some(Endpoint::Responses) ; "hidden_model_takes_its_listed_endpoint")]
+    #[test_case("gpt-6-hidden-1m", Some(Endpoint::Responses) ; "tiered_long_context_variant_takes_base_endpoint")]
+    #[test_case("gpt-4o-hidden-1m", None ; "untiered_model_refuses_long_context_suffix")]
     #[test_case("gpt-4o", None ; "unlisted_model_is_refused")]
     #[tokio::test]
     async fn endpoint_comes_from_the_whole_catalog(model_id: &str, expected: Option<Endpoint>) {
@@ -1196,6 +1284,7 @@ mod tests {
     }
 
     #[test_case(json!({"max_context_window_tokens": 1_000_000, "max_output_tokens": 128_000}), json!({"batch_size": 1_000_000, "default": {"max_prompt_tokens": 200_000}}) => Some(328_000) ; "default_tier")]
+    #[test_case(json!({"max_context_window_tokens": 1_048_576, "max_output_tokens": 131_072}), json!({"batch_size": 1_000_000, "default": {"max_prompt_tokens": 983_040}}) => Some(1_048_576) ; "clamped_to_total_window")]
     #[test_case(json!({"max_context_window_tokens": 200_000, "max_output_tokens": 64_000}), Value::Null => Some(200_000) ; "no_tiers")]
     fn context_window_is_the_default_tier(limits: Value, token_prices: Value) -> Option<u32> {
         let model: CopilotModel = serde_json::from_value(json!({
@@ -1205,6 +1294,80 @@ mod tests {
         }))
         .unwrap();
         model.model_info().context_window
+    }
+
+    #[test]
+    fn synthesizes_long_context_variant_with_tier_pricing_and_strips_wire_id() {
+        let model: CopilotModel = serde_json::from_value(json!({
+            "id": "gpt-6.1-sol",
+            "model_picker_enabled": true,
+            "model_picker_category": "powerful",
+            "supported_endpoints": [RESPONSES_PATH],
+            "capabilities": {
+                "type": "chat",
+                "limits": {
+                    "max_context_window_tokens": 1_050_000,
+                    "max_output_tokens": 128_000,
+                    "max_prompt_tokens": 922_000
+                },
+                "supports": {
+                    "reasoning_effort": ["low", "medium", "high", "xhigh", "max"],
+                    "vision": true
+                }
+            },
+            "billing": {
+                "token_prices": {
+                    "batch_size": 1_000_000,
+                    "default": {
+                        "input_price": 200.0,
+                        "output_price": 1000.0,
+                        "cache_read_price": 10.0,
+                        "cache_write_price": 250.0,
+                        "max_prompt_tokens": 272_000
+                    },
+                    "long_context": {
+                        "input_price": 400.0,
+                        "output_price": 1500.0,
+                        "cache_read_price": 20.0,
+                        "cache_write_price": 500.0,
+                        "max_prompt_tokens": 922_000
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let infos = listed_model_infos(&[model]);
+        assert_eq!(infos.len(), 2);
+
+        let base = &infos[0];
+        assert_eq!(base.id, "gpt-6.1-sol");
+        assert_eq!(base.context_window, Some(400_000));
+        assert_eq!(base.tier, Some(ModelTier::Strong));
+        let base_pricing = base.pricing.as_ref().unwrap();
+        assert_eq!(base_pricing.input, 2.0);
+        assert_eq!(base_pricing.output, 10.0);
+
+        let variant = &infos[1];
+        assert_eq!(variant.id, "gpt-6.1-sol-1m");
+        assert_eq!(variant.context_window, Some(1_050_000));
+        assert_eq!(variant.max_output_tokens, Some(128_000));
+        assert_eq!(variant.tier, None);
+        let variant_pricing = variant.pricing.as_ref().unwrap();
+        assert_eq!(variant_pricing.input, 4.0);
+        assert_eq!(variant_pricing.output, 15.0);
+        assert_eq!(variant_pricing.cache_read, 0.2);
+        assert_eq!(variant_pricing.cache_write, 5.0);
+
+        let claude_1m = Model::from_spec("copilot/claude-opus-5-1m").unwrap();
+        let body = messages_body(
+            &claude_1m,
+            &[Message::user("hi".into())],
+            "system",
+            &json!([]),
+            ThinkingConfig::Off,
+        );
+        assert_eq!(body["model"], json!("claude-opus-5"));
     }
 
     #[test]
