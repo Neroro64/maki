@@ -2,7 +2,7 @@
 
 use crate::analysis::{self, Analysis, Status, TreeRow};
 use crate::diffview::{DiffLine, Sign, fn_diff};
-use crate::git::BINARY_SOURCE_PREFIX;
+use crate::git::{BINARY_SOURCE_PREFIX, RevCandidate};
 use crate::syntax::SymbolKind;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -746,6 +746,571 @@ pub fn run(app: &mut App) -> anyhow::Result<()> {
     res
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SelectFocus {
+    Source,
+    Target,
+}
+
+pub struct Selector {
+    pub source_items: Vec<RevCandidate>,
+    pub target_items: Vec<RevCandidate>,
+    pub source_sel: usize,
+    pub target_sel: usize,
+    pub source_state: ListState,
+    pub target_state: ListState,
+    pub focus: SelectFocus,
+    pub filter: String,
+    pub filter_mode: bool,
+    pub custom_input: Option<String>,
+    pub flash: Option<String>,
+    pub confirmed: Option<(String, String)>,
+    pub quit: bool,
+}
+
+impl Selector {
+    pub fn new(candidates: Vec<RevCandidate>) -> Self {
+        let source_items: Vec<RevCandidate> = candidates
+            .iter()
+            .filter(|c| !c.is_worktree)
+            .cloned()
+            .collect();
+        let target_items = candidates;
+
+        let worktree_dirty = target_items
+            .iter()
+            .find(|c| c.is_worktree)
+            .map(|c| !c.detail.starts_with("clean"))
+            .unwrap_or(false);
+
+        let source_default = if worktree_dirty {
+            source_items
+                .iter()
+                .position(|c| c.rev == "HEAD")
+                .unwrap_or(0)
+        } else {
+            source_items
+                .iter()
+                .position(|c| c.rev == "HEAD~1")
+                .or_else(|| {
+                    source_items
+                        .iter()
+                        .position(|c| c.rev == "origin/main" || c.rev == "main")
+                })
+                .unwrap_or(0)
+        };
+
+        let target_default = if worktree_dirty {
+            target_items.iter().position(|c| c.is_worktree).unwrap_or(0)
+        } else {
+            target_items
+                .iter()
+                .position(|c| c.rev == "HEAD")
+                .unwrap_or(0)
+        };
+
+        Self {
+            source_items,
+            target_items,
+            source_sel: source_default,
+            target_sel: target_default,
+            source_state: ListState::default(),
+            target_state: ListState::default(),
+            focus: SelectFocus::Source,
+            filter: String::new(),
+            filter_mode: false,
+            custom_input: None,
+            flash: None,
+            confirmed: None,
+            quit: false,
+        }
+    }
+
+    pub fn selected_source(&self) -> Option<&str> {
+        self.source_items
+            .get(self.source_sel)
+            .map(|c| c.rev.as_str())
+    }
+
+    pub fn selected_target(&self) -> Option<&str> {
+        self.target_items
+            .get(self.target_sel)
+            .map(|c| c.rev.as_str())
+    }
+
+    fn visible_indices(&self, focus: SelectFocus) -> Vec<usize> {
+        let items = match focus {
+            SelectFocus::Source => &self.source_items,
+            SelectFocus::Target => &self.target_items,
+        };
+        if self.filter.is_empty() || self.focus != focus {
+            return (0..items.len()).collect();
+        }
+        let query = self.filter.to_ascii_lowercase();
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.rev.to_ascii_lowercase().contains(&query)
+                    || item.detail.to_ascii_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn clamp_active_selection(&mut self) {
+        let indices = self.visible_indices(self.focus);
+        if indices.is_empty() {
+            return;
+        }
+        let sel = match self.focus {
+            SelectFocus::Source => &mut self.source_sel,
+            SelectFocus::Target => &mut self.target_sel,
+        };
+        if !indices.contains(sel) {
+            let query = self.filter.to_ascii_lowercase();
+            let items = match self.focus {
+                SelectFocus::Source => &self.source_items,
+                SelectFocus::Target => &self.target_items,
+            };
+            *sel = indices
+                .iter()
+                .copied()
+                .find(|&i| items[i].rev.to_ascii_lowercase().contains(&query))
+                .unwrap_or(indices[0]);
+        }
+    }
+
+    pub fn handle_event(&mut self, key: KeyEvent) {
+        if let Some(input) = &mut self.custom_input {
+            match key.code {
+                KeyCode::Esc => {
+                    self.custom_input = None;
+                }
+                KeyCode::Enter => {
+                    let typed = input.trim().to_string();
+                    self.custom_input = None;
+                    if !typed.is_empty() {
+                        self.apply_custom_ref(typed);
+                    }
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    input.push(ch);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.filter_mode {
+            match key.code {
+                KeyCode::Esc => {
+                    self.filter.clear();
+                    self.filter_mode = false;
+                }
+                KeyCode::Enter => {
+                    self.filter_mode = false;
+                }
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.clamp_active_selection();
+                }
+                KeyCode::Down => self.move_selection(1),
+                KeyCode::Up => self.move_selection(-1),
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.filter.push(ch);
+                    self.clamp_active_selection();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        self.handle_key(key.code);
+    }
+
+    pub fn handle_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc => {
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                } else {
+                    self.quit = true;
+                }
+            }
+            KeyCode::Tab
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                self.filter.clear();
+                self.focus = match self.focus {
+                    SelectFocus::Source => SelectFocus::Target,
+                    SelectFocus::Target => SelectFocus::Source,
+                };
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => {
+                let indices = self.visible_indices(self.focus);
+                if let Some(&first) = indices.first() {
+                    match self.focus {
+                        SelectFocus::Source => self.source_sel = first,
+                        SelectFocus::Target => self.target_sel = first,
+                    }
+                }
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                let indices = self.visible_indices(self.focus);
+                if let Some(&last) = indices.last() {
+                    match self.focus {
+                        SelectFocus::Source => self.source_sel = last,
+                        SelectFocus::Target => self.target_sel = last,
+                    }
+                }
+            }
+            KeyCode::Char('/') => {
+                self.filter_mode = true;
+            }
+            KeyCode::Char('i') => {
+                self.custom_input = Some(String::new());
+            }
+            KeyCode::Char('s') => {
+                let Some(src) = self.selected_source().map(str::to_string) else {
+                    return;
+                };
+                let Some(tgt_item) = self.target_items.get(self.target_sel).cloned() else {
+                    return;
+                };
+                if tgt_item.is_worktree {
+                    self.flash = Some("cannot swap: base revision cannot be worktree".into());
+                    return;
+                }
+                if let Some(new_src_idx) =
+                    self.source_items.iter().position(|c| c.rev == tgt_item.rev)
+                    && let Some(new_tgt_idx) = self.target_items.iter().position(|c| c.rev == src)
+                {
+                    self.source_sel = new_src_idx;
+                    self.target_sel = new_tgt_idx;
+                    self.flash = Some(format!("swapped to {} → {}", tgt_item.rev, src));
+                }
+            }
+            KeyCode::Enter => {
+                let (Some(src), Some(tgt)) = (self.selected_source(), self.selected_target())
+                else {
+                    self.flash = Some("select both a source and target revision".into());
+                    return;
+                };
+                if src == tgt {
+                    self.flash = Some(format!(
+                        "source and target are both '{src}' — choose two distinct revisions"
+                    ));
+                    return;
+                }
+                self.confirmed = Some((src.to_string(), tgt.to_string()));
+            }
+            _ => {}
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let indices = self.visible_indices(self.focus);
+        if indices.is_empty() {
+            return;
+        }
+        let current = match self.focus {
+            SelectFocus::Source => self.source_sel,
+            SelectFocus::Target => self.target_sel,
+        };
+        let pos = indices.iter().position(|&i| i == current).unwrap_or(0);
+        let next_pos = if delta > 0 {
+            (pos + (delta as usize)).min(indices.len() - 1)
+        } else {
+            pos.saturating_sub(delta.unsigned_abs())
+        };
+        let next_idx = indices[next_pos];
+        match self.focus {
+            SelectFocus::Source => self.source_sel = next_idx,
+            SelectFocus::Target => self.target_sel = next_idx,
+        }
+    }
+
+    fn apply_custom_ref(&mut self, typed: String) {
+        if self.focus == SelectFocus::Source && crate::git::is_worktree(&typed) {
+            self.flash = Some("source (base) revision cannot be worktree".into());
+            return;
+        }
+        self.filter.clear();
+        match self.focus {
+            SelectFocus::Source => {
+                if let Some(pos) = self.source_items.iter().position(|c| c.rev == typed) {
+                    self.source_sel = pos;
+                } else {
+                    self.source_items.insert(
+                        0,
+                        RevCandidate {
+                            rev: typed.clone(),
+                            detail: "custom revision".into(),
+                            is_worktree: false,
+                        },
+                    );
+                    self.source_sel = 0;
+                }
+                if !self.target_items.iter().any(|c| c.rev == typed) {
+                    self.target_items.insert(
+                        0,
+                        RevCandidate {
+                            rev: typed,
+                            detail: "custom revision".into(),
+                            is_worktree: false,
+                        },
+                    );
+                    self.target_sel += 1;
+                }
+            }
+            SelectFocus::Target => {
+                if let Some(pos) = self.target_items.iter().position(|c| c.rev == typed) {
+                    self.target_sel = pos;
+                } else {
+                    let is_wt = crate::git::is_worktree(&typed);
+                    self.target_items.insert(
+                        0,
+                        RevCandidate {
+                            rev: typed.clone(),
+                            detail: "custom revision".into(),
+                            is_worktree: is_wt,
+                        },
+                    );
+                    self.target_sel = 0;
+                    if !is_wt && !self.source_items.iter().any(|c| c.rev == typed) {
+                        self.source_items.insert(
+                            0,
+                            RevCandidate {
+                                rev: typed,
+                                detail: "custom revision".into(),
+                                is_worktree: false,
+                            },
+                        );
+                        self.source_sel += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn draw_selector(f: &mut ratatui::Frame, sel: &mut Selector) {
+    let root = ratatui::layout::Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(8),
+            Constraint::Length(1),
+        ])
+        .split(f.area());
+
+    let src_label = sel.selected_source().unwrap_or("—");
+    let tgt_label = sel.selected_target().unwrap_or("—");
+    let header = Line::from(vec![
+        Span::styled(
+            " calldive ",
+            Style::default().bg(Color::Blue).fg(Color::White),
+        ),
+        Span::raw("  select revisions to diff: "),
+        Span::styled(
+            src_label.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" → "),
+        Span::styled(
+            tgt_label.to_string(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(header), root[0]);
+
+    let panes = ratatui::layout::Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(root[1]);
+
+    let render_pane = |items: &[RevCandidate],
+                       visible: &[usize],
+                       selected_idx: usize,
+                       focused: bool,
+                       active_color: Color,
+                       title: String|
+     -> (List<'static>, Option<usize>) {
+        let mut state_sel = None;
+        let list_items: Vec<ListItem<'static>> = visible
+            .iter()
+            .enumerate()
+            .map(|(row_pos, &orig_idx)| {
+                let c = &items[orig_idx];
+                let is_sel = orig_idx == selected_idx;
+                if is_sel {
+                    state_sel = Some(row_pos);
+                }
+                let marker = if is_sel { "● " } else { "  " };
+                let rev_style = if is_sel {
+                    Style::default()
+                        .fg(active_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let mut spans = vec![
+                    Span::styled(marker, Style::default().fg(active_color)),
+                    Span::styled(c.rev.clone(), rev_style),
+                    Span::raw("  "),
+                    Span::styled(c.detail.clone(), Style::default().fg(Color::DarkGray)),
+                ];
+                if is_sel && focused {
+                    for s in &mut spans {
+                        s.style = s.style.add_modifier(Modifier::REVERSED);
+                    }
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(if focused {
+                Style::default().fg(Color::Blue)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        (
+            List::new(list_items)
+                .block(block)
+                .highlight_style(Style::default()),
+            state_sel,
+        )
+    };
+
+    let src_visible = sel.visible_indices(SelectFocus::Source);
+    let tgt_visible = sel.visible_indices(SelectFocus::Target);
+    let src_title = if sel.focus == SelectFocus::Source && !sel.filter.is_empty() {
+        format!(" source / base [filter: {}] ", sel.filter)
+    } else {
+        " source / base ".to_string()
+    };
+    let tgt_title = if sel.focus == SelectFocus::Target && !sel.filter.is_empty() {
+        format!(" target / head [filter: {}] ", sel.filter)
+    } else {
+        " target / head ".to_string()
+    };
+
+    let (src_list, src_pos) = render_pane(
+        &sel.source_items,
+        &src_visible,
+        sel.source_sel,
+        sel.focus == SelectFocus::Source,
+        Color::Yellow,
+        src_title,
+    );
+    sel.source_state.select(src_pos);
+    f.render_stateful_widget(src_list, panes[0], &mut sel.source_state);
+
+    let (tgt_list, tgt_pos) = render_pane(
+        &sel.target_items,
+        &tgt_visible,
+        sel.target_sel,
+        sel.focus == SelectFocus::Target,
+        Color::Green,
+        tgt_title,
+    );
+    sel.target_state.select(tgt_pos);
+    f.render_stateful_widget(tgt_list, panes[1], &mut sel.target_state);
+
+    let footer_line = if let Some(input) = &sel.custom_input {
+        let pane_name = match sel.focus {
+            SelectFocus::Source => "source",
+            SelectFocus::Target => "target",
+        };
+        Line::from(vec![
+            Span::styled(
+                format!(" custom {pane_name} rev: "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{input}█"), Style::default().fg(Color::White)),
+            Span::styled(
+                "  (enter apply · esc cancel)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else if sel.filter_mode {
+        Line::from(vec![
+            Span::styled(
+                " filter: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}█", sel.filter),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                "  (enter done · esc clear)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else if let Some(msg) = sel.flash.take() {
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(Color::Yellow),
+        ))
+    } else {
+        Line::from(Span::styled(
+            " j/k move · tab/h/l switch pane · enter diff · s swap · / filter · i custom rev · q quit ",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(Paragraph::new(footer_line), root[2]);
+}
+
+pub fn select_revisions(candidates: Vec<RevCandidate>) -> anyhow::Result<Option<(String, String)>> {
+    let mut selector = Selector::new(candidates);
+    let mut terminal = ratatui::init();
+    let res = (|| -> anyhow::Result<Option<(String, String)>> {
+        loop {
+            terminal.draw(|f| draw_selector(f, &mut selector))?;
+            if let Event::Key(k) = event::read()?
+                && k.kind == KeyEventKind::Press
+            {
+                selector.handle_event(k);
+            }
+            if let Some(pair) = selector.confirmed.take() {
+                return Ok(Some(pair));
+            }
+            if selector.quit {
+                return Ok(None);
+            }
+        }
+    })();
+    ratatui::restore();
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,5 +1705,97 @@ mod tests {
         assert_eq!(app.detail_scroll, 0);
         app.handle_key(KeyCode::End);
         assert_eq!(app.detail_scroll, max);
+    }
+
+    #[test]
+    fn selector_defaults_navigation_swap_filter_and_custom_input() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let candidates = vec![
+            RevCandidate {
+                rev: "worktree".into(),
+                detail: "clean working tree".into(),
+                is_worktree: true,
+            },
+            RevCandidate {
+                rev: "HEAD".into(),
+                detail: "15c006d latest".into(),
+                is_worktree: false,
+            },
+            RevCandidate {
+                rev: "HEAD~1".into(),
+                detail: "555ff2f previous".into(),
+                is_worktree: false,
+            },
+            RevCandidate {
+                rev: "origin/main".into(),
+                detail: "555ff2f remote main".into(),
+                is_worktree: false,
+            },
+        ];
+        let mut sel = Selector::new(candidates);
+        assert!(!sel.source_items.iter().any(|c| c.is_worktree));
+        assert_eq!(sel.selected_source(), Some("HEAD~1"));
+        assert_eq!(sel.selected_target(), Some("HEAD"));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| draw_selector(f, &mut sel)).unwrap();
+
+        sel.handle_key(KeyCode::Char('s'));
+        assert_eq!(sel.selected_source(), Some("HEAD"));
+        assert_eq!(sel.selected_target(), Some("HEAD~1"));
+
+        sel.handle_key(KeyCode::Tab);
+        assert_eq!(sel.focus, SelectFocus::Target);
+        sel.handle_key(KeyCode::Char('/'));
+        for ch in "origin".chars() {
+            sel.handle_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        sel.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(sel.selected_target(), Some("origin/main"));
+
+        sel.handle_key(KeyCode::Tab);
+        assert_eq!(sel.focus, SelectFocus::Source);
+        sel.handle_key(KeyCode::Char('i'));
+        for ch in "feature/login".chars() {
+            sel.handle_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        sel.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(sel.selected_source(), Some("feature/login"));
+
+        sel.handle_key(KeyCode::Enter);
+        assert_eq!(
+            sel.confirmed,
+            Some(("feature/login".into(), "origin/main".into()))
+        );
+    }
+
+    #[test]
+    fn selector_rejects_identical_source_and_target_and_worktree_base() {
+        let candidates = vec![
+            RevCandidate {
+                rev: "worktree".into(),
+                detail: "2 changed files".into(),
+                is_worktree: true,
+            },
+            RevCandidate {
+                rev: "HEAD".into(),
+                detail: "15c006d latest".into(),
+                is_worktree: false,
+            },
+        ];
+        let mut sel = Selector::new(candidates);
+        assert_eq!(sel.selected_source(), Some("HEAD"));
+        assert_eq!(sel.selected_target(), Some("worktree"));
+
+        sel.handle_key(KeyCode::Char('s'));
+        assert_eq!(sel.selected_source(), Some("HEAD"));
+        assert_eq!(sel.selected_target(), Some("worktree"));
+        assert!(sel.flash.as_deref().unwrap_or("").contains("worktree"));
+
+        sel.handle_key(KeyCode::Tab);
+        sel.handle_key(KeyCode::Char('j'));
+        assert_eq!(sel.selected_target(), Some("HEAD"));
+        sel.handle_key(KeyCode::Enter);
+        assert!(sel.confirmed.is_none());
     }
 }

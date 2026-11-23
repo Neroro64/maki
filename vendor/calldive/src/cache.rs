@@ -6,11 +6,20 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 // Changing the executable also invalidates entries, including local rebuilds.
-const FORMAT: &[u8] = b"calldive-analysis-v2";
+const FORMAT: &[u8] = b"calldive-analysis-v3";
+const MAX_ENTRIES: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheStatus {
+    Hit,
+    Miss,
+}
 
 pub struct Cache {
+    directory: PathBuf,
     path: PathBuf,
     key: String,
 }
@@ -37,15 +46,14 @@ impl Cache {
     ) -> Result<Self> {
         let mut hash = blake3::Hasher::new();
         field(&mut hash, FORMAT);
+        // Include resolved commit IDs of the compared pair and current HEAD so
+        // moving HEAD or changing either revision's commit ID invalidates entries.
+        let current_head = repo.resolve_commit("HEAD").unwrap_or_default();
+        field(&mut hash, current_head.as_bytes());
         field(&mut hash, base.as_bytes());
         field(&mut hash, head.unwrap_or(git::WORKTREE).as_bytes());
         field(&mut hash, &[u8::from(include_tests)]);
-        let executable = std::env::current_exe().context("locating calldive executable")?;
-        let mut binary = File::open(executable).context("reading calldive executable")?;
-        // Fixed-size digest separates executable bytes from the other fields.
-        let mut executable_hash = blake3::Hasher::new();
-        executable_hash.update_reader(&mut binary)?;
-        field(&mut hash, executable_hash.finalize().as_bytes());
+        field(&mut hash, executable_digest()?);
         for change in changes {
             field(&mut hash, &[change.status as u8]);
             field(&mut hash, change.path.as_bytes());
@@ -83,9 +91,13 @@ impl Cache {
                 }
             }
         }
+        let key = hash.finalize().to_hex().to_string();
+        let directory = repo.cache_dir()?;
+        let path = directory.join(format!("analysis-{}.json", &key[..32]));
         Ok(Self {
-            path: repo.cache_dir()?.join("analysis.json"),
-            key: hash.finalize().to_hex().to_string(),
+            directory,
+            path,
+            key,
         })
     }
 
@@ -106,9 +118,12 @@ impl Cache {
     }
 
     pub fn store(&self, analysis: &Analysis) -> Result<()> {
-        let directory = self.path.parent().context("cache directory missing")?;
-        fs::create_dir_all(directory).context("creating analysis cache directory")?;
-        let temporary = directory.join(format!("analysis-{}.tmp", std::process::id()));
+        fs::create_dir_all(&self.directory).context("creating analysis cache directory")?;
+        let temporary = self.directory.join(format!(
+            "analysis-{}-{}.tmp",
+            &self.key[..16],
+            std::process::id()
+        ));
         let result = (|| -> Result<()> {
             let mut writer = BufWriter::new(File::create(&temporary)?);
             serde_json::to_writer(
@@ -120,14 +135,64 @@ impl Cache {
             )?;
             writer.flush()?;
             drop(writer);
+            if self.path.exists() {
+                let _ = fs::remove_file(&self.path);
+            }
             fs::rename(&temporary, &self.path)?;
             Ok(())
         })();
         if result.is_err() {
-            let _ = fs::remove_file(temporary);
+            let _ = fs::remove_file(&temporary);
         }
+        self.prune_stale();
         result.context("writing analysis cache")
     }
+
+    fn prune_stale(&self) {
+        let Ok(entries) = fs::read_dir(&self.directory) else {
+            return;
+        };
+        let mut cached_files = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == "analysis.json" {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            if name.starts_with("analysis-") && name.ends_with(".json") && path != self.path {
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                cached_files.push((modified, path));
+            }
+        }
+        if cached_files.len() < MAX_ENTRIES {
+            return;
+        }
+        cached_files.sort_by_key(|(modified, _)| *modified);
+        let excess = cached_files.len() + 1 - MAX_ENTRIES;
+        for (_, path) in cached_files.into_iter().take(excess) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn executable_digest() -> Result<&'static [u8; 32]> {
+    static DIGEST: OnceLock<[u8; 32]> = OnceLock::new();
+    if let Some(digest) = DIGEST.get() {
+        return Ok(digest);
+    }
+    let executable = std::env::current_exe().context("locating calldive executable")?;
+    let mut binary = File::open(executable).context("reading calldive executable")?;
+    let mut executable_hash = blake3::Hasher::new();
+    executable_hash.update_reader(&mut binary)?;
+    let digest = *executable_hash.finalize().as_bytes();
+    let _ = DIGEST.set(digest);
+    Ok(DIGEST.get().expect("executable digest initialized"))
 }
 
 fn field(hash: &mut blake3::Hasher, bytes: &[u8]) {

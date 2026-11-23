@@ -29,6 +29,13 @@ pub struct Blob {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevCandidate {
+    pub rev: String,
+    pub detail: String,
+    pub is_worktree: bool,
+}
+
 impl GitRepo {
     pub fn open(path: &Path) -> Result<Self> {
         let out = Command::new("git")
@@ -241,6 +248,89 @@ impl GitRepo {
         Ok(blobs)
     }
 
+    /// Discover revision candidates for the interactive TUI selector:
+    /// worktree, HEAD, HEAD~N, local/remote branches, and tags.
+    pub fn rev_candidates(&self) -> Result<Vec<RevCandidate>> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+
+        let worktree_detail = match self.resolve_commit("HEAD") {
+            Ok(head_sha) => match self.changed_files(&head_sha, None) {
+                Ok(changes) if changes.is_empty() => "clean working tree".to_string(),
+                Ok(changes) => format!(
+                    "{} changed file{}",
+                    changes.len(),
+                    if changes.len() == 1 { "" } else { "s" }
+                ),
+                Err(_) => "working tree on disk".to_string(),
+            },
+            Err(_) => "working tree on disk".to_string(),
+        };
+        seen.insert(WORKTREE.to_string());
+        candidates.push(RevCandidate {
+            rev: WORKTREE.to_string(),
+            detail: worktree_detail,
+            is_worktree: true,
+        });
+
+        if let Ok(out) = self.run(&["log", "-n", "10", "--format=%h%x09%s"]) {
+            for (idx, line) in String::from_utf8_lossy(&out).lines().enumerate() {
+                let rev = if idx == 0 {
+                    "HEAD".to_string()
+                } else {
+                    format!("HEAD~{idx}")
+                };
+                if seen.insert(rev.clone()) {
+                    let detail = match line.split_once('\t') {
+                        Some((sha, subject)) if !subject.is_empty() => format!("{sha} {subject}"),
+                        Some((sha, _)) => sha.to_string(),
+                        None => line.trim().to_string(),
+                    };
+                    candidates.push(RevCandidate {
+                        rev,
+                        detail,
+                        is_worktree: false,
+                    });
+                }
+            }
+        }
+
+        if let Ok(out) = self.run(&[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)\t%(refname:short)\t%(symref)\t%(objectname:short)\t%(subject)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ]) {
+            for line in String::from_utf8_lossy(&out).lines() {
+                let parts: Vec<&str> = line.splitn(5, '\t').collect();
+                if parts.len() < 5 {
+                    continue;
+                }
+                let (_full, short, symref, sha, subject) =
+                    (parts[0], parts[1], parts[2], parts[3], parts[4]);
+                if !symref.is_empty() || short.is_empty() {
+                    continue;
+                }
+                if seen.insert(short.to_string()) {
+                    let detail = if subject.is_empty() {
+                        sha.to_string()
+                    } else {
+                        format!("{sha} {subject}")
+                    };
+                    candidates.push(RevCandidate {
+                        rev: short.to_string(),
+                        detail,
+                        is_worktree: false,
+                    });
+                }
+            }
+        }
+
+        Ok(candidates)
+    }
+
     /// Keep one batch process alive for both changed sources and caller candidates.
     pub fn with_blobs<T>(&self, read: impl FnOnce(&mut BlobReader) -> Result<T>) -> Result<T> {
         let mut child = Command::new("git")
@@ -407,7 +497,7 @@ fn decode_path(bytes: &[u8]) -> String {
 }
 
 pub fn decode_source(bytes: Vec<u8>) -> String {
-    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+    if bytes.contains(&0) {
         return format!(
             "{BINARY_SOURCE_PREFIX}{} bytes (blake3 {})\n",
             bytes.len(),
@@ -445,14 +535,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sources_preserve_utf8_strip_bom_and_summarize_binary() {
+    fn sources_decode_lossily_strip_bom_and_summarize_nul_binary() {
         assert_eq!(
             decode_source(b"\xef\xbb\xbffn run() {}".to_vec()),
             "fn run() {}"
         );
-        assert!(
-            decode_source(b"// caf\xe9\nfn run() {}".to_vec()).starts_with(BINARY_SOURCE_PREFIX)
+        assert_eq!(
+            decode_source(b"// caf\xe9\nfn run() {}".to_vec()),
+            "// caf\u{fffd}\nfn run() {}"
         );
+        assert!(decode_source(vec![0, 1, 2]).starts_with(BINARY_SOURCE_PREFIX));
         assert_eq!(decode_source(b"x\xef\xbb\xbf".to_vec()), "x\u{feff}");
     }
 }

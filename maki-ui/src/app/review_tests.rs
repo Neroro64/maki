@@ -94,7 +94,7 @@ fn review_command_opens_a_native_modal_without_plugins() {
 fn review_keys_do_not_modify_the_chat_draft(code: KeyCode) {
     let mut app = test_app();
     app.input_box.set_input(DRAFT);
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
     assert_eq!(app.input_box.buffer.value(), DRAFT);
     assert!(app.review.is_open());
@@ -104,7 +104,7 @@ fn review_keys_do_not_modify_the_chat_draft(code: KeyCode) {
 fn review_paste_does_not_leak_into_the_chat_draft() {
     let mut app = test_app();
     app.input_box.set_input(DRAFT);
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     app.update(Msg::Paste(REVIEW_PROMPT.into()));
     assert_eq!(app.input_box.buffer.value(), DRAFT);
 }
@@ -113,7 +113,7 @@ fn review_paste_does_not_leak_into_the_chat_draft() {
 fn review_submission_uses_the_current_session_and_preserves_its_draft() {
     let mut app = test_app();
     app.input_box.set_input(DRAFT);
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     let actions = app.submit_review(REVIEW_PROMPT.into());
     assert!(
         matches!(actions.as_slice(), [Action::SendMessage(message)] if message.message == REVIEW_PROMPT)
@@ -126,7 +126,7 @@ fn review_submission_uses_the_current_session_and_preserves_its_draft() {
 fn review_submission_queues_while_the_agent_is_busy() {
     let mut app = test_app();
     app.status = Status::Streaming;
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert_eq!(app.queue.len(), 1);
     assert!(!app.review.is_open());
@@ -136,7 +136,7 @@ fn review_submission_queues_while_the_agent_is_busy() {
 fn rejected_review_submission_keeps_the_review_open() {
     let mut app = test_app();
     app.chats[0].auth_parked = true;
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert!(app.review.is_open());
 }
@@ -161,7 +161,7 @@ fn review_submission_reaches_the_focused_subagent() {
     app.active_chat = 1;
     let inbox = Arc::new(SessionControl::default());
     app.chats[1].control = Some(Arc::clone(&inbox));
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert_eq!(inbox.texts(), [REVIEW_PROMPT]);
     assert!(app.queue.is_empty());
@@ -171,7 +171,7 @@ fn review_submission_reaches_the_focused_subagent() {
 #[test]
 fn review_notes_cannot_be_submitted_from_another_repository() {
     let mut app = test_app();
-    app.review.open(PathBuf::from("original-repository"));
+    app.review.open(PathBuf::from("original-repository"), "");
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert!(app.review.is_open());
     assert!(app.queue.is_empty());
@@ -186,7 +186,7 @@ fn review_submission_to_a_closed_subagent_keeps_the_review_open() {
     if let Some(control) = &app.chats[1].control {
         control.end(EndReason::Stopped(Cutter::Parent));
     }
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     assert!(app.submit_review(REVIEW_PROMPT.into()).is_empty());
     assert!(app.review.is_open());
     assert!(app.queue.is_empty());
@@ -195,7 +195,7 @@ fn review_submission_to_a_closed_subagent_keeps_the_review_open() {
 #[test]
 fn closing_all_overlays_closes_the_native_review() {
     let mut app = test_app();
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     app.close_all_overlays();
     assert!(!app.review.is_open());
 }
@@ -203,7 +203,7 @@ fn closing_all_overlays_closes_the_native_review() {
 #[test]
 fn permission_prompt_is_visible_and_answers_keys_above_review() {
     let mut app = test_app();
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     app.permission_prompt.push(
         "review-permission".into(),
         maki_config::ToolKey::native("bash"),
@@ -238,7 +238,7 @@ fn review_takes_keys_over_a_plan_form() {
     let mut app = test_app();
     app.state.mode = super::Mode::Plan;
     app.plan_form.on_plan_ready();
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     app.update(Msg::Key(KeyEvent::from(KeyCode::Esc)));
     assert!(!app.review.is_open());
 }
@@ -248,11 +248,32 @@ fn review_takes_keys_over_a_plan_form() {
 #[test_case(120, 40)]
 fn native_review_loading_renders_at_terminal_sizes(width: u16, height: u16) {
     let mut app = test_app();
-    app.review.open(PathBuf::from(&app.state.session.cwd));
+    app.review.open(PathBuf::from(&app.state.session.cwd), "");
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| {
             app.view(frame);
         })
         .unwrap();
+}
+
+#[test]
+fn review_command_accepts_source_and_target_arguments() {
+    let mut app = test_app();
+    app.input_box.set_input("/review HEAD origin/dev");
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert!(app.review.is_open());
+    let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    let frame = terminal
+        .draw(|frame| {
+            app.view(frame);
+        })
+        .unwrap();
+    let text: String = frame
+        .buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("HEAD → origin/dev"));
 }

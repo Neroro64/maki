@@ -496,7 +496,7 @@ fn file_rename_preserves_function_identity() {
     repo.git(&["mv", "src/old.rs", "src/new.rs"]);
     repo.commit_all("rename");
 
-    assert_summary(&repo, "HEAD~1", "HEAD", (0, 0, 0, 0));
+    assert_summary(&repo, "HEAD~1", "HEAD", (0, 0, 0, 1));
 }
 
 #[test]
@@ -573,9 +573,9 @@ fn adding_only_a_utf8_bom_changes_no_functions() {
     )
     .unwrap();
 
-    assert_summary(&repo, "HEAD", "worktree", (0, 0, 0, 0));
+    assert_summary(&repo, "HEAD", "worktree", (0, 0, 1, 0));
     repo.commit_all("BOM only");
-    assert_summary(&repo, "HEAD~1", "HEAD", (0, 0, 0, 0));
+    assert_summary(&repo, "HEAD~1", "HEAD", (0, 0, 1, 0));
 }
 
 #[test]
@@ -1278,11 +1278,108 @@ fn cached_review_respects_revision_and_test_selection_and_recovers_corruption() 
     assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
     let reverse = read(&["HEAD", "HEAD~1", "--json"]);
     assert_eq!(json_node(&reverse, "added")["status"], "removed");
-    fs::write(
-        repo.root.join(".git/calldive/analysis.json"),
-        "{interrupted",
-    )
-    .unwrap();
+    for entry in fs::read_dir(repo.root.join(".git/calldive"))
+        .unwrap()
+        .flatten()
+    {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
+            fs::write(entry.path(), "{interrupted").unwrap();
+        }
+    }
     assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
-    assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
+    let (code, _, err) = repo.run(&["HEAD~1", "HEAD", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("using cached analysis"), "{err}");
+}
+
+#[test]
+fn cache_hits_for_branch_pairs_and_invalidates_when_head_or_commit_id_changes() {
+    let repo = Repo::new("cache-invalidation");
+    repo.write("src/lib.rs", "pub fn run() -> u32 { 1 }\n");
+    repo.commit_all("initial");
+    repo.git(&["branch", "-M", "main"]);
+
+    repo.git(&["checkout", "-qb", "dev"]);
+    repo.write(
+        "src/lib.rs",
+        "pub fn run() -> u32 { 2 }\npub fn helper() -> u32 { 10 }\n",
+    );
+    repo.commit_all("dev commit 1");
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("src/other.rs", "pub fn main_only() -> u32 { 99 }\n");
+    repo.commit_all("main commit 2");
+
+    let (code, out1, err1) = repo.run(&["main", "dev", "--json"]);
+    assert_eq!(code, 0, "{err1}");
+    assert!(
+        !err1.contains("using cached analysis"),
+        "first run should miss cache: {err1}"
+    );
+
+    let (code, out2, err2) = repo.run(&["main", "dev", "--json"]);
+    assert_eq!(code, 0, "{err2}");
+    assert!(
+        err2.contains("using cached analysis"),
+        "second run should hit cache: {err2}"
+    );
+    assert_eq!(out1, out2);
+
+    let (code, _, err_h1) = repo.run(&["HEAD", "HEAD~1", "--json"]);
+    assert_eq!(code, 0, "{err_h1}");
+    assert!(!err_h1.contains("using cached analysis"));
+
+    let (code, _, err_h2) = repo.run(&["HEAD", "HEAD~1", "--json"]);
+    assert_eq!(code, 0, "{err_h2}");
+    assert!(
+        err_h2.contains("using cached analysis"),
+        "HEAD vs HEAD~1 should hit cache: {err_h2}"
+    );
+
+    let (code, _, err_branch_still_warm) = repo.run(&["main", "dev", "--json"]);
+    assert_eq!(code, 0, "{err_branch_still_warm}");
+    assert!(
+        err_branch_still_warm.contains("using cached analysis"),
+        "main vs dev should still be cached: {err_branch_still_warm}"
+    );
+
+    repo.git(&["checkout", "-q", "dev"]);
+    repo.write(
+        "src/lib.rs",
+        "pub fn run() -> u32 { 3 }\npub fn helper() -> u32 { 20 }\npub fn extra() -> u32 { 30 }\n",
+    );
+    repo.commit_all("dev commit 2");
+    repo.git(&["checkout", "-q", "main"]);
+
+    let (code, out3, err3) = repo.run(&["main", "dev", "--json"]);
+    assert_eq!(code, 0, "{err3}");
+    assert!(
+        !err3.contains("using cached analysis"),
+        "advancing dev commit ID must invalidate cache: {err3}"
+    );
+    let v3: serde_json::Value = serde_json::from_str(&out3).unwrap();
+    assert!(
+        v3["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["name"] == "extra")
+    );
+
+    let (code, _, err4) = repo.run(&["main", "dev", "--json"]);
+    assert_eq!(code, 0, "{err4}");
+    assert!(err4.contains("using cached analysis"), "{err4}");
+
+    repo.write("src/unrelated_note.txt", "bump head\n");
+    repo.commit_all("advance HEAD");
+
+    let (code, _, err5) = repo.run(&["main~1", "dev", "--json"]);
+    assert_eq!(code, 0, "{err5}");
+    assert!(
+        !err5.contains("using cached analysis"),
+        "changing HEAD commit ID must invalidate cache even for same tree/pair SHAs: {err5}"
+    );
+    let (code, _, err6) = repo.run(&["main~1", "dev", "--json"]);
+    assert_eq!(code, 0, "{err6}");
+    assert!(err6.contains("using cached analysis"), "{err6}");
 }

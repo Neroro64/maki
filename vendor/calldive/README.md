@@ -31,11 +31,14 @@ remain relevant. `f` hides branches that are not relevant.
 ## Usage
 
 ```bash
-# review the working tree (including non-ignored untracked files) against HEAD~1
+# open the interactive source/target revision selector TUI
 calldive
-# review a branch against main
+# specify source and target revisions directly
+calldive HEAD~1 HEAD
+calldive HEAD origin/main
 calldive main feature/my-branch
-# scope to a simple name, container-qualified name, path suffix, or exact node key
+# review the working tree (including non-ignored untracked files) against HEAD
+calldive HEAD
 calldive HEAD --entry process_refund
 calldive HEAD --entry 'Worker::run'
 # start at an interface/base type or a contract declaration
@@ -43,7 +46,6 @@ calldive HEAD --entry 'IWorker'
 calldive HEAD --entry 'IWorker::Run'
 calldive HEAD --entry 'src/x.rs::run'
 calldive HEAD --entry 'x.rs::run'
-# non-interactive review tree or complete machine-readable analysis
 calldive HEAD --dump
 calldive HEAD --json
 # include clean root components / test symbols
@@ -78,7 +80,9 @@ relationship; they are not claims that the head revision compiles or that these
 are executed calls. `callees` remains separate. The TUI labels these dependency
 edges `(base/head)` and the review tree follows them alongside call edges.
 
-Keys: `j/k` move · `enter`/`l` toggle expansion · `h` collapse the row or its
+Selector keys (when launched with `calldive`): `j/k` move · `tab`/`h`/`l` switch source/target pane · `enter` diff selected pair · `s` swap source and target · `/` filter list · `i` enter custom revision · `q`/`esc` quit.
+
+Review keys: `j/k` move · `enter`/`l` toggle expansion · `h` collapse the row or its
 nearest expanded ancestor · `x` expand subtree (depth limit 5) · `e` collapse
 to roots · `f` focus relevant branches · `g/G` first/last row (top/bottom in
 details) · `tab` switch pane · `Shift+H`/`Shift+L` scroll the focused panel
@@ -90,22 +94,26 @@ use `Shift+H` to reveal the full qualification.
 In the detail pane, diff markers are
 `+` added lines, `-` removed lines, and a space for context; base and head line
 numbers refer to their own revisions.
+Unchanged symbols show their complete source in gray, including callees reached
+from changed callers. Changed symbols retain the contextual diff view.
 
 ## Analysis cache
 
-The most recent analysis is saved in `calldive/analysis.json` under the
-repository's Git directory (each linked worktree has its own cache). Rerunning
-the same review prints `using cached analysis` to stderr and skips source
-gathering, parsing, and graph construction. JSON stdout remains a single document.
+Processed analyses are cached per revision pair in `calldive/analysis-*.json`
+under the repository's Git directory (each linked worktree has its own cache,
+retaining up to 16 recent entries). Rerunning the same review prints
+`using cached analysis` to stderr and skips source gathering, parsing, and graph
+construction. JSON stdout remains a single document.
 
-Cache validity includes resolved revisions, `--tests`, the executable, changed
-file identities, and the contents of all supported tracked and changed/untracked
-worktree sources, including unchanged caller candidates. Same-size edits,
-additions, and deletions invalidate the cache; presentation options such as
-`--entry`, `--all`, `--focus`, `--dump`, and `--json` reuse it. Revision source
-text is retained so cached reviews still show added/removed symbol content.
-Corrupt or unwritable caches produce a warning and do not prevent review.
-To clear the cache, remove that `analysis.json` file. Locate its directory with
+Cache validity includes `HEAD`, resolved source/target commit IDs, `--tests`,
+the executable, changed file identities, and the contents of all supported
+tracked and changed/untracked worktree sources, including unchanged caller
+candidates. Advancing `HEAD`, updating branch commit IDs, or making same-size
+edits, additions, and deletions invalidates the entry; presentation options such
+as `--entry`, `--all`, `--focus`, `--dump`, and `--json` reuse it. Revision
+source text is retained so cached reviews still show added/removed symbol
+content. Corrupt or unwritable caches produce a warning and do not prevent
+review. To clear the cache, remove the files in the directory reported by
 `git rev-parse --path-format=absolute --git-path calldive`.
 
 ## How it works

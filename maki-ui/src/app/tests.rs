@@ -13630,7 +13630,7 @@ fn open_owner(app: &mut App, owner: KeyboardOwner) {
         KeyboardOwner::PackReview => open_pack_review(app),
         KeyboardOwner::Review => {
             let cwd = PathBuf::from(&app.state.session.cwd);
-            app.open_prompt(|app| app.review.open(cwd));
+            app.open_prompt(|app| app.review.open(cwd, ""));
         }
         KeyboardOwner::PlanForm => open_plan_form(app),
         KeyboardOwner::Help => open_help(app),

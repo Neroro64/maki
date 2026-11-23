@@ -51,7 +51,8 @@ impl App {
         match cmd.name.as_str() {
             "/review" => {
                 let cwd = PathBuf::from(&self.state.session.cwd);
-                self.open_prompt(|app| app.review.open(cwd));
+                let args = cmd.args.clone();
+                self.open_prompt(|app| app.review.open(cwd, &args));
                 vec![]
             }
             "/compact" => {

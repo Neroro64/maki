@@ -74,8 +74,8 @@ pub struct BuiltinCommand {
 pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "/review",
-        description: "Explore call-graph diffs, annotate changes, and send review notes to the agent",
-        max_args: 0,
+        description: "Explore call-graph diffs (`[source] [target]`), annotate changes, and send review notes to the agent",
+        max_args: 2,
         bang: false,
         plugin_access: PluginAccess::Needs(&[Permission::FsRead]),
     },
@@ -1004,6 +1004,10 @@ mod tests {
     #[test_case("/cd ~/foo ", true  ; "one_arg_cmd_second_space")]
     #[test_case("/cd ~/foo bar", false ; "one_arg_cmd_two_args")]
     #[test_case("/btw hello world", true ; "btw_stays_active_with_many_args")]
+    #[test_case("/review", true ; "review_no_args")]
+    #[test_case("/review HEAD", true ; "review_one_arg")]
+    #[test_case("/review HEAD origin/dev", true ; "review_two_args")]
+    #[test_case("/review HEAD origin/dev extra", false ; "review_three_args_rejected")]
     fn sync_respects_nargs(input: &str, expect_active: bool) {
         let p = synced(input);
         assert_eq!(p.is_open(), expect_active);

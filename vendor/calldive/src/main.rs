@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use calldive::{analysis, git, load_analysis, ui};
 use clap::Parser;
 use std::collections::HashSet;
@@ -12,12 +12,13 @@ use std::collections::HashSet;
 #[derive(Parser, Debug)]
 #[command(name = "calldive", version, about)]
 struct Args {
-    /// base revision (default HEAD; empty tree before the first commit)
+    /// source / base revision (or interactive selector in TUI mode when omitted)
+    #[arg(allow_hyphen_values = false)]
     base: Option<String>,
 
-    /// head revision, or "worktree" (default worktree)
+    /// target / head revision, or "worktree" (default: worktree when source is given)
+    #[arg(allow_hyphen_values = false)]
     head: Option<String>,
-
     /// repository root (default: cwd)
     #[arg(long)]
     repo: Option<String>,
@@ -57,17 +58,28 @@ fn main() -> Result<()> {
         .unwrap_or(cwd);
     let repo = git::GitRepo::open(&repo_path)?;
 
-    let base = args.base.clone().unwrap_or_else(|| "HEAD".to_string());
-    let head = args
-        .head
-        .clone()
-        .unwrap_or_else(|| git::WORKTREE.to_string());
+    let is_interactive_tui = args.base.is_none() && args.head.is_none() && !args.dump && !args.json;
+    let (base, head) = if is_interactive_tui {
+        let candidates = repo.rev_candidates()?;
+        match ui::select_revisions(candidates)? {
+            Some(pair) => pair,
+            None => return Ok(()),
+        }
+    } else {
+        let base = args.base.clone().unwrap_or_else(|| "HEAD~1".to_string());
+        let head = args
+            .head
+            .clone()
+            .unwrap_or_else(|| git::WORKTREE.to_string());
+        (base, head)
+    };
     if git::is_worktree(&base) {
         bail!("base ref '{base}' cannot be worktree; pass a commit revision as base");
     }
-    let base_rev = repo.resolve_base(&base)?;
+    let base_rev = repo.resolve_commit(&base).with_context(|| {
+        format!("base ref '{base}' does not resolve (single-commit repo? pass an explicit base)")
+    })?;
     let head_rev = git::resolve_rev(&repo, &head)?;
-
     let changes = repo.changed_files(&base_rev, head_rev.as_deref())?;
     if changes.is_empty() {
         println!("no file changes between {base} and {head}");

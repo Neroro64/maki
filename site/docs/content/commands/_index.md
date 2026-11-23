@@ -13,7 +13,7 @@ Type `/` in the input box to open the command palette.
 
 | Command | Description |
 |---------|-------------|
-| `/review` | Explore call-graph diffs, annotate changes, and send review notes to the agent |
+| `/review` | Explore call-graph diffs (`[source] [target]`), annotate changes, and send review notes to the agent |
 | `/compact` | Summarize and compact conversation history (optional guidance) |
 | `/new` | Start a new session (! stops background tasks) |
 | `/fork` | Fork this session and switch to the copy |
