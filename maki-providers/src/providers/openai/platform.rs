@@ -47,6 +47,7 @@ const NEWEST_DIALECT: &EffortDialect<'static> = &dialect::GPT_6;
 const CHAT_THINKING: ThinkingFallback = ThinkingFallback::Dialect(&dialect::STANDARD);
 const CODEX_PLAN_CONTEXT_WINDOW: u32 = 272_000;
 const GPT_5_6_PLAN_CONTEXT_WINDOW: u32 = 372_000;
+const GPT_6_1_PLAN_CONTEXT_WINDOW: u32 = 500_000;
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 // The backend lists a model only to clients at or past its minimal Codex CLI
 // version. That gate guards Codex CLI features Maki never uses, so Maki claims a
@@ -110,6 +111,7 @@ fn responses_dialect(model_id: &str) -> Option<&'static EffortDialect<'static>> 
 fn plan_context_window(model_id: &str) -> u32 {
     match gpt_generation(model_id) {
         Some((5, 6)) => GPT_5_6_PLAN_CONTEXT_WINDOW,
+        Some((6, 1..)) if !model_id.ends_with("-astra") => GPT_6_1_PLAN_CONTEXT_WINDOW,
         _ => CODEX_PLAN_CONTEXT_WINDOW,
     }
 }
@@ -126,6 +128,7 @@ struct PlanModel {
     slug: String,
     visibility: String,
     context_window: Option<u32>,
+    max_context_window: Option<u32>,
     default_reasoning_level: Option<String>,
     supported_reasoning_levels: Vec<PlanReasoningLevel>,
     input_modalities: Vec<String>,
@@ -190,7 +193,10 @@ impl PlanModel {
         };
         ModelInfo {
             id: self.slug,
-            context_window: self.context_window,
+            context_window: self
+                .context_window
+                .filter(|&window| window > 0)
+                .or_else(|| self.max_context_window.filter(|&window| window > 0)),
             max_output_tokens: None,
             pricing: None,
             supports_thinking: Some(!info.efforts.is_empty()),
@@ -232,6 +238,34 @@ fn is_coding_plan(auth: &ResolvedAuth) -> bool {
     auth.base_url.as_deref() == Some(auth::CODING_PLAN_BASE_URL)
 }
 
+fn coding_plan_account_id(auth: Option<&ResolvedAuth>) -> Option<&str> {
+    auth.filter(|auth| is_coding_plan(auth))
+        .and_then(plan_account_id)
+}
+
+fn adjust_plan_model(
+    model: &mut Model,
+    auth: Option<&ResolvedAuth>,
+    discovered: Option<&ModelInfo>,
+    discovery_complete: bool,
+) {
+    let info = discovered
+        .and_then(|model| model.provider_info.as_ref())
+        .and_then(|info| info.downcast_ref::<PlanModelInfo>());
+    model.supports_fast_override = Some(supports_plan_fast(auth, info, discovery_complete));
+    let context_window = coding_plan_account_id(auth)
+        .zip(info)
+        .filter(|(account_id, info)| info.account_id.as_deref() == Some(*account_id))
+        .and(discovered)
+        .and_then(|model| model.context_window)
+        .filter(|&window| window > 0);
+    if let Some(context_window) = context_window {
+        model.context_window = context_window;
+    } else {
+        model.context_window = model.context_window.min(plan_context_window(&model.id));
+    }
+}
+
 /// Fast is a subscription perk, so it takes a coding-plan login *and* a listing
 /// that was fetched for that same account: switch accounts and yesterday's
 /// answer is worthless. `Pending` is the honest answer while the listing is
@@ -241,10 +275,7 @@ fn supports_plan_fast(
     info: Option<&PlanModelInfo>,
     discovery_complete: bool,
 ) -> FastSupport {
-    let account_id = auth
-        .filter(|auth| is_coding_plan(auth))
-        .and_then(plan_account_id);
-    let Some(account_id) = account_id else {
+    let Some(account_id) = coding_plan_account_id(auth) else {
         return FastSupport::Unsupported;
     };
     match info {
@@ -563,6 +594,10 @@ impl Provider for OpenAi {
         })
     }
 
+    fn needs_model_discovery(&self) -> bool {
+        self.auth.held_tokens().is_some()
+    }
+
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
         Box::pin(async {
             if !self.auth.uses_oauth().await? {
@@ -594,17 +629,13 @@ impl Provider for OpenAi {
             return;
         };
         let auth = self.codex_auth_from(Some(&tokens)).ok();
-        let info = model_registry::provider_info::<PlanModelInfo>(&CONFIG.slug, &model.id);
-        model.supports_fast_override = Some(supports_plan_fast(
+        let discovered = model_registry::discovered(&CONFIG.slug, &model.id);
+        adjust_plan_model(
+            model,
             auth.as_ref(),
-            info.as_deref(),
+            discovered.as_ref(),
             model_registry::discovery_complete(&CONFIG.slug),
-        ));
-        let declared_window = model_registry::discovered(&CONFIG.slug, &model.id)
-            .and_then(|discovered| discovered.context_window);
-        if declared_window.is_none() {
-            model.context_window = model.context_window.min(plan_context_window(&model.id));
-        }
+        );
     }
 }
 
@@ -646,7 +677,11 @@ mod tests {
         assert_eq!(responses_dialect(model_id), expected);
     }
 
-    #[test_case("gpt-6.2-sol", 272_000)]
+    #[test_case("gpt-6.2-sol", 500_000)]
+    #[test_case("gpt-6.1-sol", 500_000)]
+    #[test_case("gpt-6.1-terra", 500_000)]
+    #[test_case("gpt-6.2-astra", 272_000)]
+    #[test_case("gpt-6-sol", 272_000)]
     #[test_case("gpt-7-nova", 272_000)]
     #[test_case("gpt-5.3-codex", 272_000)]
     #[test_case("gpt-5.6-luna", 372_000)]
@@ -820,6 +855,69 @@ mod tests {
         let response = json!({"models": [model]}).to_string();
         let models = parse_plan_models(&response, Some(ACCOUNT_ID)).unwrap();
         assert_eq!(plan_info(&models[0]).supports_fast, expected);
+    }
+
+    #[test_case(Some(500_000), None, 1_050_000, 500_000 ; "larger_than_codex_base_fallback")]
+    #[test_case(Some(272_000), None, 1_050_000, 272_000 ; "matches_codex_base_fallback")]
+    #[test_case(Some(128_000), None, 1_050_000, 128_000 ; "smaller_than_fallback")]
+    #[test_case(Some(500_000), None, 128_000, 500_000 ; "replaces_stale_resolved_window")]
+    #[test_case(None, Some(872_000), 1_050_000, 872_000 ; "falls_back_to_max_context_window")]
+    #[test_case(None, None, 1_050_000, 500_000 ; "missing_window_falls_back_to_generation_plan_window")]
+    #[test_case(Some(0), None, 1_050_000, 500_000 ; "zero_window_falls_back_to_generation_plan_window")]
+    fn plan_context_uses_parsed_window(
+        window: Option<u32>,
+        max_window: Option<u32>,
+        current: u32,
+        expected: u32,
+    ) {
+        const MODEL_ID: &str = "gpt-6.1-sol";
+        let mut metadata = json!({"slug": MODEL_ID, "visibility": LISTED_VISIBILITY});
+        if let Some(window) = window {
+            metadata["context_window"] = window.into();
+        }
+        if let Some(max_window) = max_window {
+            metadata["max_context_window"] = max_window.into();
+        }
+        let response = json!({"models": [metadata]}).to_string();
+        let models = parse_plan_models(&response, Some(ACCOUNT_ID)).unwrap();
+        let auth = plan_auth(true, Some(ACCOUNT_ID));
+        let mut model = Model::from_spec(&format!("openai/{MODEL_ID}")).unwrap();
+        model.context_window = current;
+        adjust_plan_model(&mut model, Some(&auth), Some(&models[0]), true);
+        assert_eq!(model.context_window, expected);
+    }
+
+    #[test_case(true, Some(ACCOUNT_ID), Some(ACCOUNT_ID), true, 500_000 ; "matching_account")]
+    #[test_case(true, None, Some(ACCOUNT_ID), true, 272_000 ; "missing_current_account")]
+    #[test_case(true, Some(ACCOUNT_ID), None, true, 272_000 ; "missing_discovered_account")]
+    #[test_case(true, Some(ACCOUNT_ID), Some(OTHER_ACCOUNT_ID), true, 272_000 ; "other_account")]
+    #[test_case(true, Some(""), Some(""), true, 272_000 ; "empty_accounts")]
+    #[test_case(false, Some(ACCOUNT_ID), Some(ACCOUNT_ID), true, 272_000 ; "api_auth")]
+    #[test_case(true, Some(ACCOUNT_ID), Some(ACCOUNT_ID), false, 272_000 ; "api_style_metadata")]
+    fn plan_context_requires_account_provenance(
+        oauth: bool,
+        current_account: Option<&str>,
+        discovered_account: Option<&str>,
+        plan_metadata: bool,
+        expected: u32,
+    ) {
+        const MODEL_ID: &str = "gpt-6-astra";
+        const DISCOVERED_WINDOW: u32 = 500_000;
+        const RESOLVED_WINDOW: u32 = 1_050_000;
+        let mut discovered = PlanModel {
+            slug: MODEL_ID.into(),
+            context_window: Some(DISCOVERED_WINDOW),
+            ..PlanModel::default()
+        }
+        .into_info(discovered_account);
+        if !plan_metadata {
+            discovered.provider_info = Some(Arc::new(json!({})));
+        }
+        let auth = plan_auth(oauth, current_account);
+        let mut model = Model::from_spec(&format!("openai/{MODEL_ID}")).unwrap();
+        model.context_window = RESOLVED_WINDOW;
+        adjust_plan_model(&mut model, Some(&auth), Some(&discovered), true);
+        assert_eq!(model.context_window, expected);
     }
 
     fn plan_model_info(supports_fast: bool) -> PlanModelInfo {

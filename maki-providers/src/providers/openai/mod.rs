@@ -41,7 +41,7 @@ pub(crate) const SPEC: ProviderSpec = ProviderSpec {
     accepts_arbitrary_models: false,
     catalog_is_authoritative: false,
     fallback_max_output: Some(100_000),
-    fallback_context_window: 200_000,
+    fallback_context_window: 256_000,
     models_toml: include_str!("../../../models/openai.toml"),
     pricing_schedule: None,
     build: Build::Native(Native {

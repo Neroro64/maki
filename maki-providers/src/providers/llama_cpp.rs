@@ -32,7 +32,7 @@ pub(crate) const SPEC: ProviderSpec = ProviderSpec {
     accepts_arbitrary_models: true,
     catalog_is_authoritative: false,
     fallback_max_output: None,
-    fallback_context_window: 128_000,
+    fallback_context_window: 256_000,
     models_toml: NO_CURATED_MODELS,
     pricing_schedule: None,
     build: Build::Native(Native {

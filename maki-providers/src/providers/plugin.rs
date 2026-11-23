@@ -1397,6 +1397,10 @@ impl Provider for PluginProvider {
     fn served_context_window<'a>(&'a self, model: &'a Model) -> BoxFuture<'a, Option<u32>> {
         self.inner.served_context_window(model)
     }
+
+    fn needs_model_discovery(&self) -> bool {
+        self.inner.needs_model_discovery()
+    }
 }
 
 /// Builds from registry data alone: no hook runs here, because this is called

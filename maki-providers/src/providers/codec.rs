@@ -676,6 +676,10 @@ impl Provider for CompatProvider {
         Box::pin(async move { self.compat.do_list_models(&auth).await })
     }
 
+    fn needs_model_discovery(&self) -> bool {
+        false
+    }
+
     /// The protocol has no usage endpoint. A declaration whose provider has
     /// one answers through its `fetch_usage` hook, a layer above this.
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {

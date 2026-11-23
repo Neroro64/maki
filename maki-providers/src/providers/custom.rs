@@ -571,6 +571,16 @@ mod tests {
         assert_eq!(model.max_output_tokens, Some(expected_output));
     }
 
+    #[test]
+    fn discovered_custom_openai_model_without_reported_window_defaults_to_256k() {
+        let slug = "custom-default-256k-test";
+        let model_id = "local-model";
+        crate::model_registry::set_known_models(slug, vec![ModelInfo::id_only(model_id.into())]);
+        let def = openai_def(model_id);
+        let model = model_from_def(&def, openai_spec(), slug, model_id);
+        assert_eq!(model.context_window, 256_000);
+    }
+
     const ENDPOINT_INPUT_PRICE: f64 = 0.5;
     const ENDPOINT_OUTPUT_PRICE: f64 = 1.5;
     const DECLARED_INPUT_PRICE: f64 = 3.0;

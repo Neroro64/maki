@@ -253,9 +253,11 @@ impl OpenAiCompatProvider {
         let id = m["id"].as_str()?;
         let context_window = m["context_length"]
             .as_u64()
+            .or_else(|| m["context_size"].as_u64())
             .or_else(|| m["max_model_len"].as_u64())
             .or_else(|| m["max_context_length"].as_u64())
-            .and_then(|v| u32::try_from(v).ok());
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|&v| v > 0);
         let max_output_tokens = m["max_tokens"]
             .as_u64()
             .or_else(|| m["max_output_length"].as_u64())
@@ -872,6 +874,15 @@ data: [DONE]\n\n";
         let info = OpenAiCompatProvider::default_model_parser(&m).unwrap();
         assert_eq!(info.context_window, Some(524_288));
         assert_eq!(info.max_output_tokens, Some(65_536));
+    }
+
+    #[test_case(json!({"id": "m", "context_size": 131_072}), Some(131_072) ; "context_size")]
+    #[test_case(json!({"id": "m", "max_model_len": 32_768}), Some(32_768) ; "max_model_len")]
+    #[test_case(json!({"id": "m", "max_context_length": 256_000}), Some(256_000) ; "max_context_length")]
+    #[test_case(json!({"id": "m", "context_size": 0}), None ; "zero_context_size_ignored")]
+    fn default_model_parser_reads_alternate_context_fields(m: Value, expected: Option<u32>) {
+        let info = OpenAiCompatProvider::default_model_parser(&m).unwrap();
+        assert_eq!(info.context_window, expected);
     }
 
     #[test]

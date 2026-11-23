@@ -226,7 +226,7 @@ impl Provider for LocalEndpoint {
     }
 }
 
-const LLAMACPP_DEFAULT_CTX: u32 = 128_000;
+const LLAMACPP_DEFAULT_CTX: u32 = 256_000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) enum DiscoveryMode {
