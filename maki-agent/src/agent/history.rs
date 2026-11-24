@@ -960,6 +960,7 @@ mod tests {
                     thinking: GO.into(),
                     signature: Some(SIGNATURE.into()),
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
             );
         }
@@ -979,6 +980,7 @@ mod tests {
             thinking: GO.into(),
             signature: signature.map(Into::into),
             reasoning_id: None,
+            reasoning_opaque: None,
         };
         let tool_use = |thought_signature: Option<&str>| ContentBlock::ToolUse {
             id: FIRST.into(),

@@ -253,6 +253,9 @@ impl ContractGraph {
         let owner = self.resolve_type(file, family, receiver, caller_scope)?;
         let name = leaf(name);
         let mut targets = self.lookup_members(owner, name, None);
+        if targets.is_empty() && name == leaf(&self.types[owner].qual) {
+            return Some(vec![self.types[owner].id]);
+        }
         if !dispatch {
             return Some(targets);
         }

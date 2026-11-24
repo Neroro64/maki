@@ -41,6 +41,25 @@ impl Status {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EntryRole {
+    UseCase,
+    DataFlow,
+    Logic,
+    SelfContained,
+}
+
+impl EntryRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UseCase => "use case",
+            Self::DataFlow => "data flow",
+            Self::Logic => "logic",
+            Self::SelfContained => "self-contained",
+        }
+    }
+}
+
 /// A function location in one revision. Rows are zero-based, end exclusive;
 /// `file` is an identity path in the corresponding Analysis source map.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -69,6 +88,11 @@ pub struct Node {
     /// Explicit type/member and contract/implementation edges, not call edges.
     pub implementations: Vec<String>,
     pub contracts: Vec<String>,
+    /// Downstream symbols in the review graph that consume this value/type/source change.
+    #[serde(default)]
+    pub consumers: Vec<String>,
+    #[serde(default)]
+    pub external_consumers: Vec<String>,
     pub relevant: bool,
 }
 
@@ -142,6 +166,50 @@ impl Analysis {
             .map(String::as_str)
             .unwrap_or(path)
     }
+
+    pub fn classify_node(&self, n: &Node) -> EntryRole {
+        let has_consumers = !n.consumers.is_empty() || !n.external_consumers.is_empty();
+        let has_callees = n.callees.iter().chain(n.implementations.iter()).any(|c| {
+            self.nodes
+                .get(c)
+                .is_some_and(|cn| cn.relevant && c != &n.key)
+        });
+        let has_callers = !n.callers.is_empty() || !n.contracts.is_empty();
+
+        if matches!(n.kind, SymbolKind::Value) {
+            return if has_consumers || has_callers {
+                EntryRole::DataFlow
+            } else {
+                EntryRole::SelfContained
+            };
+        }
+        if matches!(n.kind, SymbolKind::Type) {
+            if has_consumers {
+                return EntryRole::DataFlow;
+            }
+            if has_callees || has_callers {
+                return EntryRole::Logic;
+            }
+            return EntryRole::SelfContained;
+        }
+        if matches!(n.kind, SymbolKind::File) {
+            return if has_callees {
+                EntryRole::UseCase
+            } else {
+                EntryRole::SelfContained
+            };
+        }
+        if has_consumers && !has_callees {
+            return EntryRole::DataFlow;
+        }
+        if has_callees && n.callers.iter().all(|c| c == &n.key) {
+            return EntryRole::UseCase;
+        }
+        if has_callees || has_callers || has_consumers {
+            return EntryRole::Logic;
+        }
+        EntryRole::SelfContained
+    }
 }
 
 fn file_node(path: &str, base: Option<&String>, head: Option<&String>) -> Node {
@@ -171,6 +239,8 @@ fn file_node(path: &str, base: Option<&String>, head: Option<&String>) -> Node {
         lost_callees: Vec::new(),
         implementations: Vec::new(),
         contracts: Vec::new(),
+        consumers: Vec::new(),
+        external_consumers: Vec::new(),
         relevant: true,
     }
 }
@@ -197,6 +267,8 @@ struct FileData {
     display: Vec<Option<String>>,
     keys: Vec<Option<String>>,
     calls: Vec<Vec<CallSite>>,
+    value_refs: Vec<Vec<CallSite>>,
+    is_script: bool,
     by_name: HashMap<String, Vec<usize>>,
 }
 
@@ -222,6 +294,14 @@ impl FileData {
                 })
                 .collect();
             parsed.calls.retain_mut(|call| {
+                if let Some(caller) = remap[call.caller] {
+                    call.caller = caller;
+                    true
+                } else {
+                    false
+                }
+            });
+            parsed.value_refs.retain_mut(|call| {
                 if let Some(caller) = remap[call.caller] {
                     call.caller = caller;
                     true
@@ -276,6 +356,12 @@ impl FileData {
                 calls[call.caller].push(call);
             }
         }
+        let mut value_refs = vec![Vec::new(); parsed.fns.len()];
+        for vref in parsed.value_refs {
+            if display.get(vref.caller).is_some_and(Option::is_some) {
+                value_refs[vref.caller].push(vref);
+            }
+        }
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, f) in parsed.fns.iter().enumerate() {
             if display[i].is_some() && f.kind != SymbolKind::Type {
@@ -289,6 +375,8 @@ impl FileData {
             display,
             keys,
             calls,
+            value_refs,
+            is_script: parsed.is_script,
             by_name,
         })
     }
@@ -397,35 +485,88 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
     let mut file_pairs = Vec::new();
     let mut base_srcs = HashMap::new();
     let mut head_srcs = HashMap::new();
+    // Parallelize tree-sitter parsing across CPU cores while preserving exact
+    // deterministic input ordering.
+    let worker_count = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(16);
+    fn parse_parallel<'a, T, F>(
+        items: &'a [T],
+        workers: usize,
+        parse_one: F,
+    ) -> Vec<Option<FileData>>
+    where
+        T: Sync,
+        F: Fn(&'a T) -> Option<FileData> + Sync,
+    {
+        if items.len() <= 2 || workers <= 1 {
+            return items.iter().map(parse_one).collect();
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut results: Vec<Option<FileData>> = (0..items.len()).map(|_| None).collect();
+        let slots: Vec<std::sync::Mutex<Option<FileData>>> = (0..items.len())
+            .map(|_| std::sync::Mutex::new(None))
+            .collect();
+        std::thread::scope(|scope| {
+            for _ in 0..workers.min(items.len()) {
+                scope.spawn(|| {
+                    loop {
+                        let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= items.len() {
+                            break;
+                        }
+                        if let Some(parsed) = parse_one(&items[idx]) {
+                            *slots[idx].lock().unwrap() = Some(parsed);
+                        }
+                    }
+                });
+            }
+        });
+        for (idx, slot) in slots.into_iter().enumerate() {
+            results[idx] = slot.into_inner().unwrap();
+        }
+        results
+    }
+
     let mut ordered_files: Vec<_> = inputs.files.iter().collect();
     ordered_files.sort_by(|a, b| a.0.cmp(&b.0));
-    for (path, base, head) in ordered_files {
-        let b = base.as_ref().and_then(|src| {
-            base_srcs.insert(path.clone(), src.clone());
-            FileData::parse(path, src, inputs.include_tests).map(|file| {
-                let i = base_files.len();
-                base_files.push(file);
-                i
-            })
-        });
-        let h = head.as_ref().and_then(|src| {
-            head_srcs.insert(path.clone(), src.clone());
-            FileData::parse(path, src, inputs.include_tests).map(|file| {
-                let i = head_files.len();
-                head_files.push(file);
-                i
-            })
-        });
-        file_pairs.push((b, h));
+    let mut parse_jobs: Vec<(&str, &str, usize, bool)> = Vec::new();
+    for (pair_idx, (path, base, head)) in ordered_files.iter().enumerate() {
+        if let Some(src) = base {
+            base_srcs.insert((*path).clone(), src.clone());
+            parse_jobs.push((path.as_str(), src.as_str(), pair_idx, true));
+        }
+        if let Some(src) = head {
+            head_srcs.insert((*path).clone(), src.clone());
+            parse_jobs.push((path.as_str(), src.as_str(), pair_idx, false));
+        }
+    }
+    let parsed_changed = parse_parallel(&parse_jobs, worker_count, |(path, src, _, _)| {
+        FileData::parse(path, src, inputs.include_tests)
+    });
+    file_pairs.resize(ordered_files.len(), (None, None));
+    for ((_, _, pair_idx, is_base), parsed) in parse_jobs.into_iter().zip(parsed_changed) {
+        let Some(file) = parsed else { continue };
+        if is_base {
+            let i = base_files.len();
+            base_files.push(file);
+            file_pairs[pair_idx].0 = Some(i);
+        } else {
+            let i = head_files.len();
+            head_files.push(file);
+            file_pairs[pair_idx].1 = Some(i);
+        }
     }
     let mut ordered_extras: Vec<_> = inputs.extra_head.iter().collect();
     ordered_extras.sort_by(|a, b| a.0.cmp(&b.0));
-    for (path, src) in ordered_extras {
-        if let Some(mut file) = FileData::parse(path, src, inputs.include_tests) {
-            // Extra definitions participate in uniqueness, but have no nodes.
-            file.keys.fill(None);
-            extras.push(file);
-        }
+    let parsed_extras = parse_parallel(&ordered_extras, worker_count, |(path, src)| {
+        FileData::parse(path, src, inputs.include_tests)
+    });
+    for mut file in parsed_extras.into_iter().flatten() {
+        // Extra definitions participate in uniqueness, but have no nodes.
+        file.keys.fill(None);
+        extras.push(file);
     }
 
     let mut origins: Vec<Vec<Option<DefId>>> =
@@ -630,7 +771,11 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                 Node {
                     key: key.clone(),
                     file: data.path.clone(),
-                    name: data.display[function].as_ref().unwrap().clone(),
+                    name: if f.kind == SymbolKind::File {
+                        data.path.clone()
+                    } else {
+                        data.display[function].as_ref().unwrap().clone()
+                    },
                     kind: f.kind,
                     status,
                     head: Some(data.span(function)),
@@ -647,6 +792,8 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                     lost_callees: Vec::new(),
                     implementations: Vec::new(),
                     contracts: Vec::new(),
+                    consumers: Vec::new(),
+                    external_consumers: Vec::new(),
                     relevant: status.is_change(),
                 },
             );
@@ -677,7 +824,11 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                 Node {
                     key,
                     file: data.path.clone(),
-                    name,
+                    name: if data.fns[function].kind == SymbolKind::File {
+                        data.path.clone()
+                    } else {
+                        name
+                    },
                     kind: data.fns[function].kind,
                     status: Status::Removed,
                     head: None,
@@ -689,6 +840,8 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                     lost_callees: Vec::new(),
                     implementations: Vec::new(),
                     contracts: Vec::new(),
+                    consumers: Vec::new(),
+                    external_consumers: Vec::new(),
                     relevant: true,
                 },
             );
@@ -705,31 +858,68 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
         (&base_files, &base_contracts),
     ] {
         let count = files.len();
-        let mut seen = HashSet::new();
-        let mut pending: Vec<_> = (0..count)
-            .flat_map(|file| {
-                let data = &files[file];
-                (0..data.fns.len())
-                    .filter(|&i| data.display[i].is_some())
-                    .map(move |i| (file, i))
-            })
-            .collect();
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id) {
+        // Walk UP (`contracts`) from changed-file symbols to pull in unchanged
+        // interfaces/base classes, and walk DOWN (`implementations`) ONLY from
+        // symbols that actually changed so unchanged base classes (like a shared
+        // TestBase) do not pull in hundreds of unrelated derived types.
+        let mut up_seen = HashSet::new();
+        let mut up_pending = Vec::new();
+        let mut down_seen = HashSet::new();
+        let mut down_pending = Vec::new();
+        for (file, data) in files.iter().enumerate() {
+            for i in 0..data.fns.len() {
+                if data.display[i].is_none() {
+                    continue;
+                }
+                // In head_files, data.keys[i] is already in `nodes`.
+                // In base_files, paired symbols point to their head key!
+                let changed = data
+                    .keys
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .and_then(|k| nodes.get(k))
+                    .is_some_and(|n| n.status.is_change());
+                if changed {
+                    up_pending.push((file, i));
+                    down_pending.push((file, i));
+                }
+            }
+        }
+        while let Some(id) = down_pending.pop() {
+            if !down_seen.insert(id) {
+                continue;
+            }
+            if id.0 >= count {
+                context.insert((id.0 - count, id.1));
+                up_pending.push(id);
+            }
+            let src_sym = if id.0 < count {
+                &files[id.0].fns[id.1]
+            } else {
+                &extras[id.0 - count].fns[id.1]
+            };
+            for &child in graph.implementations.get(&id).into_iter().flatten() {
+                let child_sym = if child.0 < count {
+                    &files[child.0].fns[child.1]
+                } else {
+                    &extras[child.0 - count].fns[child.1]
+                };
+                // Only traverse downward to derived types (`Type -> Type`) or
+                // method overrides (`Method -> Method`), never from a changed
+                // Type header into its own unchanged member declarations.
+                if src_sym.kind != SymbolKind::Type || child_sym.kind == SymbolKind::Type {
+                    down_pending.push(child);
+                }
+            }
+        }
+        while let Some(id) = up_pending.pop() {
+            if !up_seen.insert(id) {
                 continue;
             }
             if id.0 >= count {
                 context.insert((id.0 - count, id.1));
             }
-            pending.extend(
-                graph
-                    .implementations
-                    .get(&id)
-                    .into_iter()
-                    .flatten()
-                    .copied(),
-            );
-            pending.extend(graph.contracts.get(&id).into_iter().flatten().copied());
+            up_pending.extend(graph.contracts.get(&id).into_iter().flatten().copied());
         }
     }
     for (file, function) in context {
@@ -757,6 +947,8 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                 lost_callees: Vec::new(),
                 implementations: Vec::new(),
                 contracts: Vec::new(),
+                consumers: Vec::new(),
+                external_consumers: Vec::new(),
                 relevant: false,
             },
         );
@@ -817,11 +1009,20 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
         base_files.iter().chain(extras.iter()).collect(),
         base_contracts,
     );
+    let mut incoming_consumers: HashMap<String, Vec<String>> = HashMap::new();
     for (file, data) in head_files.iter().enumerate() {
         for (function, key) in data.keys.iter().enumerate() {
             if let Some(key) = key {
-                let (callees, lost) =
+                let (callees, value_refs, lost, _ext_val_refs) =
                     head_universe.resolve_calls(file, function, Some(&removed_names));
+                for vref in value_refs {
+                    if &vref != key && nodes.contains_key(&vref) {
+                        incoming_consumers
+                            .entry(vref)
+                            .or_default()
+                            .push(key.clone());
+                    }
+                }
                 let node = nodes.get_mut(key).unwrap();
                 node.callees = callees;
                 node.lost_callees = lost;
@@ -833,7 +1034,16 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
             if targets[file][function].is_none()
                 && let Some(key) = key
             {
-                let (callees, lost) = base_universe.resolve_calls(file, function, None);
+                let (callees, value_refs, lost, _ext_val_refs) =
+                    base_universe.resolve_calls(file, function, None);
+                for vref in value_refs {
+                    if &vref != key && nodes.contains_key(&vref) {
+                        incoming_consumers
+                            .entry(vref)
+                            .or_default()
+                            .push(key.clone());
+                    }
+                }
                 let node = nodes.get_mut(key).unwrap();
                 node.callees = callees;
                 node.lost_callees = lost;
@@ -845,28 +1055,74 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
             if display.is_none() {
                 continue;
             }
-            let (callees, lost) = head_universe.resolve_calls(
+            let (callees, value_refs, lost, _ext_val_refs) = head_universe.resolve_calls(
                 head_files.len() + file,
                 function,
                 Some(&removed_names),
             );
             if let Some(key) = &data.keys[function] {
+                for vref in value_refs {
+                    if &vref != key && nodes.contains_key(&vref) {
+                        incoming_consumers
+                            .entry(vref)
+                            .or_default()
+                            .push(key.clone());
+                    }
+                }
                 let node = nodes.get_mut(key).unwrap();
                 node.callees = callees;
                 node.lost_callees = lost;
-            } else if !callees.is_empty() {
-                label_paths.insert(data.path.clone());
-                let caller = node_key(&data.path, data.display[function].as_ref().unwrap());
-                for callee in callees {
-                    nodes
-                        .get_mut(&callee)
-                        .unwrap()
-                        .external_callers
-                        .push(caller.clone());
+            } else {
+                if !callees.is_empty() {
+                    label_paths.insert(data.path.clone());
+                    let caller = node_key(&data.path, data.display[function].as_ref().unwrap());
+                    for callee in callees {
+                        nodes
+                            .get_mut(&callee)
+                            .unwrap()
+                            .external_callers
+                            .push(caller.clone());
+                    }
+                }
+                if !value_refs.is_empty() {
+                    label_paths.insert(data.path.clone());
+                    let caller = node_key(&data.path, data.display[function].as_ref().unwrap());
+                    for vref in value_refs {
+                        if let Some(target) = nodes.get_mut(&vref) {
+                            target.external_consumers.push(caller.clone());
+                        }
+                    }
                 }
             }
         }
     }
+
+    // Group script-file top-level symbols under their `<file>` script root.
+    for data in head_files.iter().chain(base_files.iter()) {
+        if !data.is_script {
+            continue;
+        }
+        let script_key = node_key(&data.path, "<file>");
+        if !nodes.contains_key(&script_key) {
+            continue;
+        }
+        let mut script_children = Vec::new();
+        for (i, f) in data.fns.iter().enumerate() {
+            if f.kind != SymbolKind::File
+                && f.owner.is_none()
+                && let Some(k) = &data.keys[i]
+                && k != &script_key
+                && nodes.contains_key(k)
+            {
+                script_children.push(k.clone());
+            }
+        }
+        if let Some(script_node) = nodes.get_mut(&script_key) {
+            script_node.callees.extend(script_children);
+            sort_dedup(&mut script_node.callees);
+        }
+    }
+
     let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
     for (key, node) in &nodes {
         for callee in &node.callees {
@@ -878,44 +1134,85 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
     }
     for (key, node) in &mut nodes {
         node.callers = incoming.remove(key).unwrap_or_default();
+        node.consumers = incoming_consumers.remove(key).unwrap_or_default();
         sort_dedup(&mut node.callers);
         sort_dedup(&mut node.external_callers);
+        sort_dedup(&mut node.consumers);
+        sort_dedup(&mut node.external_consumers);
     }
 
     for (path, base, head) in &inputs.files {
+        let file_key = node_key(path, "<file>");
+        if nodes.contains_key(&file_key) {
+            continue;
+        }
+        if !inputs.include_tests && syntax::file_is_test_path(path) {
+            continue;
+        }
         let file_nodes: Vec<_> = nodes
             .values()
             .filter(|node| {
                 node.file == *path || node.base.as_ref().is_some_and(|span| span.file == *path)
             })
             .collect();
+        let mut scoped_base: Option<(usize, usize)> = None;
+        let mut scoped_head: Option<(usize, usize)> = None;
         if !file_nodes.is_empty() {
-            let uncovered = similar::TextDiff::from_lines(
-                base.as_deref().unwrap_or_default(),
-                head.as_deref().unwrap_or_default(),
-            )
-            .iter_all_changes()
-            .any(|change| {
+            let has_changed_symbol = file_nodes.iter().any(|n| n.status.is_change());
+            let base_str = base.as_deref().unwrap_or_default();
+            let head_str = head.as_deref().unwrap_or_default();
+            let base_lines: Vec<&str> = base_str.lines().collect();
+            let head_lines: Vec<&str> = head_str.lines().collect();
+            let mut substantive_uncovered = false;
+            let mut any_uncovered = false;
+            for change in similar::TextDiff::from_lines(base_str, head_str).iter_all_changes() {
                 let (line, head_side) = match change.tag() {
-                    similar::ChangeTag::Equal => return false,
+                    similar::ChangeTag::Equal => continue,
                     similar::ChangeTag::Delete => (change.old_index(), false),
                     similar::ChangeTag::Insert => (change.new_index(), true),
                 };
-                line.is_some_and(|line| {
-                    !file_nodes.iter().any(|node| {
-                        let span = if head_side { &node.head } else { &node.base };
-                        span.as_ref().is_some_and(|span| {
-                            span.file == *path && (span.start_row..span.end_row).contains(&line)
-                        })
+                let Some(line) = line else { continue };
+                let covered = file_nodes.iter().any(|node| {
+                    let span = if head_side { &node.head } else { &node.base };
+                    span.as_ref().is_some_and(|span| {
+                        span.file == *path && (span.start_row..span.end_row).contains(&line)
                     })
-                })
-            });
-            if !uncovered {
+                });
+                if !covered {
+                    any_uncovered = true;
+                    let text = if head_side {
+                        head_lines.get(line).copied().unwrap_or_default()
+                    } else {
+                        base_lines.get(line).copied().unwrap_or_default()
+                    };
+                    if !syntax::is_ignorable_outside_line(path, text) {
+                        substantive_uncovered = true;
+                    }
+                    let slot = if head_side {
+                        &mut scoped_head
+                    } else {
+                        &mut scoped_base
+                    };
+                    *slot = Some(match *slot {
+                        Some((s, e)) => (s.min(line), e.max(line + 1)),
+                        None => (line, line + 1),
+                    });
+                }
+            }
+            if !any_uncovered || (has_changed_symbol && !substantive_uncovered) {
                 continue;
             }
         }
         label_paths.insert(path.clone());
-        let node = file_node(path, base.as_ref(), head.as_ref());
+        let mut node = file_node(path, base.as_ref(), head.as_ref());
+        if !file_nodes.is_empty() && file_nodes.iter().any(|n| n.status.is_change()) {
+            if let (Some(src), Some((sr, er))) = (base.as_ref(), scoped_base) {
+                node.base = Some(scoped_line_span(path, src, sr, er));
+            }
+            if let (Some(src), Some((sr, er))) = (head.as_ref(), scoped_head) {
+                node.head = Some(scoped_line_span(path, src, sr, er));
+            }
+        }
         nodes.insert(node.key.clone(), node);
     }
     let entry_points = root_components(&nodes);
@@ -937,6 +1234,32 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
         head_srcs,
         base_srcs,
         file_labels: file_labels(label_paths),
+    }
+}
+
+fn symbol_owner_prefix(name: &str) -> Option<&str> {
+    let base = name.split('(').next().unwrap_or(name);
+    base.rsplit_once("::").map(|(owner, _)| owner)
+}
+
+fn scoped_line_span(path: &str, source: &str, start_row: usize, end_row: usize) -> Span {
+    let mut offsets = vec![0usize];
+    for (idx, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            offsets.push(idx + 1);
+        }
+    }
+    let total_lines = source.lines().count();
+    let s_row = start_row.saturating_sub(2);
+    let e_row = (end_row + 2).min(total_lines);
+    let start_byte = offsets.get(s_row).copied().unwrap_or(0);
+    let end_byte = offsets.get(e_row).copied().unwrap_or(source.len());
+    Span {
+        file: path.to_string(),
+        start_row: s_row,
+        end_row: e_row,
+        start_byte,
+        end_byte,
     }
 }
 
@@ -962,6 +1285,17 @@ fn attach_contracts(graph: &ContractGraph, files: &[&FileData], nodes: &mut Hash
                 continue;
             };
             if !nodes.contains_key(parent) || !nodes.contains_key(child) {
+                continue;
+            }
+            // Do not attach unchanged members under a Type node; otherwise
+            // editing a class header or an interface floods its subtree with
+            // every unchanged method/property/field on that type!
+            let parent_sym = &files[file].fns[function];
+            let child_sym = &files[child_file].fns[child_function];
+            if parent_sym.kind == SymbolKind::Type
+                && child_sym.kind != SymbolKind::Type
+                && !nodes[child].status.is_change()
+            {
                 continue;
             }
             nodes
@@ -1304,12 +1638,22 @@ impl<'a> Universe<'a> {
         file: usize,
         function: usize,
         removed: Option<&RemovedDefinitions<'_>>,
-    ) -> (Vec<String>, Vec<String>) {
+    ) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
         let caller = self.files[file];
         let mut callees = Vec::new();
+        let mut value_refs = Vec::new();
         let mut lost = Vec::new();
-        for call in &caller.calls[function] {
+        let mut external_value_refs = Vec::new();
+        for call in caller.calls[function]
+            .iter()
+            .chain(caller.value_refs[function].iter())
+        {
             let name = &call.name;
+            let dest = if call.is_value_ref {
+                &mut value_refs
+            } else {
+                &mut callees
+            };
             if let Some(receiver) = &call.receiver {
                 let targets =
                     self.contracts
@@ -1323,35 +1667,46 @@ impl<'a> Universe<'a> {
                         })
                         .map(Vec::as_slice)
                 {
-                    callees.push((*key).to_string());
+                    dest.push((*key).to_string());
                     continue;
                 }
                 if let Some(targets) = targets {
                     let mut unresolved = targets.is_empty();
                     for (target_file, target_function) in targets {
                         if let Some(key) = &self.files[target_file].keys[target_function] {
-                            callees.push(key.clone());
+                            dest.push(key.clone());
                         } else {
                             unresolved = true;
                         }
                     }
-                    if unresolved {
+                    if unresolved && !call.is_value_ref {
                         lost.push(name.clone());
                     }
                     continue;
                 }
-                // A typed but unresolved receiver must not bind to an
-                // unrelated same-name method in the current file.
-                lost.push(name.clone());
-                continue;
+                if !call.is_value_ref {
+                    // A typed but unresolved receiver must not bind to an
+                    // unrelated same-name method in the current file.
+                    lost.push(name.clone());
+                    continue;
+                }
+                // For an unqualified identifier inside a class body (`owner` set as
+                // candidate receiver), if it is not a member of `owner`, fall through
+                // to module/file-level value resolution!
+                if receiver.contains("::") || receiver.contains('.') {
+                    continue;
+                }
             }
             let mut unresolved = false;
             if let Some(local) = caller.by_name.get(name) {
                 // Local overload sets shadow every other file, including
                 // when none of their definitions belongs to the review graph.
                 for &target in local {
+                    if call.is_value_ref && caller.fns[target].kind != SymbolKind::Value {
+                        continue;
+                    }
                     if let Some(key) = &caller.keys[target] {
-                        callees.push(key.clone());
+                        dest.push(key.clone());
                     } else {
                         unresolved = true;
                     }
@@ -1364,30 +1719,43 @@ impl<'a> Universe<'a> {
                     .unwrap_or(&[])
                 {
                     [target] => {
-                        if let Some(key) = &self.files[target.file].keys[target.function] {
-                            callees.push(key.clone());
-                        } else {
-                            unresolved = true;
+                        if !call.is_value_ref
+                            || self.files[target.file].fns[target.function].kind
+                                == SymbolKind::Value
+                        {
+                            if let Some(key) = &self.files[target.file].keys[target.function] {
+                                dest.push(key.clone());
+                            } else if call.is_value_ref {
+                                external_value_refs.push(name.clone());
+                            } else {
+                                unresolved = true;
+                            }
                         }
                     }
                     [] => {
                         let fallback = removed
                             .and_then(|index| index.names.get(&(caller.family, name.as_str())));
                         match fallback.map(Vec::as_slice).unwrap_or(&[]) {
-                            [key] => callees.push((*key).to_string()),
+                            [key] => dest.push((*key).to_string()),
                             _ => unresolved = true,
                         }
                     }
                     _ => unresolved = true,
                 }
             }
-            if unresolved {
+            if unresolved && !call.is_value_ref {
                 lost.push(name.clone());
             }
         }
+        let self_key = caller.keys.get(function).and_then(Option::as_ref);
+        if let Some(self_key) = self_key {
+            value_refs.retain(|k| k != self_key);
+        }
         sort_dedup(&mut callees);
+        sort_dedup(&mut value_refs);
         sort_dedup(&mut lost);
-        (callees, lost)
+        sort_dedup(&mut external_value_refs);
+        (callees, value_refs, lost, external_value_refs)
     }
 }
 
@@ -1491,6 +1859,23 @@ fn root_components(nodes: &HashMap<String, Node>) -> Vec<String> {
         .filter(|(id, _)| !has_incoming[*id])
         .map(|(_, &node)| keys[node].clone())
         .collect();
+    // Ensure changed Value/Type source nodes that have downstream consumers
+    // are also surfaced as roots when their only incoming edges are non-parent
+    // or when they have no incoming call/contract edges.
+    for (key, node) in nodes {
+        if node.status.is_change()
+            && matches!(node.kind, SymbolKind::Value | SymbolKind::Type)
+            && !node.consumers.is_empty()
+            && !roots.contains(key)
+            && node
+                .contracts
+                .iter()
+                .all(|c| !nodes.get(c).is_some_and(|cn| cn.status.is_change()))
+            && node.callers.iter().all(|c| node.consumers.contains(c))
+        {
+            roots.push(key.clone());
+        }
+    }
     sort_keys(&mut roots, nodes);
     roots
 }
@@ -1507,7 +1892,11 @@ fn mark_relevant(nodes: &mut HashMap<String, Node>) {
     let mut affected: HashSet<String> = changed.iter().cloned().collect();
     let mut pending = changed;
     while let Some(key) = pending.pop() {
-        for child in &nodes[&key].implementations {
+        for child in nodes[&key]
+            .implementations
+            .iter()
+            .chain(nodes[&key].consumers.iter())
+        {
             if affected.insert(child.clone()) {
                 pending.push(child.clone());
             }
@@ -1521,8 +1910,19 @@ fn mark_relevant(nodes: &mut HashMap<String, Node>) {
         let parents: Vec<_> = nodes[&key]
             .callers
             .iter()
-            .chain(&nodes[&key].contracts)
             .cloned()
+            .chain(
+                nodes[&key]
+                    .contracts
+                    .iter()
+                    .filter(|p| {
+                        // Do not mark an unchanged class/interface header relevant
+                        // merely because one of its members or derived types changed!
+                        // Method-level overrides (`Method -> ContractMethod`) still propagate.
+                        !nodes.get(*p).is_some_and(|pn| pn.kind == SymbolKind::Type)
+                    })
+                    .cloned(),
+            )
             .collect();
         for parent in parents {
             let node = nodes.get_mut(&parent).unwrap();
@@ -1587,12 +1987,42 @@ fn status_rank(s: Status) -> u8 {
     }
 }
 
+/// Bracket position when >=2 sibling callers share the exact same downstream callees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerBracket {
+    First,
+    Middle,
+    Last,
+}
+
 /// One visible row of the review tree.
 #[derive(Debug, Clone)]
 pub struct TreeRow {
     pub key: String,
+    /// Unique tree-instance path of this row for stable cursor preservation.
+    pub id: String,
+    /// Path-scoped expansion key toggled in `App.expanded`.
+    pub expand_key: String,
     pub depth: usize,
     pub has_children: bool,
+    /// True if this row represents an entry-point root symbol.
+    pub is_root: bool,
+    /// Non-node namespace/module/class prefix group header.
+    pub group_label: Option<String>,
+    /// Optional shortened display label when nested under a group header or same-owner parent.
+    pub display_name: Option<String>,
+    /// True when this child row was reached via a `consumers` edge (`>`).
+    pub is_consumer: bool,
+    /// True when this symbol's subtree was already rendered earlier in the tree (`↗`).
+    pub is_repeat: bool,
+    /// Bracket connector when sibling callers share the exact same callees (`┌`/`├`/`└`).
+    pub caller_bracket: Option<CallerBracket>,
+    /// Short leaf names of sibling callers when >=2 siblings call this row (`← A, B`).
+    pub shared_callers: Vec<String>,
+    /// True when `shared_callers` are the coupled bracketed rows immediately above this row.
+    pub shared_from_coupled: bool,
+    /// Preview of shared callees shown on the final collapsed coupled caller (`→ + C`).
+    pub collapsed_callee_hint: Option<String>,
 }
 
 /// DFS rows starting from entry points (or a single forced root).
@@ -1603,77 +2033,944 @@ pub fn build_rows(
     expanded: &HashSet<String>,
     focus: bool,
 ) -> Vec<TreeRow> {
-    let mut rows = Vec::new();
-    let mut visited_global: HashSet<String> = HashSet::new();
+    build_rows_inner(a, roots, expanded, focus, false)
+}
 
-    for root in roots {
-        if !a.nodes.contains_key(root) {
-            continue;
-        }
-        dfs(a, root, 0, expanded, focus, &mut rows, &mut visited_global);
+/// Grouped DFS rows for the interactive TUI: groups >=2 roots sharing a
+/// common namespace/module/type container prefix under collapsible compact
+/// trie headers while keeping singletons flat.
+pub fn build_grouped_rows(
+    a: &Analysis,
+    roots: &[String],
+    expanded: &HashSet<String>,
+    focus: bool,
+) -> Vec<TreeRow> {
+    build_rows_inner(a, roots, expanded, focus, true)
+}
+
+pub fn group_key(prefix: &str) -> String {
+    format!("@group::{prefix}")
+}
+
+fn build_rows_inner(
+    a: &Analysis,
+    roots: &[String],
+    expanded: &HashSet<String>,
+    focus: bool,
+    grouped: bool,
+) -> Vec<TreeRow> {
+    let mut rows = Vec::new();
+    let valid_roots: Vec<String> = roots
+        .iter()
+        .filter(|r| a.nodes.get(*r).is_some_and(|n| !focus || n.relevant))
+        .cloned()
+        .collect();
+
+    let called_in_forest = compute_called_in_forest(a, &valid_roots, focus);
+    let mut ctx = EmitCtx {
+        a,
+        expanded,
+        focus,
+        grouped,
+        called_in_forest: &called_in_forest,
+        visited_global: HashSet::new(),
+        ancestors: Vec::new(),
+        rows: &mut rows,
+    };
+
+    if !grouped || valid_roots.len() < 2 {
+        let specs: Vec<SiblingSpec> = valid_roots
+            .iter()
+            .map(|r| SiblingSpec {
+                key: r.clone(),
+                is_consumer: false,
+                is_root: true,
+                shared_callers: Vec::new(),
+                shared_from_coupled: false,
+                absorbed_trie: None,
+                absorbed_seg: None,
+            })
+            .collect();
+        emit_siblings(&mut ctx, &specs, 0, "@path:", &[], None);
+        return rows;
     }
+
+    let trie = build_prefix_trie(a, &valid_roots);
+    emit_trie(&mut ctx, &trie, 0, "", "@path:");
     rows
 }
 
-fn dfs(
-    a: &Analysis,
-    key: &str,
-    depth: usize,
-    expanded: &HashSet<String>,
+struct EmitCtx<'a> {
+    a: &'a Analysis,
+    expanded: &'a HashSet<String>,
     focus: bool,
-    rows: &mut Vec<TreeRow>,
-    visited_global: &mut HashSet<String>,
-) {
-    let Some(node) = a.nodes.get(key) else { return };
-    if focus && !node.relevant {
-        return;
-    }
-    let first_visit = visited_global.insert(key.to_string());
-    let children = children_of(a, key, focus);
-    let has_children = !children.is_empty();
-    rows.push(TreeRow {
-        key: key.to_string(),
-        depth,
-        has_children,
-    });
-    if !expanded.contains(key) || !has_children {
-        return;
-    }
-    for child in children {
-        if first_visit {
-            dfs(a, &child, depth + 1, expanded, focus, rows, visited_global);
-        } else {
-            // already rendered elsewhere in this pass: reference, don't recurse
-            rows.push(TreeRow {
-                key: child.clone(),
-                depth: depth + 1,
-                has_children: false,
-            });
+    grouped: bool,
+    called_in_forest: &'a HashSet<String>,
+    visited_global: HashSet<String>,
+    ancestors: Vec<String>,
+    rows: &'a mut Vec<TreeRow>,
+}
+
+#[derive(Clone)]
+struct SiblingSpec {
+    key: String,
+    is_consumer: bool,
+    is_root: bool,
+    shared_callers: Vec<String>,
+    shared_from_coupled: bool,
+    absorbed_trie: Option<PrefixTrie>,
+    absorbed_seg: Option<String>,
+}
+
+/// Collect symbols reached via actual call or method/type override edges in the
+/// active forest so `Type -> non-Type member` containment edges never duplicate
+/// methods that are already shown under their callers.
+fn compute_called_in_forest(a: &Analysis, valid_roots: &[String], focus: bool) -> HashSet<String> {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut called: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = valid_roots.iter().cloned().collect();
+    while let Some(key) = queue.pop_front() {
+        if !visited.insert(key.clone()) {
+            continue;
         }
+        let Some(n) = a.nodes.get(&key) else { continue };
+        if focus && !n.relevant {
+            continue;
+        }
+        for callee in &n.callees {
+            if callee != &key
+                && let Some(cn) = a.nodes.get(callee)
+                && (!focus || cn.relevant)
+            {
+                called.insert(callee.clone());
+                queue.push_back(callee.clone());
+            }
+        }
+        for imp in &n.implementations {
+            if imp != &key
+                && let Some(cn) = a.nodes.get(imp)
+                && (!focus || cn.relevant)
+            {
+                if n.kind != SymbolKind::Type || cn.kind == SymbolKind::Type {
+                    called.insert(imp.clone());
+                }
+                queue.push_back(imp.clone());
+            }
+        }
+        for con in &n.consumers {
+            if con != &key
+                && let Some(cn) = a.nodes.get(con)
+                && (!focus || cn.relevant)
+            {
+                queue.push_back(con.clone());
+            }
+        }
+    }
+    called
+}
+
+#[derive(Clone, Default)]
+struct PrefixTrie {
+    roots_here: Vec<String>,
+    children: Vec<(String, PrefixTrie)>,
+}
+
+impl PrefixTrie {
+    fn total_roots(&self) -> usize {
+        self.roots_here.len()
+            + self
+                .children
+                .iter()
+                .map(|(_, child)| child.total_roots())
+                .sum::<usize>()
+    }
+
+    fn collect_all_roots(&self, out: &mut Vec<String>) {
+        out.extend(self.roots_here.iter().cloned());
+        for (_, child) in &self.children {
+            child.collect_all_roots(out);
+        }
+    }
+
+    fn best_rank(&self, a: &Analysis) -> u8 {
+        let own = self
+            .roots_here
+            .iter()
+            .filter_map(|k| a.nodes.get(k).map(|n| status_rank(n.status)))
+            .min()
+            .unwrap_or(9);
+        let sub = self
+            .children
+            .iter()
+            .map(|(_, c)| c.best_rank(a))
+            .min()
+            .unwrap_or(9);
+        own.min(sub)
+    }
+}
+
+/// Extract container segments before the leaf symbol name so roots sharing
+/// a namespace, module, or class can be grouped cleanly.
+fn container_segments(node: &Node) -> Vec<String> {
+    if node.kind == SymbolKind::File {
+        let mut parts: Vec<String> = node
+            .name
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if parts.len() > 1 {
+            parts.pop();
+            return parts;
+        }
+        return Vec::new();
+    }
+    let base = node.name.split('(').next().unwrap_or(&node.name);
+    let Some((container, _leaf)) = base.rsplit_once("::") else {
+        return Vec::new();
+    };
+    // Split both `.` (C# / Python / Java-style namespaces) and `::` into segments,
+    // preserving `<Type as Trait>` chunks intact.
+    let mut segs = Vec::new();
+    let mut current = String::new();
+    let mut angle_depth = 0usize;
+    let mut chars = container.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => {
+                angle_depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                angle_depth = angle_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ':' if angle_depth == 0 && chars.peek() == Some(&':') => {
+                chars.next();
+                if !current.is_empty() {
+                    segs.push(std::mem::take(&mut current));
+                }
+            }
+            '.' if angle_depth == 0 => {
+                if !current.is_empty() {
+                    segs.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        segs.push(current);
+    }
+    segs
+}
+
+fn strip_container_prefix(node: &Node, prefix_segs: &[String]) -> Option<String> {
+    if prefix_segs.is_empty() {
+        return None;
+    }
+    if node.kind == SymbolKind::File {
+        let prefix = format!("{}/", prefix_segs.join("/"));
+        return node.name.strip_prefix(&prefix).map(str::to_string);
+    }
+    // Walk `node.name` matching `prefix_segs` across `.` or `::` separators.
+    let mut rest = node.name.as_str();
+    for seg in prefix_segs {
+        let after = rest.strip_prefix(seg.as_str())?;
+        if let Some(s) = after.strip_prefix("::") {
+            rest = s;
+        } else {
+            rest = after.strip_prefix('.')?;
+        }
+    }
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+fn short_leaf_name(node: &Node) -> String {
+    if node.kind == SymbolKind::File {
+        return node
+            .name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&node.name)
+            .to_string();
+    }
+    let base = node.name.split('(').next().unwrap_or(&node.name);
+    let params = &node.name[base.len()..];
+    let leaf = base.rsplit("::").next().unwrap_or(base);
+    format!("{leaf}{params}")
+}
+
+fn node_owner_for_children(node: &Node) -> Option<String> {
+    if node.kind == SymbolKind::File {
+        return None;
+    }
+    if node.kind == SymbolKind::Type {
+        // Handle Rust inherent impl header `ns::<Worker>` -> `ns::Worker`
+        if let Some((prefix, last)) = node.name.rsplit_once("::") {
+            if let Some(inner) = last.strip_prefix('<').and_then(|s| s.strip_suffix('>'))
+                && !inner.contains(' ')
+            {
+                return Some(format!("{prefix}::{inner}"));
+            }
+        } else if let Some(inner) = node
+            .name
+            .strip_prefix('<')
+            .and_then(|s| s.strip_suffix('>'))
+            && !inner.contains(' ')
+        {
+            return Some(inner.to_string());
+        }
+        return Some(node.name.clone());
+    }
+    symbol_owner_prefix(&node.name).map(str::to_string)
+}
+
+fn shortened_display_name(
+    node: &Node,
+    grouped: bool,
+    prefix_segs: &[String],
+    parent_owner: Option<&str>,
+) -> Option<String> {
+    if !grouped || prefix_segs.is_empty() {
+        return None;
+    }
+    if let Some(owner) = parent_owner
+        && node.kind != SymbolKind::File
+        && symbol_owner_prefix(&node.name) == Some(owner)
+    {
+        let owner_prefix = format!("{owner}::");
+        if let Some(short) = node.name.strip_prefix(&owner_prefix)
+            && !short.is_empty()
+        {
+            return Some(short.to_string());
+        }
+    }
+    for len in (1..=prefix_segs.len()).rev() {
+        if let Some(short) = strip_container_prefix(node, &prefix_segs[..len]) {
+            return Some(short);
+        }
+    }
+    None
+}
+
+fn build_prefix_trie(a: &Analysis, roots: &[String]) -> PrefixTrie {
+    let mut root_trie = PrefixTrie::default();
+    for key in roots {
+        let Some(node) = a.nodes.get(key) else {
+            continue;
+        };
+        let segs = container_segments(node);
+        let mut cur = &mut root_trie;
+        for seg in segs {
+            let pos = cur.children.iter().position(|(s, _)| s == &seg);
+            let idx = match pos {
+                Some(i) => i,
+                None => {
+                    cur.children.push((seg, PrefixTrie::default()));
+                    cur.children.len() - 1
+                }
+            };
+            cur = &mut cur.children[idx].1;
+        }
+        cur.roots_here.push(key.clone());
+    }
+    sort_trie(a, &mut root_trie);
+    root_trie
+}
+
+fn sort_trie(a: &Analysis, trie: &mut PrefixTrie) {
+    sort_keys(&mut trie.roots_here, &a.nodes);
+    for (_, child) in &mut trie.children {
+        sort_trie(a, child);
+    }
+    trie.children.sort_by(|(sa, ca), (sb, cb)| {
+        ca.best_rank(a)
+            .cmp(&cb.best_rank(a))
+            .then_with(|| sa.cmp(sb))
+    });
+}
+
+fn type_root_matches_segment(node: &Node, prefix_segs: &[String], seg: &str) -> bool {
+    if node.kind != SymbolKind::Type {
+        return false;
+    }
+    let rel = strip_container_prefix(node, prefix_segs).unwrap_or_else(|| node.name.clone());
+    if rel == seg {
+        return true;
+    }
+    rel.strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .is_some_and(|inner| inner == seg)
+}
+
+fn emit_trie(
+    ctx: &mut EmitCtx<'_>,
+    trie: &PrefixTrie,
+    depth: usize,
+    matched_prefix: &str,
+    parent_path: &str,
+) {
+    let prefix_segs: Vec<String> = if matched_prefix.is_empty() {
+        Vec::new()
+    } else {
+        matched_prefix.split("::").map(str::to_string).collect()
+    };
+
+    // Allow a changed `Type` root at this level (e.g. `~ RootCauseHypothesisMaterializer`)
+    // to absorb its matching container sub-trie (`RootCauseHypothesisMaterializer::MaterializeAsync`)
+    // so the class header and its entry methods don't render as separate competing roots/groups.
+    let mut absorbed_by_root: HashMap<usize, (String, PrefixTrie)> = HashMap::new();
+    let mut claimed_children: HashSet<usize> = HashSet::new();
+    for (ci, (seg, child_trie)) in trie.children.iter().enumerate() {
+        let exact_match = trie.roots_here.iter().enumerate().find(|(ri, r)| {
+            !absorbed_by_root.contains_key(ri)
+                && ctx.a.nodes.get(*r).is_some_and(|n| {
+                    n.kind == SymbolKind::Type
+                        && n.status.is_change()
+                        && strip_container_prefix(n, &prefix_segs).unwrap_or_else(|| n.name.clone())
+                            == *seg
+                })
+        });
+        let matched_ri = exact_match.map(|(ri, _)| ri).or_else(|| {
+            trie.roots_here.iter().enumerate().find_map(|(ri, r)| {
+                (!absorbed_by_root.contains_key(&ri)
+                    && ctx.a.nodes.get(r).is_some_and(|n| {
+                        n.status.is_change() && type_root_matches_segment(n, &prefix_segs, seg)
+                    }))
+                .then_some(ri)
+            })
+        });
+        if let Some(ri) = matched_ri {
+            absorbed_by_root.insert(ri, (seg.clone(), child_trie.clone()));
+            claimed_children.insert(ci);
+        }
+    }
+
+    enum Item<'a> {
+        Root(usize, &'a String),
+        Group(&'a str, &'a PrefixTrie),
+    }
+    let mut items: Vec<(u8, String, Item<'_>)> = Vec::new();
+    for (ri, r) in trie.roots_here.iter().enumerate() {
+        let own_rank = ctx.a.nodes.get(r).map_or(9, |n| status_rank(n.status));
+        let rank = match absorbed_by_root.get(&ri) {
+            Some((_, sub)) => own_rank.min(sub.best_rank(ctx.a)),
+            None => own_rank,
+        };
+        let sort_name = ctx
+            .a
+            .nodes
+            .get(r)
+            .map_or_else(|| r.clone(), |n| n.name.clone());
+        items.push((rank, sort_name, Item::Root(ri, r)));
+    }
+    for (ci, (seg, child)) in trie.children.iter().enumerate() {
+        if claimed_children.contains(&ci) {
+            continue;
+        }
+        items.push((child.best_rank(ctx.a), seg.clone(), Item::Group(seg, child)));
+    }
+    items.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut pending_roots: Vec<SiblingSpec> = Vec::new();
+    let flush_roots = |ctx: &mut EmitCtx<'_>, pending: &mut Vec<SiblingSpec>| {
+        if !pending.is_empty() {
+            let batch = std::mem::take(pending);
+            emit_siblings(ctx, &batch, depth, parent_path, &prefix_segs, None);
+        }
+    };
+
+    for (_, _, item) in items {
+        match item {
+            Item::Root(ri, root) => {
+                let (absorbed_seg, absorbed_trie) = match absorbed_by_root.remove(&ri) {
+                    Some((s, t)) => (Some(s), Some(t)),
+                    None => (None, None),
+                };
+                pending_roots.push(SiblingSpec {
+                    key: root.clone(),
+                    is_consumer: false,
+                    is_root: true,
+                    shared_callers: Vec::new(),
+                    shared_from_coupled: false,
+                    absorbed_trie,
+                    absorbed_seg,
+                });
+            }
+            Item::Group(seg, child) => {
+                if child.total_roots() < 2 {
+                    let mut single = Vec::new();
+                    child.collect_all_roots(&mut single);
+                    for r in single {
+                        pending_roots.push(SiblingSpec {
+                            key: r,
+                            is_consumer: false,
+                            is_root: true,
+                            shared_callers: Vec::new(),
+                            shared_from_coupled: false,
+                            absorbed_trie: None,
+                            absorbed_seg: None,
+                        });
+                    }
+                } else {
+                    flush_roots(ctx, &mut pending_roots);
+                    // Compact single-child chain (`EA` -> `TriageEngine` -> `Core` => `EA.TriageEngine.Core`)
+                    let mut label_segs = vec![seg.to_string()];
+                    let mut cur = child;
+                    while cur.roots_here.is_empty() && cur.children.len() == 1 {
+                        let (next_seg, next_child) = &cur.children[0];
+                        label_segs.push(next_seg.clone());
+                        cur = next_child;
+                    }
+                    let full_segs: Vec<String> = prefix_segs
+                        .iter()
+                        .cloned()
+                        .chain(label_segs.iter().cloned())
+                        .collect();
+                    let full_prefix = full_segs.join("::");
+                    let gkey = group_key(&full_prefix);
+                    let display_label = label_segs.join(".");
+                    let is_expanded = ctx.expanded.contains(&gkey);
+                    ctx.rows.push(TreeRow {
+                        key: gkey.clone(),
+                        id: gkey.clone(),
+                        expand_key: gkey.clone(),
+                        depth,
+                        has_children: true,
+                        is_root: false,
+                        group_label: Some(display_label),
+                        display_name: None,
+                        is_consumer: false,
+                        is_repeat: false,
+                        caller_bracket: None,
+                        shared_callers: Vec::new(),
+                        shared_from_coupled: false,
+                        collapsed_callee_hint: None,
+                    });
+                    if is_expanded {
+                        emit_trie(ctx, cur, depth + 1, &full_prefix, &gkey);
+                    }
+                }
+            }
+        }
+    }
+    flush_roots(ctx, &mut pending_roots);
+}
+
+fn filtered_node_children(
+    ctx: &EmitCtx<'_>,
+    key: &str,
+    absorbed_roots: &HashSet<String>,
+) -> Vec<(String, bool)> {
+    let Some(node) = ctx.a.nodes.get(key) else {
+        return Vec::new();
+    };
+    children_with_kind(ctx.a, key, ctx.focus)
+        .into_iter()
+        .filter(|(c, is_con)| {
+            if absorbed_roots.contains(c) {
+                return false;
+            }
+            // Never emit a consumer edge back to an ancestor caller on the active path.
+            if *is_con && ctx.ancestors.contains(c) {
+                return false;
+            }
+            // Do not duplicate a non-Type member under its enclosing `Type` header
+            // when that member is already reached via a call/override edge in the forest.
+            if !*is_con
+                && node.kind == SymbolKind::Type
+                && ctx
+                    .a
+                    .nodes
+                    .get(c)
+                    .is_some_and(|cn| cn.kind != SymbolKind::Type)
+                && ctx.called_in_forest.contains(c)
+            {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+fn format_callee_preview(a: &Analysis, sig: &[(String, bool)]) -> String {
+    let mut parts = Vec::new();
+    for (ck, is_con) in sig.iter().take(2) {
+        if let Some(cn) = a.nodes.get(ck) {
+            let prefix = if *is_con {
+                format!("{} >", cn.status.glyph())
+            } else {
+                cn.status.glyph().to_string()
+            };
+            let trimmed = prefix.trim();
+            let short = short_leaf_name(cn);
+            if trimmed.is_empty() {
+                parts.push(short);
+            } else {
+                parts.push(format!("{trimmed} {short}"));
+            }
+        }
+    }
+    let more = if sig.len() > 2 {
+        format!(" +{} more", sig.len() - 2)
+    } else {
+        String::new()
+    };
+    format!("→ {}{more}", parts.join(", "))
+}
+
+fn emit_siblings(
+    ctx: &mut EmitCtx<'_>,
+    specs: &[SiblingSpec],
+    depth: usize,
+    parent_path: &str,
+    prefix_segs: &[String],
+    parent_owner: Option<&str>,
+) {
+    struct Prepared {
+        spec: SiblingSpec,
+        is_repeat: bool,
+        kids: Vec<(String, bool)>,
+    }
+    let mut items: Vec<Prepared> = Vec::new();
+    let mut seen_in_batch: HashSet<String> = HashSet::new();
+    for spec in specs {
+        let Some(node) = ctx.a.nodes.get(&spec.key) else {
+            continue;
+        };
+        if ctx.focus && !node.relevant {
+            continue;
+        }
+        if !seen_in_batch.insert(spec.key.clone()) {
+            continue;
+        }
+        let is_repeat = ctx.visited_global.contains(&spec.key) || ctx.ancestors.contains(&spec.key);
+        let kids = if is_repeat {
+            Vec::new()
+        } else {
+            let mut absorbed_set = HashSet::new();
+            if let Some(ref sub) = spec.absorbed_trie {
+                let mut r_vec = Vec::new();
+                sub.collect_all_roots(&mut r_vec);
+                absorbed_set.extend(r_vec);
+            }
+            filtered_node_children(ctx, &spec.key, &absorbed_set)
+        };
+        items.push(Prepared {
+            spec: spec.clone(),
+            is_repeat,
+            kids,
+        });
+    }
+
+    // Count how many siblings in `items` share each child key.
+    let mut child_callers: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        for (ck, _) in &item.kids {
+            child_callers.entry(ck.clone()).or_default().push(idx);
+        }
+    }
+
+    // Identify Coupled Caller Groups: >=2 siblings without absorbed sub-tries whose
+    // non-empty child lists are identical and exclusively called by that exact group.
+    let mut coupled_group_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut coupled_secondary: HashSet<usize> = HashSet::new();
+    if ctx.grouped {
+        for idx in 0..items.len() {
+            if coupled_secondary.contains(&idx)
+                || coupled_group_of.contains_key(&idx)
+                || items[idx].kids.is_empty()
+                || items[idx].spec.absorbed_trie.is_some()
+            {
+                continue;
+            }
+            let first_ck = &items[idx].kids[0].0;
+            let candidates = &child_callers[first_ck];
+            if candidates.len() < 2 {
+                continue;
+            }
+            let sig = &items[idx].kids;
+            let all_match = candidates.iter().all(|&c_idx| {
+                items[c_idx].spec.absorbed_trie.is_none() && &items[c_idx].kids == sig
+            }) && sig.iter().all(|(ck, _)| &child_callers[ck] == candidates);
+            if all_match {
+                let group = candidates.clone();
+                for &member in &group[1..] {
+                    coupled_secondary.insert(member);
+                }
+                coupled_group_of.insert(group[0], group);
+            }
+        }
+    }
+
+    // For partial-overlap shared children (not in a coupled group), determine which
+    // expanded sibling caller is the anchor (the last expanded caller in sibling order)
+    // so each shared child renders at most once while remaining visible whenever ANY of
+    // its callers is expanded.
+    let is_single_expanded = |idx: usize, expanded: &HashSet<String>| -> bool {
+        let row_ek = format!("{parent_path}/{}", items[idx].spec.key);
+        expanded.contains(&row_ek) || expanded.contains(&items[idx].spec.key)
+    };
+    let mut partial_shared_anchor: HashMap<String, usize> = HashMap::new();
+    for (ck, callers) in &child_callers {
+        if callers.len() < 2 {
+            continue;
+        }
+        // Skip if handled by a coupled group
+        if coupled_group_of.contains_key(&callers[0]) {
+            continue;
+        }
+        if let Some(&last_exp) = callers
+            .iter()
+            .rfind(|&&c_idx| is_single_expanded(c_idx, ctx.expanded))
+        {
+            partial_shared_anchor.insert(ck.clone(), last_exp);
+        }
+    }
+
+    for idx in 0..items.len() {
+        if coupled_secondary.contains(&idx) {
+            continue;
+        }
+        if let Some(group) = coupled_group_of.get(&idx).cloned() {
+            let group_keys_joined = group
+                .iter()
+                .map(|&gi| items[gi].spec.key.as_str())
+                .collect::<Vec<_>>()
+                .join("+");
+            let group_ek = format!("{parent_path}/@callers::{group_keys_joined}");
+            let is_exp = ctx.expanded.contains(&group_ek)
+                || group
+                    .iter()
+                    .any(|&gi| ctx.expanded.contains(&items[gi].spec.key));
+            let sig = items[group[0]].kids.clone();
+            let preview = (!is_exp).then(|| format_callee_preview(ctx.a, &sig));
+
+            for &gi in &group {
+                ctx.visited_global.insert(items[gi].spec.key.clone());
+            }
+
+            let mut caller_leaf_names = Vec::new();
+            let mut common_owner: Option<Option<String>> = None;
+            for (pos, &gi) in group.iter().enumerate() {
+                let item = &items[gi];
+                let node = &ctx.a.nodes[&item.spec.key];
+                caller_leaf_names.push(short_leaf_name(node));
+                let this_owner = node_owner_for_children(node);
+                common_owner = Some(match common_owner {
+                    None => this_owner,
+                    Some(prev) if prev == this_owner => prev,
+                    Some(_) => None,
+                });
+
+                let bracket = if pos == 0 {
+                    CallerBracket::First
+                } else if pos + 1 == group.len() {
+                    CallerBracket::Last
+                } else {
+                    CallerBracket::Middle
+                };
+                let row_id = format!("{parent_path}/{}", item.spec.key);
+                let disp = shortened_display_name(node, ctx.grouped, prefix_segs, parent_owner);
+                ctx.rows.push(TreeRow {
+                    key: item.spec.key.clone(),
+                    id: row_id,
+                    expand_key: group_ek.clone(),
+                    depth,
+                    has_children: true,
+                    is_root: item.spec.is_root,
+                    group_label: None,
+                    display_name: disp,
+                    is_consumer: item.spec.is_consumer,
+                    is_repeat: false,
+                    caller_bracket: Some(bracket),
+                    shared_callers: item.spec.shared_callers.clone(),
+                    shared_from_coupled: item.spec.shared_from_coupled,
+                    collapsed_callee_hint: if pos + 1 == group.len() {
+                        preview.clone()
+                    } else {
+                        None
+                    },
+                });
+            }
+
+            if is_exp {
+                let prev_len = ctx.ancestors.len();
+                for &gi in &group {
+                    ctx.ancestors.push(items[gi].spec.key.clone());
+                }
+                let child_specs: Vec<SiblingSpec> = sig
+                    .into_iter()
+                    .map(|(ck, is_con)| SiblingSpec {
+                        key: ck,
+                        is_consumer: is_con,
+                        is_root: false,
+                        shared_callers: caller_leaf_names.clone(),
+                        shared_from_coupled: true,
+                        absorbed_trie: None,
+                        absorbed_seg: None,
+                    })
+                    .collect();
+                let next_owner = common_owner.flatten();
+                emit_siblings(
+                    ctx,
+                    &child_specs,
+                    depth + 1,
+                    &group_ek,
+                    prefix_segs,
+                    next_owner.as_deref(),
+                );
+                ctx.ancestors.truncate(prev_len);
+            }
+            continue;
+        }
+
+        // Standard (or partial-overlap) sibling row
+        let item = &items[idx];
+        let node = &ctx.a.nodes[&item.spec.key];
+        if !item.is_repeat {
+            ctx.visited_global.insert(item.spec.key.clone());
+        }
+        let row_id = format!("{parent_path}/{}", item.spec.key);
+        let has_absorbed = item
+            .spec
+            .absorbed_trie
+            .as_ref()
+            .is_some_and(|t| t.total_roots() > 0);
+        let has_children = !item.is_repeat && (!item.kids.is_empty() || has_absorbed);
+        let is_exp = has_children
+            && (ctx.expanded.contains(&row_id) || ctx.expanded.contains(&item.spec.key));
+        let disp = shortened_display_name(node, ctx.grouped, prefix_segs, parent_owner);
+        ctx.rows.push(TreeRow {
+            key: item.spec.key.clone(),
+            id: row_id.clone(),
+            expand_key: row_id.clone(),
+            depth,
+            has_children,
+            is_root: item.spec.is_root,
+            group_label: None,
+            display_name: disp,
+            is_consumer: item.spec.is_consumer,
+            is_repeat: item.is_repeat,
+            caller_bracket: None,
+            shared_callers: item.spec.shared_callers.clone(),
+            shared_from_coupled: item.spec.shared_from_coupled,
+            collapsed_callee_hint: None,
+        });
+
+        if !is_exp {
+            continue;
+        }
+
+        ctx.ancestors.push(item.spec.key.clone());
+        let next_owner = node_owner_for_children(node);
+
+        // Emit unique children + any partial-overlap shared children anchored at `idx`.
+        let mut unique_specs = Vec::new();
+        let mut anchored_shared_specs = Vec::new();
+        for (ck, is_con) in &item.kids {
+            let callers = &child_callers[ck];
+            if callers.len() == 1 {
+                unique_specs.push(SiblingSpec {
+                    key: ck.clone(),
+                    is_consumer: *is_con,
+                    is_root: false,
+                    shared_callers: Vec::new(),
+                    shared_from_coupled: false,
+                    absorbed_trie: None,
+                    absorbed_seg: None,
+                });
+            } else if partial_shared_anchor.get(ck) == Some(&idx) {
+                let caller_names: Vec<String> = callers
+                    .iter()
+                    .map(|&ci| short_leaf_name(&ctx.a.nodes[&items[ci].spec.key]))
+                    .collect();
+                anchored_shared_specs.push(SiblingSpec {
+                    key: ck.clone(),
+                    is_consumer: *is_con,
+                    is_root: false,
+                    shared_callers: caller_names,
+                    shared_from_coupled: false,
+                    absorbed_trie: None,
+                    absorbed_seg: None,
+                });
+            }
+        }
+
+        if !unique_specs.is_empty() {
+            emit_siblings(
+                ctx,
+                &unique_specs,
+                depth + 1,
+                &row_id,
+                prefix_segs,
+                next_owner.as_deref(),
+            );
+        }
+        if !anchored_shared_specs.is_empty() {
+            let shared_parent_path = format!("{parent_path}/@shared");
+            emit_siblings(
+                ctx,
+                &anchored_shared_specs,
+                depth + 1,
+                &shared_parent_path,
+                prefix_segs,
+                next_owner.as_deref(),
+            );
+        }
+        if let (Some(sub_trie), Some(seg)) = (&item.spec.absorbed_trie, &item.spec.absorbed_seg) {
+            let mut sub_segs = prefix_segs.to_vec();
+            sub_segs.push(seg.clone());
+            let sub_prefix = sub_segs.join("::");
+            emit_trie(ctx, sub_trie, depth + 1, &sub_prefix, &row_id);
+        }
+
+        ctx.ancestors.pop();
     }
 }
 
 pub fn children_of(a: &Analysis, key: &str, focus: bool) -> Vec<String> {
+    children_with_kind(a, key, focus)
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect()
+}
+
+pub fn children_with_kind(a: &Analysis, key: &str, focus: bool) -> Vec<(String, bool)> {
     let Some(n) = a.nodes.get(key) else {
         return vec![];
     };
-    let mut kids: Vec<String> = n
+    let direct_set: HashSet<&str> = n
         .callees
         .iter()
         .chain(n.implementations.iter())
-        .filter(|c| a.nodes.contains_key(*c))
-        .filter(|c| !focus || a.nodes.get(*c).map(|x| x.relevant).unwrap_or(true))
-        .cloned()
+        .map(String::as_str)
         .collect();
-    kids.sort_by(|x, y| {
+    let mut kids: Vec<(String, bool)> = n
+        .callees
+        .iter()
+        .chain(n.implementations.iter())
+        .filter(|c| *c != key)
+        .map(|c| (c.clone(), false))
+        .chain(
+            n.consumers
+                .iter()
+                .filter(|c| *c != key && !direct_set.contains(c.as_str()))
+                .map(|c| (c.clone(), true)),
+        )
+        .filter(|(c, _)| a.nodes.contains_key(c))
+        .filter(|(c, _)| !focus || a.nodes.get(c).map(|x| x.relevant).unwrap_or(true))
+        .collect();
+    kids.sort_by(|(x, cx), (y, cy)| {
         let nx = &a.nodes[x];
         let ny = &a.nodes[y];
-        status_rank(nx.status)
-            .cmp(&status_rank(ny.status))
+        cx.cmp(cy)
+            .then_with(|| status_rank(nx.status).cmp(&status_rank(ny.status)))
             .then_with(|| nx.relevant.cmp(&ny.relevant).reverse())
             .then_with(|| x.cmp(y))
     });
-    kids.dedup();
+    kids.dedup_by(|a, b| a.0 == b.0);
     kids
 }
 

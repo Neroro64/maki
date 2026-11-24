@@ -564,6 +564,7 @@ mod tests {
                     thinking: "hmm".into(),
                     signature: None,
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 MsgBlock::Text {
                     text: "let me check".into(),

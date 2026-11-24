@@ -48,6 +48,7 @@ test-case = { workspace = true }
 
 [workspace]
 members = [
+  "logidiff",
   "maki-acp",
   "maki-agent",
   "maki-config",
@@ -63,7 +64,6 @@ members = [
   "maki-providers",
   "maki-storage",
   "maki-ui",
-  "vendor/calldive",
 ]
 exclude = ["vendor/crossterm"]
 resolver = "3"
@@ -79,7 +79,7 @@ rust-version = "1.99"
 [workspace.lints.clippy]
 
 [workspace.dependencies]
-calldive = { path = "vendor/calldive" }
+logidiff = { path = "logidiff" }
 aho-corasick = "1"
 anyhow = "1"
 blake3 = "1"
@@ -233,6 +233,14 @@ debug = true
 [profile.dev.package."*"]
 debug = false
 
+[profile.dev.package.syntect]
+opt-level = 2
+[profile.dev.package.fancy-regex]
+opt-level = 2
+[profile.dev.package.regex-automata]
+opt-level = 2
+[profile.dev.package.similar]
+opt-level = 2
 # `cc` reads DEBUG from here and passes -g when it is on, which covers the C
 # and C++ we build from source: aws-lc, Luau and 30 tree-sitter
 # grammars. Those static archives held the bulk of the bytes.

@@ -20,7 +20,7 @@ impl Repo {
     fn new(name: &str) -> Self {
         let n = REPO_SEQ.fetch_add(1, Ordering::SeqCst);
         let root =
-            std::env::temp_dir().join(format!("calldive-e2e-{}-{}-{n}", std::process::id(), name));
+            std::env::temp_dir().join(format!("logidiff-e2e-{}-{}-{n}", std::process::id(), name));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
         let r = Self { root, keep: false };
@@ -56,12 +56,12 @@ impl Repo {
     }
 
     fn run(&self, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_calldive"))
+        let out = Command::new(env!("CARGO_BIN_EXE_logidiff"))
             .arg("--repo")
             .arg(&self.root)
             .args(args)
             .output()
-            .expect("calldive spawn");
+            .expect("logidiff spawn");
         (
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -1278,7 +1278,7 @@ fn cached_review_respects_revision_and_test_selection_and_recovers_corruption() 
     assert_eq!(read(&["HEAD~1", "HEAD", "--json"]), regular);
     let reverse = read(&["HEAD", "HEAD~1", "--json"]);
     assert_eq!(json_node(&reverse, "added")["status"], "removed");
-    for entry in fs::read_dir(repo.root.join(".git/calldive"))
+    for entry in fs::read_dir(repo.root.join(".git/logidiff"))
         .unwrap()
         .flatten()
     {
@@ -1382,4 +1382,55 @@ fn cache_hits_for_branch_pairs_and_invalidates_when_head_or_commit_id_changes() 
     let (code, _, err6) = repo.run(&["main~1", "dev", "--json"]);
     assert_eq!(code, 0, "{err6}");
     assert!(err6.contains("using cached analysis"), "{err6}");
+}
+
+#[test]
+fn value_and_settings_changes_link_to_consumers_without_duplicate_file_roots() {
+    let repo = Repo::new("consumer-flow");
+    repo.write(
+        "src/Client.cs",
+        "namespace Ns1;\npublic sealed class ChatClient {\n    public void Send() {}\n}\n",
+    );
+    repo.write(
+        "src/Settings.cs",
+        "namespace Ns2;\npublic record TrackerSettings(string Url);\n",
+    );
+    repo.write(
+        "src/CompositionRoot.cs",
+        "namespace Host;\npublic class CompositionRoot {\n    public void RegisterClients() { var t = 30; }\n    public void RegisterTracker(IConfig cfg) {\n        var s = cfg.GetRequiredSettings<TrackerSettings>(\"s\");\n    }\n}\n",
+    );
+    repo.commit_all("base");
+
+    repo.write(
+        "src/Client.cs",
+        "using System;\nnamespace Ns1;\npublic sealed class ChatClient {\n    public static TimeSpan DefaultTimeout { get; } = TimeSpan.FromMinutes(5);\n    public void Send() {}\n}\n",
+    );
+    repo.write(
+        "src/Settings.cs",
+        "using System;\nnamespace Ns2;\npublic record TrackerSettings(string Url, TimeSpan? Timeout = null) {\n    public void Validate() {}\n}\n",
+    );
+    repo.write(
+        "src/CompositionRoot.cs",
+        "namespace Host;\npublic class CompositionRoot {\n    public void RegisterClients() { var t = ChatClient.DefaultTimeout; }\n    public void RegisterTracker(IConfig cfg) {\n        var s = cfg.GetRequiredSettings<TrackerSettings>(\"s\");\n        s.Validate();\n    }\n}\n",
+    );
+
+    let (code, dump, err) = repo.run(&["HEAD", "--dump"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !dump.contains("src/Settings.cs :Settings.cs"),
+        "record edit must not spawn a duplicate <file> root:\n{dump}"
+    );
+    assert!(
+        !dump.contains("src/Client.cs :Client.cs"),
+        "using-directive + property edit must not spawn a duplicate <file> root:\n{dump}"
+    );
+    assert!(
+        dump.contains("+ Ns1::ChatClient::DefaultTimeout")
+            && dump.contains("> Host::CompositionRoot::RegisterClients"),
+        "property addition must expand to its consumer:\n{dump}"
+    );
+    assert!(
+        dump.contains("> Host::CompositionRoot::RegisterTracker"),
+        "settings record/method must expand to its consumer:\n{dump}"
+    );
 }

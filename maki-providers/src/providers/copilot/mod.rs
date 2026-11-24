@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use maki_storage::blocking;
 use maki_storage::id::SessionRef;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, Request};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -105,6 +105,8 @@ const RESPONSES_PATH: &str = "/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MODELS_PATH: &str = "/models";
 const CONVERSATION_AGENT: &str = "conversation-agent";
+const INTERACTION_ID_HEADER: &str = "x-interaction-id";
+const PROMPT_CACHE_KEY_FIELD: &str = "prompt_cache_key";
 
 /// Scales `/models` AI-credit prices (1 credit = $0.01) to USD per 1M tokens.
 const AIC_TO_USD_PER_MILLION: f64 = 10_000.0;
@@ -263,48 +265,9 @@ impl Copilot {
         Ok(models)
     }
 
-    async fn stream_chat_completions(
-        &self,
-        model: &Model,
-        messages: &[Message],
-        system: &str,
-        tools: &Value,
-        event_tx: &UnboundedSender<ProviderEvent>,
-    ) -> Result<StreamResponse, AgentError> {
-        let auth = self.auth().await?;
-        let wire_tools = openai_compat::convert_tools(tools);
-        let mut body = json!({
-            "model": shared::strip_long_context(&model.id),
-            "messages": openai_compat::convert_messages(messages, system),
-            "n": 1,
-            "stream": true,
-            "temperature": 0.1,
-        });
-        if wire_tools.as_array().is_some_and(|tools| !tools.is_empty()) {
-            body["tools"] = wire_tools;
-        }
-
-        let request = self.build_post(&auth, CHAT_COMPLETIONS_PATH, &body, &[])?;
-        super::ok_sse(&self.client, request, self.stream_timeout, |body| {
-            openai_compat::parse_sse(body, event_tx, false)
-        })
-        .await
-    }
-
-    async fn stream_responses(
-        &self,
-        model: &Model,
-        messages: &[Message],
-        system: &str,
-        tools: &Value,
-        event_tx: &UnboundedSender<ProviderEvent>,
-        thinking: ThinkingConfig,
-    ) -> Result<StreamResponse, AgentError> {
-        let auth = self.auth().await?;
-        let mut body = responses::build_body(model, messages, system, tools, false);
-        let upstream_id = shared::strip_long_context(&model.id);
-        body["model"] = json!(upstream_id);
-        let reasoning_info = model_registry::provider_info::<CopilotModelInfo>(SLUG, &model.id)
+    fn reasoning_info(&self, model_id: &str) -> Option<Arc<CopilotModelInfo>> {
+        let upstream_id = shared::strip_long_context(model_id);
+        model_registry::provider_info::<CopilotModelInfo>(SLUG, model_id)
             .or_else(|| model_registry::provider_info::<CopilotModelInfo>(SLUG, upstream_id))
             .or_else(|| {
                 self.models
@@ -313,46 +276,84 @@ impl Copilot {
                     .get(upstream_id)
                     .map(CopilotModel::reasoning_info)
                     .map(Arc::new)
-            });
-        if let Some(info) = reasoning_info {
+            })
+    }
+
+    async fn stream_chat_completions(
+        &self,
+        turn: CopilotTurn<'_>,
+    ) -> Result<StreamResponse, AgentError> {
+        let auth = self.auth().await?;
+        let body = chat_completions_body(
+            turn.model,
+            turn.messages,
+            turn.system,
+            turn.tools,
+            turn.thinking,
+            self.reasoning_info(&turn.model.id).as_deref(),
+        );
+
+        let request = self.build_post(&auth, CHAT_COMPLETIONS_PATH, &body, &[], turn.session_id)?;
+        super::ok_sse(&self.client, request, self.stream_timeout, |body| {
+            openai_compat::parse_sse(body, turn.event_tx, false)
+        })
+        .await
+    }
+
+    async fn stream_responses(&self, turn: CopilotTurn<'_>) -> Result<StreamResponse, AgentError> {
+        let auth = self.auth().await?;
+        let mut body =
+            responses::build_body(turn.model, turn.messages, turn.system, turn.tools, false);
+        let upstream_id = shared::strip_long_context(&turn.model.id);
+        body["model"] = json!(upstream_id);
+        if let Some(session) = turn.session_id {
+            body[PROMPT_CACHE_KEY_FIELD] = json!(session.as_str());
+        }
+        if let Some(info) = self.reasoning_info(&turn.model.id) {
             responses::apply_responses_reasoning(
                 &mut body,
-                thinking,
-                model,
+                turn.thinking,
+                turn.model,
                 &effort_dialect(&info),
             );
         }
+        let mut headers = HeaderMap::new();
+        if let Some(value) = turn
+            .session_id
+            .and_then(|s| HeaderValue::from_str(s.as_str()).ok())
+        {
+            headers.insert(INTERACTION_ID_HEADER, value);
+        }
         responses::do_stream(
             &self.client,
-            model,
-            &HeaderMap::new(),
+            turn.model,
+            &headers,
             &body,
-            event_tx,
+            turn.event_tx,
             &auth.turn,
             self.stream_timeout,
         )
         .await
     }
 
-    async fn stream_messages(
-        &self,
-        model: &Model,
-        messages: &[Message],
-        system: &str,
-        tools: &Value,
-        event_tx: &UnboundedSender<ProviderEvent>,
-        thinking: ThinkingConfig,
-    ) -> Result<StreamResponse, AgentError> {
+    async fn stream_messages(&self, turn: CopilotTurn<'_>) -> Result<StreamResponse, AgentError> {
         let auth = self.auth().await?;
-        let body = messages_body(model, messages, system, tools, thinking);
+        let body = messages_body(
+            turn.model,
+            turn.messages,
+            turn.system,
+            turn.tools,
+            turn.thinking,
+        );
         let request = self.build_post(
             &auth,
             MESSAGES_PATH,
             &body,
             &[("anthropic-version", super::anthropic::API_VERSION)],
+            turn.session_id,
         )?;
         super::ok_sse(&self.client, request, self.stream_timeout, |body| {
-            super::anthropic::parse_sse(body, event_tx)
+            super::anthropic::parse_sse(body, turn.event_tx)
         })
         .await
     }
@@ -365,15 +366,19 @@ impl Copilot {
         path: &str,
         body: &Value,
         headers: &[(&str, &str)],
+        session_id: Option<&SessionRef>,
     ) -> Result<Request, AgentError> {
         let body = serde_json::to_vec(body)?;
         debug!(path, body_bytes = body.len(), "sending Copilot API request");
-        let builder = headers.iter().fold(
+        let mut builder = headers.iter().fold(
             self.client
                 .post(format!("{}{path}", auth.endpoint))
                 .header("content-type", "application/json"),
             |builder, &(name, value)| builder.header(name, value),
         );
+        if let Some(session) = session_id {
+            builder = builder.header(INTERACTION_ID_HEADER, session.as_str());
+        }
         auth.turn.finish(builder.body(body))
     }
 }
@@ -427,6 +432,16 @@ struct CopilotSession {
     endpoint: String,
     listing: ResolvedAuth,
     turn: ResolvedAuth,
+}
+
+struct CopilotTurn<'a> {
+    model: &'a Model,
+    messages: &'a [Message],
+    system: &'a str,
+    tools: &'a Value,
+    event_tx: &'a UnboundedSender<ProviderEvent>,
+    thinking: ThinkingConfig,
+    session_id: Option<&'a SessionRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -537,15 +552,19 @@ impl CopilotModel {
             ..base.clone()
         })
     }
-    /// The chat completions body carries no reasoning field, so declaring
-    /// thinking there would offer the user a setting the request drops.
+    /// Chat completions sends `reasoning_effort` only, so budget-only or
+    /// adaptive-only capabilities have no wire representation there.
     fn supports_thinking(&self) -> bool {
         let supports = &self.capabilities.supports;
-        self.endpoint() != Endpoint::ChatCompletions
-            && (!supports.reasoning_effort.is_empty()
-                || supports.adaptive_thinking
-                || supports.max_thinking_budget.is_some()
-                || supports.min_thinking_budget.is_some())
+        match self.endpoint() {
+            Endpoint::ChatCompletions => !supports.reasoning_effort.is_empty(),
+            Endpoint::Responses | Endpoint::Messages => {
+                !supports.reasoning_effort.is_empty()
+                    || supports.adaptive_thinking
+                    || supports.max_thinking_budget.is_some()
+                    || supports.min_thinking_budget.is_some()
+            }
+        }
     }
 
     fn reasoning_info(&self) -> CopilotModelInfo {
@@ -833,6 +852,35 @@ fn copilot_auth_from_resolved(auth: &super::ResolvedAuth) -> Result<CopilotAuth,
     })
 }
 
+fn chat_completions_body(
+    model: &Model,
+    messages: &[Message],
+    system: &str,
+    tools: &Value,
+    thinking: ThinkingConfig,
+    info: Option<&CopilotModelInfo>,
+) -> Value {
+    let wire_tools = openai_compat::convert_tools(tools);
+    let mut body = json!({
+        "model": shared::strip_long_context(&model.id),
+        "messages": openai_compat::convert_messages_for(
+            messages,
+            system,
+            openai_compat::AssistantReasoningWire::Copilot,
+        ),
+        "n": 1,
+        "stream": true,
+        "temperature": 0.1,
+    });
+    if wire_tools.as_array().is_some_and(|tools| !tools.is_empty()) {
+        body["tools"] = wire_tools;
+    }
+    if let Some(info) = info.filter(|info| !info.reasoning_efforts.is_empty()) {
+        thinking.apply_reasoning_effort(&mut body, &effort_dialect(info), model);
+    }
+    body
+}
+
 fn messages_body(
     model: &Model,
     messages: &[Message],
@@ -876,14 +924,12 @@ fn sends_thinking(model: &Model, choice: ThinkingConfig) -> ThinkingConfig {
         .map_or(choice, |info| listed_sends_thinking(&info, choice))
 }
 
-/// Only the responses endpoint renders thinking through the dialect. The
-/// messages endpoint spells it natively and chat completions carries no
-/// reasoning at all.
+/// The responses and chat completions endpoints render thinking through the
+/// dialect; the messages endpoint spells it natively.
 fn listed_sends_thinking(info: &CopilotModelInfo, choice: ThinkingConfig) -> ThinkingConfig {
-    if info.endpoint == Endpoint::Responses {
-        effort_dialect(info).sends(choice)
-    } else {
-        choice
+    match info.endpoint {
+        Endpoint::Responses | Endpoint::ChatCompletions => effort_dialect(info).sends(choice),
+        Endpoint::Messages => choice,
     }
 }
 
@@ -913,26 +959,26 @@ impl Provider for Copilot {
         tools: &'a Value,
         event_tx: &'a UnboundedSender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
+        session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let mut prefixed_system = String::new();
             let system = super::with_prefix(&self.system_prefix, system, &mut prefixed_system);
             let endpoint = self.model_endpoint(&model.id).await?;
             debug!(model = %model.id, ?endpoint, "running Copilot request");
+            let turn = CopilotTurn {
+                model,
+                messages,
+                system,
+                tools,
+                event_tx,
+                thinking: opts.thinking,
+                session_id,
+            };
             match endpoint {
-                Endpoint::ChatCompletions => {
-                    self.stream_chat_completions(model, messages, system, tools, event_tx)
-                        .await
-                }
-                Endpoint::Responses => {
-                    self.stream_responses(model, messages, system, tools, event_tx, opts.thinking)
-                        .await
-                }
-                Endpoint::Messages => {
-                    self.stream_messages(model, messages, system, tools, event_tx, opts.thinking)
-                        .await
-                }
+                Endpoint::ChatCompletions => self.stream_chat_completions(turn).await,
+                Endpoint::Responses => self.stream_responses(turn).await,
+                Endpoint::Messages => self.stream_messages(turn).await,
             }
         })
     }
@@ -1184,12 +1230,14 @@ mod tests {
         assert_eq!(model.model_info().tier, None);
     }
 
-    /// On the responses endpoint `adaptive` is the dialect's level, snapped to
-    /// what the model lists. The Claude models report `adaptive_thinking` and
-    /// take the messages endpoint, which spells the mode natively.
+    /// On the responses and chat completions endpoints `adaptive` is the
+    /// dialect's level, snapped to what the model lists. The Claude models
+    /// report `adaptive_thinking` and take the messages endpoint, which spells
+    /// the mode natively.
     #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "high", "max"]}), Some(Effort::High); "responses sends a fixed level")]
     #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "medium"]}), Some(Effort::Medium); "the level snaps to what the model lists")]
     #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "high"], "adaptive_thinking": true}), None; "reported adaptive stays")]
+    #[test_case(CHAT_COMPLETIONS_PATH, json!({"reasoning_effort": ["low", "medium", "high"]}), Some(Effort::High); "chat completions sends a fixed level")]
     #[test_case(MESSAGES_PATH, json!({"max_thinking_budget": 32_000}), None; "messages spells it natively")]
     fn adaptive_effort_follows_the_endpoint_and_the_listing(
         endpoint: &str,
@@ -1208,16 +1256,17 @@ mod tests {
         );
     }
 
-    #[test_case(RESPONSES_PATH, true; "responses honors reasoning")]
-    #[test_case(MESSAGES_PATH, true; "messages honors thinking")]
-    #[test_case(CHAT_COMPLETIONS_PATH, false; "chat completions drops reasoning")]
-    fn thinking_support_follows_endpoint(endpoint: &str, expected: bool) {
+    #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "high"]}), true; "responses honors reasoning")]
+    #[test_case(MESSAGES_PATH, json!({"max_thinking_budget": 32_000}), true; "messages honors thinking")]
+    #[test_case(CHAT_COMPLETIONS_PATH, json!({"reasoning_effort": ["low", "medium", "high"]}), true; "chat completions honors reasoning effort")]
+    #[test_case(CHAT_COMPLETIONS_PATH, json!({"max_thinking_budget": 32_000}), false; "chat completions ignores budget only")]
+    fn thinking_support_follows_endpoint(endpoint: &str, supports: Value, expected: bool) {
         let model: CopilotModel = serde_json::from_value(json!({
             "id": "reasoner",
             "supported_endpoints": [endpoint],
             "capabilities": {
                 "type": "chat",
-                "supports": {"reasoning_effort": ["low", "high"], "adaptive_thinking": true}
+                "supports": supports
             }
         }))
         .unwrap();
@@ -1448,6 +1497,75 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
     }
 
+    #[test_case(ThinkingConfig::Off, None; "off omits effort when none unsupported")]
+    #[test_case(ThinkingConfig::Adaptive, Some("high"); "adaptive defaults to high")]
+    #[test_case(ThinkingConfig::Effort(Effort::Medium), Some("medium"); "supported effort passes through")]
+    #[test_case(ThinkingConfig::Effort(Effort::Max), Some("high"); "unsupported effort snaps down")]
+    fn chat_completions_reasoning_applies_listed_efforts(
+        thinking: ThinkingConfig,
+        expected: Option<&str>,
+    ) {
+        let model = Model::from_spec("copilot/gemini-4-carbon-1m").unwrap();
+        let info = CopilotModelInfo {
+            reasoning_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
+            reasoning_off: false,
+            adaptive_thinking: false,
+            endpoint: Endpoint::ChatCompletions,
+        };
+
+        let body = chat_completions_body(
+            &model,
+            &[Message::user("hi".into())],
+            "system",
+            &json!([]),
+            thinking,
+            Some(&info),
+        );
+        assert_eq!(body["model"], json!("gemini-4-carbon"));
+        assert_eq!(body["reasoning_effort"].as_str(), expected);
+    }
+
+    #[test]
+    fn chat_completions_replays_reasoning_opaque_and_empty_summary() {
+        let model = Model::from_spec("copilot/gemini-4-carbon-1m").unwrap();
+        let messages = vec![
+            Message::user("check k1".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                        reasoning_id: None,
+                        reasoning_opaque: Some("encrypted_thought_sig".into()),
+                    },
+                    ContentBlock::tool_use("call_1", "read", json!({"path": "lib.rs"})),
+                ],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result("call_1", "fn main() {}", false)],
+                ..Default::default()
+            },
+            Message::user("also check k2".into()),
+        ];
+
+        let body = chat_completions_body(
+            &model,
+            &messages,
+            "system",
+            &json!([]),
+            ThinkingConfig::Off,
+            None,
+        );
+        let assistant = &body["messages"][2];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["reasoning_opaque"], "encrypted_thought_sig");
+        assert_eq!(assistant["reasoning_text"], "");
+        assert!(assistant.get("reasoning_content").is_none());
+    }
+
     #[test]
     fn messages_body_drops_unsigned_thinking_without_cache_control() {
         let model = Model::from_spec(CLAUDE_SPEC).unwrap();
@@ -1458,6 +1576,7 @@ mod tests {
                     thinking: "gpt reasoning summary".into(),
                     signature: None,
                     reasoning_id: None,
+                    reasoning_opaque: Some("gemini_opaque".into()),
                 },
                 ContentBlock::Text { text: REPLY.into() },
             ],
@@ -1540,5 +1659,67 @@ mod tests {
             ..enabled
         };
         assert!(!disabled.is_enabled_chat_model());
+    }
+
+    #[tokio::test]
+    async fn turn_requests_carry_session_interaction_id() {
+        const SCRIPT: &[Canned] = &[
+            Canned::json(
+                200,
+                r#"{"data":[
+                    {"id":"gemini-4-carbon","model_picker_enabled":true,"capabilities":{"type":"chat"},"supported_endpoints":["/chat/completions"]},
+                    {"id":"gpt-5.4","model_picker_enabled":true,"capabilities":{"type":"chat"},"supported_endpoints":["/responses"]}
+                ]}"#,
+            ),
+            Canned::json(400, r#"{"error":{"message":"rejected"}}"#),
+            Canned::json(400, r#"{"error":{"message":"rejected"}}"#),
+        ];
+        let (base_url, requests) = serve(SCRIPT);
+        let auth = ResolvedAuth::for_test(
+            Some(base_url),
+            vec![("Authorization".into(), "Bearer token".into())],
+        );
+        let copilot = Copilot::with_auth(Arc::new(Mutex::new(auth)), Timeouts::default());
+        let session = SessionRef::from_id(maki_storage::id::MakiId::generate());
+        let (tx, _rx) = unbounded_channel();
+
+        let gemini = Model::from_spec("copilot/gemini-4-carbon").unwrap();
+        let _ = copilot
+            .stream_message(
+                &gemini,
+                &[Message::user("hi".into())],
+                "sys",
+                &json!([]),
+                &tx,
+                RequestOptions::default(),
+                Some(&session),
+            )
+            .await;
+
+        let gpt = Model::from_spec("copilot/gpt-5.4").unwrap();
+        let _ = copilot
+            .stream_message(
+                &gpt,
+                &[Message::user("hi".into())],
+                "sys",
+                &json!([]),
+                &tx,
+                RequestOptions::default(),
+                Some(&session),
+            )
+            .await;
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(
+            recorded[1].headers.values(INTERACTION_ID_HEADER),
+            [session.as_str()]
+        );
+        assert_eq!(
+            recorded[2].headers.values(INTERACTION_ID_HEADER),
+            [session.as_str()]
+        );
+        let responses_body: Value = serde_json::from_slice(&recorded[2].body).unwrap();
+        assert_eq!(responses_body[PROMPT_CACHE_KEY_FIELD], session.as_str());
     }
 }

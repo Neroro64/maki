@@ -304,7 +304,21 @@ impl OpenAiCompatProvider {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum AssistantReasoningWire {
+    Standard,
+    Copilot,
+}
+
 pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
+    convert_messages_for(messages, system, AssistantReasoningWire::Standard)
+}
+
+pub(crate) fn convert_messages_for(
+    messages: &[Message],
+    system: &str,
+    reasoning_wire: AssistantReasoningWire,
+) -> Vec<Value> {
     let mut out = vec![json!({"role": "system", "content": system})];
 
     for msg in messages {
@@ -357,13 +371,21 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
             Role::Assistant => {
                 let mut text = String::new();
                 let mut reasoning_text = String::new();
+                let mut reasoning_opaque: Option<&str> = None;
                 let mut tool_calls = Vec::new();
 
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text: t } => text.push_str(t),
-                        ContentBlock::Thinking { thinking, .. } => {
+                        ContentBlock::Thinking {
+                            thinking,
+                            reasoning_opaque: opaque,
+                            ..
+                        } => {
                             reasoning_text.push_str(thinking);
+                            if let Some(opaque) = opaque.as_deref().filter(|s| !s.is_empty()) {
+                                reasoning_opaque = Some(opaque);
+                            }
                         }
                         ContentBlock::ToolUse {
                             id, name, input, ..
@@ -384,13 +406,31 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                     }
                 }
 
-                if !text.is_empty() || !tool_calls.is_empty() || !reasoning_text.is_empty() {
+                let has_copilot_opaque = matches!(reasoning_wire, AssistantReasoningWire::Copilot)
+                    && reasoning_opaque.is_some();
+                if !text.is_empty()
+                    || !tool_calls.is_empty()
+                    || !reasoning_text.is_empty()
+                    || has_copilot_opaque
+                {
                     // Always emit string `content` (""): some OpenAI-compatible
                     // backends (e.g. Cloudflare Workers AI gpt-oss) reject
                     // omitted/null content on assistant tool-call messages.
                     let mut msg_obj = json!({"role": "assistant", "content": text});
-                    if !reasoning_text.is_empty() {
-                        msg_obj["reasoning_content"] = Value::String(reasoning_text);
+                    match reasoning_wire {
+                        AssistantReasoningWire::Standard => {
+                            if !reasoning_text.is_empty() {
+                                msg_obj["reasoning_content"] = Value::String(reasoning_text);
+                            }
+                        }
+                        AssistantReasoningWire::Copilot => {
+                            if let Some(opaque) = reasoning_opaque {
+                                msg_obj["reasoning_opaque"] = json!(opaque);
+                                msg_obj["reasoning_text"] = Value::String(reasoning_text);
+                            } else if !reasoning_text.is_empty() {
+                                msg_obj["reasoning_text"] = Value::String(reasoning_text);
+                            }
+                        }
                     }
                     if !tool_calls.is_empty() {
                         msg_obj["tool_calls"] = Value::Array(tool_calls);
@@ -454,6 +494,10 @@ struct FunctionDelta {
 struct ChunkDelta {
     content: Option<ContentDelta>,
     reasoning_content: Option<String>,
+    /// Copilot streams reasoning deltas and encrypted thought signatures on
+    /// `/chat/completions` as `reasoning_text` and `reasoning_opaque`.
+    reasoning_text: Option<String>,
+    reasoning_opaque: Option<String>,
     /// vLLM sends `reasoning` instead of `reasoning_content`, and AxonHub
     /// sends both, so a serde alias would fail on the duplicate field.
     reasoning: Option<String>,
@@ -571,6 +615,7 @@ pub(crate) struct StreamedText {
     text: String,
     pub(crate) reasoning: String,
     pub(crate) reasoning_id: Option<String>,
+    pub(crate) reasoning_opaque: Option<String>,
     text_started: bool,
 }
 
@@ -610,11 +655,12 @@ impl StreamedText {
 
     pub(crate) fn into_blocks(self) -> Vec<ContentBlock> {
         let mut blocks = Vec::new();
-        if !self.reasoning.is_empty() {
+        if !self.reasoning.is_empty() || self.reasoning_opaque.is_some() {
             blocks.push(ContentBlock::Thinking {
                 thinking: self.reasoning,
                 signature: None,
                 reasoning_id: self.reasoning_id,
+                reasoning_opaque: self.reasoning_opaque,
             });
         }
         if !self.text.is_empty() {
@@ -717,14 +763,21 @@ pub async fn parse_sse(
             continue;
         };
 
-        if let Some(reasoning) = [delta.reasoning_content, delta.reasoning]
-            .into_iter()
-            .flatten()
-            .find(|s| !s.is_empty())
+        if let Some(opaque) = delta.reasoning_opaque.filter(|s| !s.is_empty()) {
+            streamed.reasoning_opaque = Some(opaque);
+        }
+
+        if let Some(reasoning) = [
+            delta.reasoning_content,
+            delta.reasoning_text,
+            delta.reasoning,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
         {
             streamed.push_reasoning(reasoning, event_tx)?;
         }
-
         match delta.content {
             Some(ContentDelta::String(content)) => streamed.push_text(content, event_tx)?,
             Some(ContentDelta::Array(content_array)) => {
@@ -1449,6 +1502,7 @@ data: [DONE]\n\n";
                     thinking: "Let me think...".into(),
                     signature: None,
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::Text {
                     text: "Hello".into(),
@@ -1471,6 +1525,7 @@ data: [DONE]\n\n";
                 thinking: "Just thinking...".into(),
                 signature: None,
                 reasoning_id: None,
+                reasoning_opaque: None,
             }],
             ..Default::default()
         }];
@@ -1529,6 +1584,65 @@ data: [DONE]\n\n";
 
         assert_eq!(text_deltas, vec!["Hello"]);
         assert_eq!(thinking_deltas, vec!["Let me think", "..."]);
+    }
+
+    #[tokio::test]
+    async fn parse_sse_reasoning_text_and_opaque_deltas() {
+        let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":null,\"reasoning_text\":\"Thinking...\"}}]}\n\
+\n\
+data: {\"choices\":[{\"delta\":{\"content\":null,\"reasoning_opaque\":\"opaque_sig_1\"}}]}\n\
+\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"391\"}}]}\n\
+\n\
+data: [DONE]\n\n";
+
+        let (tx, mut rx) = unbounded_channel();
+        let resp = parse_sse(sse_body(sse.as_bytes()), &tx, false)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                &resp.message.content[0],
+                ContentBlock::Thinking { thinking, reasoning_opaque, .. }
+                    if thinking == "Thinking..." && reasoning_opaque.as_deref() == Some("opaque_sig_1")
+            ),
+            "{:?}",
+            resp.message.content[0],
+        );
+        assert!(matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "391"));
+        assert!(
+            matches!(rx.try_recv(), Ok(ProviderEvent::ThinkingDelta { text }) if text == "Thinking...")
+        );
+        assert!(matches!(rx.try_recv(), Ok(ProviderEvent::TextDelta { text }) if text == "391"));
+    }
+
+    #[tokio::test]
+    async fn parse_sse_reasoning_opaque_without_summary_keeps_thinking_block() {
+        let sse = "\
+data: {\"choices\":[{\"delta\":{\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}],\"reasoning_opaque\":\"opaque_only\"}}]}\n\
+\n\
+data: [DONE]\n\n";
+
+        let (tx, mut rx) = unbounded_channel();
+        let resp = parse_sse(sse_body(sse.as_bytes()), &tx, false)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                &resp.message.content[0],
+                ContentBlock::Thinking { thinking, reasoning_opaque, .. }
+                    if thinking.is_empty() && reasoning_opaque.as_deref() == Some("opaque_only")
+            ),
+            "{:?}",
+            resp.message.content[0],
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ProviderEvent::ToolUseStart { id, name }) if id == "call_1" && name == "read"
+        ));
     }
 
     static TEST_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {

@@ -482,6 +482,7 @@ mod tests {
                     thinking: PRIVATE_THOUGHT.to_owned(),
                     signature: None,
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::RedactedThinking {
                     data: PRIVATE_THOUGHT.to_owned(),

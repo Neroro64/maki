@@ -818,6 +818,7 @@ data: {\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":10,\"
                     thinking: "weighing it".to_string(),
                     signature: None,
                     reasoning_id,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::Text {
                     text: "answer".to_string(),

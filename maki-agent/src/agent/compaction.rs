@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test_case(vec![] ; "no_content")]
     #[test_case(vec![ContentBlock::Text { text: " \n".into() }] ; "blank_text")]
-    #[test_case(vec![ContentBlock::Thinking { thinking: KEPT_TEXT.into(), signature: None, reasoning_id: None }] ; "thinking_only")]
+    #[test_case(vec![ContentBlock::Thinking { thinking: KEPT_TEXT.into(), signature: None, reasoning_id: None, reasoning_opaque: None }] ; "thinking_only")]
     #[tokio::test]
     async fn a_failed_compaction_leaves_the_context_alone(content: Vec<ContentBlock>) {
         let empty = || {
@@ -1920,6 +1920,7 @@ mod tests {
                     thinking: "hmm".into(),
                     signature: Some("sig".into()),
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::Text {
                     text: "hello".into(),

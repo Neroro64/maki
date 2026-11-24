@@ -1,16 +1,16 @@
 use anyhow::{Context, Result, bail};
-use calldive::{analysis, git, load_analysis, ui};
 use clap::Parser;
+use logidiff::{analysis, git, load_analysis, ui};
 use std::collections::HashSet;
 
 /// Interactive, call-graph aware code review for the terminal.
 ///
-/// calldive parses the changed files of a git range with tree-sitter,
+/// logidiff parses the changed files of a git range with tree-sitter,
 /// builds the call graph per revision, and reviews the change the way it
 /// executes: starting at entry points, DFS into callees, with a line diff
 /// for every hop.
 #[derive(Parser, Debug)]
-#[command(name = "calldive", version, about)]
+#[command(name = "logidiff", version, about)]
 struct Args {
     /// source / base revision (or interactive selector in TUI mode when omitted)
     #[arg(allow_hyphen_values = false)]
@@ -146,6 +146,7 @@ fn main() -> Result<()> {
             file: &'a str,
             label: &'a str,
             kind: &'a str,
+            role: &'a str,
             status: &'a str,
             head: Option<JsonSpan<'a>>,
             base: Option<JsonSpan<'a>>,
@@ -157,6 +158,8 @@ fn main() -> Result<()> {
             lost_callees: &'a [String],
             implementations: &'a [String],
             contracts: &'a [String],
+            consumers: &'a [String],
+            external_consumers: &'a [String],
         }
         #[derive(serde::Serialize)]
         struct JsonSummary {
@@ -202,6 +205,7 @@ fn main() -> Result<()> {
                     file: &n.file,
                     label: a.label(&n.file),
                     kind: n.kind.label(),
+                    role: a.classify_node(n).label(),
                     status: n.status.label(),
                     head: n.head.as_ref().map(span),
                     base: n.base.as_ref().map(span),
@@ -213,6 +217,8 @@ fn main() -> Result<()> {
                     lost_callees: &n.lost_callees,
                     implementations: &n.implementations,
                     contracts: &n.contracts,
+                    consumers: &n.consumers,
+                    external_consumers: &n.external_consumers,
                 })
                 .collect(),
         };
@@ -221,7 +227,7 @@ fn main() -> Result<()> {
     }
     if args.dump {
         println!(
-            "calldive {base} → {head_label}   symbols +{ad} -{rm} ~{ch} >{mv}   entry points: {}",
+            "logidiff {base} → {head_label}   symbols +{ad} -{rm} ~{ch} >{mv}   entry points: {}",
             roots.len()
         );
         let expanded: HashSet<String> = roots.iter().cloned().collect();
@@ -239,11 +245,21 @@ fn main() -> Result<()> {
             } else {
                 ""
             };
+            let consumer_prefix = if r.is_consumer { "> " } else { "" };
+            let shared_note = if r.shared_callers.len() >= 2 {
+                format!(" [← {}]", r.shared_callers.join(", "))
+            } else if r.is_repeat {
+                " [↗]".to_string()
+            } else {
+                String::new()
+            };
             println!(
-                "{}{} {} :{}  {}-{}{}",
+                "{}{} {}{}{} :{}  {}-{}{}",
                 indent,
                 n.status.glyph(),
+                consumer_prefix,
                 n.name,
+                shared_note,
                 a.label(&n.file),
                 span.start_row + 1,
                 span.end_row,

@@ -457,6 +457,7 @@ impl EventParser {
                                 thinking: String::new(),
                                 signature: None,
                                 reasoning_id: None,
+                                reasoning_opaque: None,
                             });
                         }
                         SseContentBlock::RedactedThinking { data } => {
@@ -729,6 +730,7 @@ mod tests {
                         thinking: "plan".into(),
                         signature: Some("sig".into()),
                         reasoning_id: None,
+                        reasoning_opaque: None,
                     },
                     ContentBlock::tool_use(TOOL_USE_ID, TOOL_SEARCH, json!({})),
                 ],

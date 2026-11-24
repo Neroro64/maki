@@ -20,6 +20,10 @@ pub struct FileChange {
     pub old_path: Option<String>,
     /// A = added, M = modified, D = deleted, R = renamed, C = copied
     pub status: char,
+    pub base_oid: Option<String>,
+    pub base_submodule: bool,
+    pub head_oid: Option<String>,
+    pub head_submodule: bool,
 }
 
 pub struct Blob {
@@ -110,7 +114,7 @@ impl GitRepo {
             "rev-parse",
             "--path-format=absolute",
             "--git-path",
-            "calldive",
+            "logidiff",
         ])?;
         let path = String::from_utf8(out).context("git returned a non-UTF-8 cache path")?;
         Ok(PathBuf::from(path.trim_end_matches(['\r', '\n'])))
@@ -121,7 +125,8 @@ impl GitRepo {
     pub fn changed_files(&self, base: &str, head: Option<&str>) -> Result<Vec<FileChange>> {
         let mut args = vec![
             "diff",
-            "--name-status",
+            "--raw",
+            "--no-abbrev",
             "-z",
             "-M",
             "-C",
@@ -137,8 +142,23 @@ impl GitRepo {
         let records = nul_records(&out)?;
         let mut records = records.into_iter();
         let mut files = Vec::new();
-        while let Some(status) = records.next() {
-            let status = status.first().copied().context("empty git diff status")? as char;
+        while let Some(meta) = records.next() {
+            let meta_str = std::str::from_utf8(meta).context("invalid git diff --raw metadata")?;
+            let meta_fields: Vec<&str> = meta_str
+                .trim_start_matches(':')
+                .split_ascii_whitespace()
+                .collect();
+            if meta_fields.len() < 5 {
+                bail!("unexpected git diff --raw metadata: {meta_str}");
+            }
+            let base_mode = meta_fields[0];
+            let head_mode = meta_fields[1];
+            let base_oid_raw = meta_fields[2];
+            let head_oid_raw = meta_fields[3];
+            let status = meta_fields[4]
+                .bytes()
+                .next()
+                .context("empty git diff status")? as char;
             let first = records.next().context("git diff omitted a file path")?;
             let (path, old_path) = if matches!(status, 'R' | 'C') {
                 let new = records
@@ -148,10 +168,16 @@ impl GitRepo {
             } else {
                 (decode_path(first), None)
             };
+            let non_zero = |oid: &str| !oid.bytes().all(|b| b == b'0');
             files.push(FileChange {
                 path,
                 old_path,
                 status,
+                base_oid: non_zero(base_oid_raw).then(|| base_oid_raw.to_string()),
+                base_submodule: base_mode == "160000",
+                head_oid: (head.is_some() && non_zero(head_oid_raw))
+                    .then(|| head_oid_raw.to_string()),
+                head_submodule: head_mode == "160000",
             });
         }
         if head.is_none() {
@@ -168,6 +194,10 @@ impl GitRepo {
                         path,
                         old_path: None,
                         status: 'A',
+                        base_oid: None,
+                        base_submodule: false,
+                        head_oid: None,
+                        head_submodule: false,
                     });
                 }
             }
@@ -207,9 +237,111 @@ impl GitRepo {
         Ok(nul_records(&out)?.into_iter().map(decode_path).collect())
     }
 
-    fn untracked_files(&self) -> Result<Vec<String>> {
+    pub fn untracked_files(&self) -> Result<Vec<String>> {
         let out = self.run(&["ls-files", "-z", "--others", "--exclude-standard", "--"])?;
         Ok(nul_records(&out)?.into_iter().map(decode_path).collect())
+    }
+
+    /// Dirty tracked paths relative to HEAD (staged or unstaged).
+    pub fn dirty_tracked_files(&self) -> Result<Vec<String>> {
+        let Ok(head) = self.resolve_commit("HEAD") else {
+            return self.tracked_files();
+        };
+        let out = self.run(&[
+            "diff-index",
+            "-z",
+            "--name-only",
+            "--end-of-options",
+            &head,
+            "--",
+        ])?;
+        Ok(nul_records(&out)?.into_iter().map(decode_path).collect())
+    }
+
+    /// Fast candidate file prefilter via `git grep` at `rev` (or worktree when `None`).
+    /// Returns matching repository-relative paths, or `None` if `git grep` cannot run.
+    pub fn grep_candidate_files(
+        &self,
+        rev: Option<&str>,
+        terms: &[String],
+        pathspecs: &[&str],
+    ) -> Result<Option<HashSet<String>>> {
+        if terms.is_empty() {
+            return Ok(Some(HashSet::new()));
+        }
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&self.root).args([
+            "-c",
+            "core.quotepath=false",
+            "grep",
+            "--full-name",
+            "-l",
+            "-z",
+            "-w",
+            "-F",
+            "-f",
+            "-",
+        ]);
+        if let Some(rev) = rev {
+            cmd.arg(rev);
+        }
+        cmd.arg("--");
+        cmd.args(pathspecs);
+        let mut child = match cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return Ok(None),
+        };
+        let stdin = child.stdin.take().context("git grep stdin unavailable")?;
+        let mut stdout = child.stdout.take().context("git grep stdout unavailable")?;
+        let mut stderr = child.stderr.take().context("git grep stderr unavailable")?;
+        let (out, _err, status) = std::thread::scope(
+            |scope| -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus)> {
+                let writer = scope.spawn(move || -> std::io::Result<()> {
+                    let mut stdin = stdin;
+                    for term in terms {
+                        writeln!(stdin, "{term}")?;
+                    }
+                    stdin.flush()
+                });
+                let err_reader = scope.spawn(move || -> std::io::Result<Vec<u8>> {
+                    let mut buf = Vec::new();
+                    stderr.read_to_end(&mut buf)?;
+                    Ok(buf)
+                });
+                let mut out_buf = Vec::new();
+                stdout.read_to_end(&mut out_buf)?;
+                let _ = writer.join();
+                let err_buf = err_reader
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("git grep stderr reader panicked"))??;
+                let status = child.wait()?;
+                Ok((out_buf, err_buf, status))
+            },
+        )?;
+        match status.code() {
+            Some(0) => {}
+            Some(1) => return Ok(Some(HashSet::new())),
+            _ => return Ok(None),
+        }
+        let prefix = rev.map(|r| format!("{r}:"));
+        let mut paths = HashSet::new();
+        for record in nul_records(&out)? {
+            let decoded = decode_path(record);
+            let path = match &prefix {
+                Some(p) => decoded
+                    .strip_prefix(p.as_str())
+                    .unwrap_or(&decoded)
+                    .to_string(),
+                None => decoded,
+            };
+            paths.insert(path);
+        }
+        Ok(Some(paths))
     }
 
     /// Blob IDs avoid the line-oriented batch protocol's restrictions on paths.

@@ -467,6 +467,11 @@ pub enum ContentBlock {
         /// own.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_id: Option<String>,
+        /// Copilot's encrypted reasoning token on `/chat/completions`, replayed
+        /// alongside `reasoning_text` so Gemini keeps its thought signature and
+        /// prompt cache across user turns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_opaque: Option<String>,
     },
     RedactedThinking {
         data: String,
@@ -3220,10 +3225,12 @@ mod tests {
             thinking: "x".into(),
             signature: None,
             reasoning_id: None,
+            reasoning_opaque: None,
         };
         let json = serde_json::to_value(&block).unwrap();
         assert!(json.get("signature").is_none());
         assert!(json.get("reasoning_id").is_none());
+        assert!(json.get("reasoning_opaque").is_none());
     }
 
     const USAGE_LABEL: &str = "Spend";

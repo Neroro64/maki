@@ -1,6 +1,6 @@
 [package]
-name = "calldive"
-version = "0.2.0"
+name = "logidiff"
+version = "0.3.0"
 edition = "2024"
 description = "Interactive TUI code review: entry-point driven, call-graph aware diffs"
 license = "MIT"
@@ -14,6 +14,8 @@ ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 similar = { workspace = true }
+syntect = { workspace = true }
+two-face = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
 tree-sitter-python = { workspace = true }
@@ -29,3 +31,6 @@ unicode-width = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 test-case = { workspace = true }
+
+[lints]
+workspace = true

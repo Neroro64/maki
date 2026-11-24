@@ -2057,6 +2057,7 @@ mod tests {
                     thinking: THOUGHT.into(),
                     signature: Some(SIGNATURE.into()),
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::RedactedThinking {
                     data: SIGNATURE.into(),

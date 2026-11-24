@@ -290,6 +290,7 @@ mod tests {
             thinking: THOUGHT.into(),
             signature: signature.map(Into::into),
             reasoning_id: None,
+            reasoning_opaque: None,
         }
     }
 

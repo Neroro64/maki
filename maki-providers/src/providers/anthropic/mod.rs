@@ -1240,6 +1240,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
             thinking: thinking.into(),
             signature: Some(THINKING_SIGNATURE.into()),
             reasoning_id: None,
+            reasoning_opaque: None,
         }
     }
 
@@ -1248,6 +1249,7 @@ data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n";
             thinking: thinking.into(),
             signature: None,
             reasoning_id: None,
+            reasoning_opaque: None,
         }
     }
 

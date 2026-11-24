@@ -580,6 +580,7 @@ fn push_or_extend_thinking(
             thinking: text,
             signature,
             reasoning_id: None,
+            reasoning_opaque: None,
         });
     }
 }
@@ -888,6 +889,7 @@ mod tests {
                 thinking: "hmm".into(),
                 signature: Some("sig123".into()),
                 reasoning_id: None,
+                reasoning_opaque: None,
             }],
             ..Default::default()
         }];

@@ -1218,33 +1218,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "calldive"
-version = "0.2.0"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "blake3",
- "clap",
- "ratatui",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "test-case",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3825,6 +3798,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "logidiff"
+version = "0.3.0"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "blake3",
+ "clap",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "similar",
+ "syntect",
+ "tempfile",
+ "test-case",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "two-face",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "lru"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4253,7 +4255,6 @@ dependencies = [
  "arboard",
  "arc-swap",
  "base64 0.23.1",
- "calldive",
  "color-eyre",
  "criterion",
  "crossterm",
@@ -4263,6 +4264,7 @@ dependencies = [
  "image",
  "jiff 0.2.46",
  "libc",
+ "logidiff",
  "maki-agent",
  "maki-config",
  "maki-highlight",

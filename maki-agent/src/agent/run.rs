@@ -1774,6 +1774,7 @@ mod tests {
             thinking: "stalled".into(),
             signature: None,
             reasoning_id: None,
+            reasoning_opaque: None,
         }])
     }
 
@@ -1785,6 +1786,7 @@ mod tests {
                 thinking: THOUGHT.into(),
                 signature: Some(THOUGHT_SIGNATURE.into()),
                 reasoning_id: None,
+                reasoning_opaque: None,
             },
         );
         response
@@ -4210,6 +4212,7 @@ mod tests {
                     thinking: "hmm".into(),
                     signature: Some("sig".into()),
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::Text {
                     text: "done".into(),

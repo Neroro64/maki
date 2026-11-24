@@ -1,6 +1,6 @@
 //! Cache the complete review model, including revision source text.
 
-use crate::{analysis::Analysis, git, syntax};
+use crate::{analysis::Analysis, git};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 // Changing the executable also invalidates entries, including local rebuilds.
-const FORMAT: &[u8] = b"calldive-analysis-v3";
+const FORMAT: &[u8] = b"logidiff-analysis-v4";
 const MAX_ENTRIES: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,10 +63,11 @@ impl Cache {
             );
         }
         if head.is_none() {
-            // Include unchanged callers as well as edited and untracked sources.
-            // Hash contents, not timestamps: same-size edits must invalidate too.
-            let mut paths = repo.tracked_files()?;
-            paths.retain(|path| syntax::lang_for_path(path).is_some());
+            // `current_head` already locks clean tracked files at HEAD. Hash only
+            // changed, dirty-tracked, and untracked worktree files so cache hits
+            // do not read thousands of clean tracked files from disk.
+            let mut paths = repo.dirty_tracked_files()?;
+            paths.extend(repo.untracked_files()?);
             paths.extend(changes.iter().map(|change| change.path.clone()));
             paths.sort();
             paths.dedup();
@@ -186,8 +187,8 @@ fn executable_digest() -> Result<&'static [u8; 32]> {
     if let Some(digest) = DIGEST.get() {
         return Ok(digest);
     }
-    let executable = std::env::current_exe().context("locating calldive executable")?;
-    let mut binary = File::open(executable).context("reading calldive executable")?;
+    let executable = std::env::current_exe().context("locating logidiff executable")?;
+    let mut binary = File::open(executable).context("reading logidiff executable")?;
     let mut executable_hash = blake3::Hasher::new();
     executable_hash.update_reader(&mut binary)?;
     let digest = *executable_hash.finalize().as_bytes();

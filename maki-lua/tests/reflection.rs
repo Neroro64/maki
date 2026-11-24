@@ -193,6 +193,7 @@ impl Fixture {
                         thinking: THINKING_SECRET.into(),
                         signature: None,
                         reasoning_id: None,
+                        reasoning_opaque: None,
                     },
                     ContentBlock::tool_use(
                         "bad",

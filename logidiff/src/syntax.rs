@@ -85,6 +85,42 @@ impl Lang {
             other => other,
         }
     }
+
+    pub fn family_pathspecs(self) -> &'static [&'static str] {
+        match self.family() {
+            Lang::Rust => &[":(glob)**/*.rs"],
+            Lang::Python => &[":(glob)**/*.py"],
+            Lang::TypeScript => &[
+                ":(glob)**/*.ts",
+                ":(glob)**/*.tsx",
+                ":(glob)**/*.mts",
+                ":(glob)**/*.cts",
+                ":(glob)**/*.js",
+                ":(glob)**/*.jsx",
+                ":(glob)**/*.mjs",
+                ":(glob)**/*.cjs",
+            ],
+            Lang::Go => &[":(glob)**/*.go"],
+            Lang::CSharp => &[":(glob)**/*.cs"],
+            Lang::Cpp => &[
+                ":(glob)**/*.c",
+                ":(glob)**/*.C",
+                ":(glob)**/*.h",
+                ":(glob)**/*.cc",
+                ":(glob)**/*.cpp",
+                ":(glob)**/*.cxx",
+                ":(glob)**/*.c++",
+                ":(glob)**/*.hh",
+                ":(glob)**/*.hpp",
+                ":(glob)**/*.hxx",
+                ":(glob)**/*.h++",
+                ":(glob)**/*.ipp",
+                ":(glob)**/*.inl",
+                ":(glob)**/*.tpp",
+            ],
+            Lang::JavaScript | Lang::Tsx | Lang::C => unreachable!(),
+        }
+    }
 }
 
 thread_local! {
@@ -96,6 +132,7 @@ pub enum SymbolKind {
     Function,
     Declaration,
     Type,
+    Value,
     File,
 }
 
@@ -105,6 +142,7 @@ impl SymbolKind {
             Self::Function => "function",
             Self::Declaration => "declaration",
             Self::Type => "type",
+            Self::Value => "value",
             Self::File => "file",
         }
     }
@@ -149,23 +187,28 @@ pub struct FnDef {
     pub body_tokens: usize,
 }
 
-/// A call made inside a function (attributed to the innermost enclosing fn).
+/// A call or data/member reference made inside a symbol.
 #[derive(Debug, Clone)]
 pub struct CallSite {
     /// index into the same file's `fns` vec
     pub caller: usize,
-    /// simple name of the callee (last path segment)
+    /// simple name of the callee or referenced member/value (last path segment)
     pub name: String,
     /// Statically identified receiver type, never an unknown variable name.
     pub receiver: Option<String>,
     /// False for syntactically explicit base/super/nonvirtual dispatch.
     pub dispatch: bool,
+    /// True when this site is a data/property/field/constant reference rather than a call.
+    pub is_value_ref: bool,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct ParsedFile {
     pub fns: Vec<FnDef>,
     pub calls: Vec<CallSite>,
+    pub value_refs: Vec<CallSite>,
+    /// True when the file contains executable top-level statements (scripts).
+    pub is_script: bool,
 }
 
 /// File-level test convention (independent of AST).
@@ -204,6 +247,10 @@ fn file_is_test_by_convention(path: &str, lang: Lang) -> bool {
         || base.contains(".test.")
         || p.contains("__tests__/")
         || language_test
+}
+
+pub fn file_is_test_path(path: &str) -> bool {
+    lang_for_path(path).is_some_and(|lang| file_is_test_by_convention(path, lang))
 }
 
 pub fn parse_file(path: &str, src: &str) -> Option<ParsedFile> {
@@ -253,6 +300,8 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
                 | "method_declaration"         // go/c#
                 | "constructor_declaration"    // c#
                 | "destructor_declaration"     // c#
+                | "operator_declaration"       // c#
+                | "conversion_operator_declaration" // c#
                 | "local_function_statement" // c#
                 | "function_signature_item" // rust trait / extern
                 | "function_signature" // ts overload / ambient
@@ -357,6 +406,8 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
         Some(name_node)
     }
 
+    out.is_script = file_is_script(root, lang);
+
     // Both passes use cursors: deeply nested input must not consume the stack.
     let mut known_types = HashSet::new();
     visit_nodes(root, |node| {
@@ -383,10 +434,17 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
     let mut current_fn: Option<usize> = None;
     let mut current_type: Option<usize> = None;
     let mut in_test = false;
+    let mut script_fn: Option<usize> = None;
+    let mut script_bounds: Option<(usize, usize, usize, usize)> = None;
     'walk: loop {
         let node = cursor.node();
         let kind = node.kind();
         let type_node = is_type_node(node, lang);
+        let is_top_script_stmt = out.is_script
+            && current_fn.is_none()
+            && current_type.is_none()
+            && node.parent().is_some_and(|p| p.id() == root.id())
+            && is_script_statement(node, lang);
         let native_declaration = cpp_method_declaration(node, lang, current_type.is_some());
         let definition = is_fn_def(kind) || native_declaration.is_some();
         let binding = if definition || type_node {
@@ -394,10 +452,25 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
         } else {
             binding_name(node, lang)
         };
-        let symbol_node = native_declaration.unwrap_or(node);
-        let name_node = if type_node {
+        let value_decl = if !definition && !type_node && binding.is_none() && current_fn.is_none() {
+            value_symbol(node, src, lang, current_type.is_some())
+        } else {
+            None
+        };
+        let is_value = value_decl.is_some();
+        let symbol_node = value_decl
+            .as_ref()
+            .map(|&(sym, _, _)| sym)
+            .or(native_declaration)
+            .unwrap_or(node);
+        let name_node = if let Some(&(_, name_node, _)) = value_decl.as_ref() {
+            Some(name_node)
+        } else if type_node {
             if kind == "impl_item" {
                 node.child_by_field_name("type").map(type_name_node)
+            } else if kind == "type_definition" {
+                node.child_by_field_name("declarator")
+                    .and_then(declarator_name)
             } else {
                 node.child_by_field_name("name")
             }
@@ -405,6 +478,10 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             if matches!(lang, Lang::C | Lang::Cpp) {
                 node.child_by_field_name("declarator")
                     .and_then(declarator_name)
+            } else if kind == "operator_declaration" {
+                csharp_operator_name_node(node)
+            } else if kind == "conversion_operator_declaration" {
+                node.child_by_field_name("type")
             } else {
                 node.child_by_field_name("name")
             }
@@ -431,6 +508,45 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             containers.len(),
             scope.then_some(bindings.len()),
         );
+        if is_top_script_stmt {
+            let s_byte = node.start_byte();
+            let e_byte = trim_end(src, s_byte, node.end_byte());
+            let s_row = node.start_position().row;
+            let e_row = node.end_position().row + usize::from(node.end_position().column != 0);
+            script_bounds = Some(match script_bounds {
+                Some((sb, eb, sr, er)) => {
+                    (sb.min(s_byte), eb.max(e_byte), sr.min(s_row), er.max(e_row))
+                }
+                None => (s_byte, e_byte, s_row, e_row),
+            });
+            let idx = *script_fn.get_or_insert_with(|| {
+                let i = out.fns.len();
+                out.fns.push(FnDef {
+                    name: "<file>".to_string(),
+                    qual: "<file>".to_string(),
+                    owner: None,
+                    kind: SymbolKind::File,
+                    bases: Vec::new(),
+                    dispatch: false,
+                    is_static: true,
+                    sig: String::new(),
+                    arity: None,
+                    container_start: None,
+                    start_byte: s_byte,
+                    end_byte: e_byte,
+                    start_row: s_row,
+                    end_row: e_row,
+                    body_hash: 0,
+                    tokens: Vec::new(),
+                    rename_hash: 0,
+                    body_shape: None,
+                    body_tokens: 0,
+                    is_test: file_is_test,
+                });
+                i
+            });
+            current_fn = Some(idx);
+        }
         if lang == Lang::Rust && (kind == "mod_item" || name_node.is_some()) {
             in_test |= (kind == "mod_item" && text_field(node, "name", src) == "tests")
                 || rust_attribute(node, src, true);
@@ -439,7 +555,19 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             in_test |= csharp_attribute(node, src, &["TestFixture", "TestClass"]);
         }
         if let Some(name_node) = name_node {
-            let mut name = name_node.utf8_text(src).unwrap_or_default().to_string();
+            let mut name = if let Some((_, _, Some(override_name))) = &value_decl {
+                override_name.clone()
+            } else {
+                name_node.utf8_text(src).unwrap_or_default().to_string()
+            };
+            if lang == Lang::CSharp
+                && matches!(
+                    kind,
+                    "operator_declaration" | "conversion_operator_declaration"
+                )
+            {
+                name = format!("operator {name}");
+            }
             if lang == Lang::Rust && kind == "impl_item" {
                 let ty = owner_type(&text_field(node, "type", src));
                 let tr = text_field(node, "trait", src);
@@ -486,7 +614,9 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
                         src,
                         &["Fact", "Theory", "Test", "TestMethod", "TestCase"],
                     ));
-            let symbol_kind = if type_node {
+            let symbol_kind = if is_value {
+                SymbolKind::Value
+            } else if type_node {
                 SymbolKind::Type
             } else if native_declaration.is_some()
                 || matches!(
@@ -499,7 +629,8 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
                 )
                 || (lang == Lang::CSharp
                     && definition
-                    && node.child_by_field_name("body").is_none())
+                    && node.child_by_field_name("body").is_none()
+                    && !node_has_arrow_body(node))
             {
                 SymbolKind::Declaration
             } else {
@@ -513,24 +644,30 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             let end = trim_end(src, symbol_node.start_byte(), end);
             let bases = if type_node {
                 type_bases(node, src, lang)
-            } else if lang == Lang::Rust {
+            } else if lang == Lang::Rust && !is_value {
                 enclosing_impl_trait(node, src).into_iter().collect()
             } else {
                 Vec::new()
             };
-            let is_static = !type_node && method_static(node, symbol_node, src, lang, definition);
+            let is_static = !type_node
+                && (if is_value {
+                    value_is_static(node, symbol_node, src, lang, current_type.is_some())
+                } else {
+                    method_static(node, symbol_node, src, lang, definition)
+                });
             let dispatch = !type_node
+                && !is_value
                 && !is_static
                 && method_dispatch(symbol_node, src, lang, current_type.is_some());
             let idx = out.fns.len();
             let (tokens, rename_hash, body_shape, body_tokens) =
                 symbol_evidence(symbol_node, name_node, src, end);
-            let sig = if type_node {
+            let sig = if type_node || is_value {
                 String::new()
             } else {
                 signature(node, name_node, src, lang, definition)
             };
-            let arity = if type_node {
+            let arity = if type_node || is_value {
                 None
             } else {
                 parameter_arity(&sig, lang)
@@ -575,6 +712,17 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             if type_node {
                 current_type = Some(idx);
                 current_fn = None;
+                if matches!(
+                    lang,
+                    Lang::CSharp
+                        | Lang::TypeScript
+                        | Lang::Tsx
+                        | Lang::JavaScript
+                        | Lang::Cpp
+                        | Lang::Rust
+                ) {
+                    collect_type_member_bindings(node, src, lang, &mut bindings);
+                }
             } else {
                 current_fn = Some(idx);
             }
@@ -589,11 +737,31 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             }
         } else if let Some(container) = container_name(node, src, lang) {
             containers.push(container);
-        } else if is_call(kind)
-            && let Some(caller) = current_fn
-            && let Some(name) = callee_name(node, src)
-        {
-            let (receiver, dispatch) = call_receiver(
+        } else if let Some(caller) = current_fn {
+            if is_call(kind)
+                && let Some(name) = callee_name(node, src)
+            {
+                let (receiver, dispatch) = call_receiver(
+                    node,
+                    src,
+                    &bindings,
+                    &known_types,
+                    &out.fns[caller],
+                    current_type.map(|i| &out.fns[i]),
+                    lang,
+                )
+                .map_or((None, true), |(receiver, dispatch)| {
+                    (Some(receiver), dispatch)
+                });
+                out.calls.push(CallSite {
+                    caller,
+                    name,
+                    receiver,
+                    dispatch,
+                    is_value_ref: false,
+                });
+                collect_call_type_arg_refs(node, src, caller, &mut out.value_refs);
+            } else if let Some((name, receiver)) = value_reference(
                 node,
                 src,
                 &bindings,
@@ -601,16 +769,15 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
                 &out.fns[caller],
                 current_type.map(|i| &out.fns[i]),
                 lang,
-            )
-            .map_or((None, true), |(receiver, dispatch)| {
-                (Some(receiver), dispatch)
-            });
-            out.calls.push(CallSite {
-                caller,
-                name,
-                receiver,
-                dispatch,
-            });
+            ) {
+                out.value_refs.push(CallSite {
+                    caller,
+                    name,
+                    receiver,
+                    dispatch: false,
+                    is_value_ref: true,
+                });
+            }
         }
         if current_fn.is_some() {
             collect_binding(node, src, lang, &mut bindings);
@@ -635,6 +802,15 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
                 break 'walk;
             }
         }
+    }
+    if let (Some(idx), Some((sb, eb, sr, er))) = (script_fn, script_bounds) {
+        let f = &mut out.fns[idx];
+        f.start_byte = sb;
+        f.end_byte = eb;
+        f.start_row = sr;
+        f.end_row = er;
+        f.body_hash = hash_without_ranges(src, sb, eb, &[]);
+        f.rename_hash = f.body_hash;
     }
     out
 }
@@ -662,12 +838,17 @@ fn is_type_node(node: tree_sitter::Node, lang: Lang) -> bool {
     match lang {
         Lang::Rust => matches!(
             node.kind(),
-            "trait_item" | "struct_item" | "enum_item" | "union_item" | "impl_item"
+            "trait_item" | "struct_item" | "enum_item" | "union_item" | "impl_item" | "type_item"
         ),
         Lang::Python => node.kind() == "class_definition",
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => matches!(
             node.kind(),
-            "class_declaration" | "abstract_class_declaration" | "class" | "interface_declaration"
+            "class_declaration"
+                | "abstract_class_declaration"
+                | "class"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "type_alias_declaration"
         ),
         Lang::CSharp => matches!(
             node.kind(),
@@ -675,19 +856,737 @@ fn is_type_node(node: tree_sitter::Node, lang: Lang) -> bool {
                 | "struct_declaration"
                 | "interface_declaration"
                 | "record_declaration"
+                | "enum_declaration"
+                | "delegate_declaration"
         ),
-        Lang::Cpp => matches!(
-            node.kind(),
-            "class_specifier" | "struct_specifier" | "union_specifier"
-        ),
-        Lang::Go => {
-            node.kind() == "type_spec"
-                && node
-                    .child_by_field_name("type")
-                    .is_some_and(|t| matches!(t.kind(), "interface_type" | "struct_type"))
+        Lang::Cpp => {
+            matches!(
+                node.kind(),
+                "class_specifier"
+                    | "struct_specifier"
+                    | "union_specifier"
+                    | "enum_specifier"
+                    | "alias_declaration"
+                    | "type_definition"
+            ) && (node.kind() != "enum_specifier" || node.child_by_field_name("body").is_some())
         }
+        Lang::Go => matches!(node.kind(), "type_spec" | "type_alias"),
         Lang::C => false,
     }
+}
+
+fn is_script_statement(node: tree_sitter::Node, lang: Lang) -> bool {
+    match lang {
+        Lang::CSharp => {
+            node.kind() == "global_statement"
+                && node
+                    .named_child(0)
+                    .is_none_or(|c| c.kind() != "local_function_statement")
+        }
+        Lang::Python => {
+            matches!(
+                node.kind(),
+                "if_statement"
+                    | "for_statement"
+                    | "while_statement"
+                    | "try_statement"
+                    | "with_statement"
+                    | "match_statement"
+            ) || (node.kind() == "expression_statement"
+                && node.named_child(0).is_some_and(|e| e.kind() == "call"))
+        }
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => matches!(
+            node.kind(),
+            "expression_statement"
+                | "if_statement"
+                | "for_statement"
+                | "for_in_statement"
+                | "while_statement"
+                | "try_statement"
+                | "switch_statement"
+        ),
+        _ => false,
+    }
+}
+
+fn file_is_script(root: tree_sitter::Node, lang: Lang) -> bool {
+    let mut c = root.walk();
+    root.named_children(&mut c)
+        .any(|n| is_script_statement(n, lang))
+}
+pub fn is_ignorable_outside_line(path: &str, line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return true;
+    }
+    if t.starts_with("//") || t.starts_with("/*") || t.starts_with('*') || t.starts_with("*/") {
+        return true;
+    }
+    let Some(lang) = lang_for_path(path) else {
+        return false;
+    };
+    match lang {
+        Lang::CSharp => {
+            t.starts_with("using ")
+                || t.starts_with("global using ")
+                || t.starts_with("namespace ")
+                || t.starts_with("#nullable")
+                || t.starts_with("#pragma")
+                || t.starts_with("#region")
+                || t.starts_with("#endregion")
+                || t.starts_with("#:")
+                || matches!(t, "{" | "}")
+        }
+        Lang::Rust => {
+            t.starts_with("use ")
+                || t.starts_with("pub use ")
+                || t.starts_with("pub(crate) use ")
+                || t.starts_with("pub(super) use ")
+                || t.starts_with("mod ")
+                || t.starts_with("pub mod ")
+                || t.starts_with("extern crate ")
+                || matches!(t, "{" | "}")
+        }
+        Lang::Python => t.starts_with('#') || t.starts_with("import ") || t.starts_with("from "),
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
+            t.starts_with("import ")
+                || t.starts_with("export {")
+                || t.starts_with("export *")
+                || t.starts_with("export type {")
+                || matches!(t, "{" | "}" | "};")
+        }
+        Lang::Go => t.starts_with("package ") || t.starts_with("import ") || t == ")",
+        Lang::C | Lang::Cpp => {
+            t.starts_with("#include")
+                || t.starts_with("#pragma")
+                || t.starts_with("#ifndef")
+                || t.starts_with("#define")
+                || t.starts_with("#endif")
+                || t.starts_with("using namespace ")
+                || t.starts_with("namespace ")
+                || matches!(t, "{" | "}" | "};")
+        }
+    }
+}
+
+fn csharp_operator_name_node(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+    let mut c = node.walk();
+    let mut after_operator = false;
+    for child in node.children(&mut c) {
+        if child.kind() == "operator" {
+            after_operator = true;
+            continue;
+        }
+        if after_operator && child.kind() != "parameter_list" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+fn node_has_arrow_body(node: tree_sitter::Node) -> bool {
+    let mut c = node.walk();
+    node.named_children(&mut c)
+        .any(|n| n.kind() == "arrow_expression_clause")
+}
+
+/// Extract a non-callable value/property/field/constant/enum-member symbol when
+/// `current_fn` is `None`. Returns `(symbol_span_node, name_node, optional_name_override)`.
+fn value_symbol<'a>(
+    node: tree_sitter::Node<'a>,
+    src: &[u8],
+    lang: Lang,
+    in_type: bool,
+) -> Option<(tree_sitter::Node<'a>, tree_sitter::Node<'a>, Option<String>)> {
+    let kind = node.kind();
+    match lang {
+        Lang::CSharp => match kind {
+            "property_declaration" | "event_declaration" | "enum_member_declaration" => {
+                let name = node.child_by_field_name("name")?;
+                Some((node, name, None))
+            }
+            "indexer_declaration" => {
+                let params = node
+                    .child_by_field_name("parameters")
+                    .and_then(|p| p.utf8_text(src).ok())
+                    .unwrap_or("[]");
+                let name_node = node.child_by_field_name("parameters").unwrap_or(node);
+                Some((node, name_node, Some(format!("this{params}"))))
+            }
+            "variable_declarator" => {
+                let decl = node.parent()?;
+                if decl.kind() != "variable_declaration" {
+                    return None;
+                }
+                let outer = decl.parent()?;
+                if !matches!(
+                    outer.kind(),
+                    "field_declaration" | "event_field_declaration"
+                ) {
+                    return None;
+                }
+                let name = node.child_by_field_name("name")?;
+                let span = if decl.named_child_count() <= 2 {
+                    outer
+                } else {
+                    node
+                };
+                Some((span, name, None))
+            }
+            _ => None,
+        },
+        Lang::Rust => match kind {
+            "const_item" | "static_item" | "associated_type" | "enum_variant" => {
+                let name = node.child_by_field_name("name")?;
+                Some((node, name, None))
+            }
+            "field_declaration" if in_type => {
+                if node
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .is_some_and(|gp| gp.kind() == "enum_variant")
+                {
+                    return None;
+                }
+                let name = node.child_by_field_name("name")?;
+                Some((node, name, None))
+            }
+            _ => None,
+        },
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => match kind {
+            "public_field_definition"
+            | "field_definition"
+            | "property_signature"
+            | "enum_assignment" => {
+                let name = node
+                    .child_by_field_name("name")
+                    .or_else(|| node.child_by_field_name("property"))?;
+                let val = node.child_by_field_name("value");
+                if val.is_some_and(|v| {
+                    matches!(
+                        unparenthesized(v).kind(),
+                        "arrow_function" | "function_expression" | "function"
+                    )
+                }) {
+                    return None;
+                }
+                Some((node, name, None))
+            }
+            "property_identifier" if node.parent().is_some_and(|p| p.kind() == "enum_body") => {
+                Some((node, node, None))
+            }
+            "variable_declarator" if !in_type => {
+                let decl = node.parent()?;
+                if !matches!(decl.kind(), "lexical_declaration" | "variable_declaration") {
+                    return None;
+                }
+                let val = node.child_by_field_name("value");
+                if val.is_some_and(|v| {
+                    matches!(
+                        unparenthesized(v).kind(),
+                        "arrow_function" | "function_expression" | "function" | "class"
+                    )
+                }) {
+                    return None;
+                }
+                let top = decl.parent()?;
+                let outer = if top.kind() == "export_statement" {
+                    top
+                } else if top.kind() == "program"
+                    || matches!(top.kind(), "statement_block" if top.parent().is_some_and(|p| matches!(p.kind(), "internal_module" | "module")))
+                {
+                    decl
+                } else {
+                    return None;
+                };
+                let name = node.child_by_field_name("name")?;
+                if !matches!(name.kind(), "identifier" | "shorthand_property_identifier") {
+                    return None;
+                }
+                let span = if decl.named_child_count() == 1 {
+                    outer
+                } else {
+                    node
+                };
+                Some((span, name, None))
+            }
+            _ => None,
+        },
+        Lang::Python => {
+            if kind != "assignment" {
+                return None;
+            }
+            let stmt = node.parent()?;
+            if stmt.kind() != "expression_statement" {
+                return None;
+            }
+            let parent = stmt.parent()?;
+            let top_or_class = parent.kind() == "module"
+                || (in_type
+                    && parent.kind() == "block"
+                    && parent
+                        .parent()
+                        .is_some_and(|gp| gp.kind() == "class_definition"));
+            if !top_or_class {
+                return None;
+            }
+            let left = node.child_by_field_name("left")?;
+            if left.kind() != "identifier" {
+                return None;
+            }
+            Some((stmt, left, None))
+        }
+        Lang::Go => match kind {
+            "const_spec" | "var_spec" if !in_type => {
+                let name = node.child_by_field_name("name")?;
+                let decl = node.parent();
+                let span = match decl {
+                    Some(d)
+                        if matches!(d.kind(), "const_declaration" | "var_declaration")
+                            && d.named_child_count() == 1 =>
+                    {
+                        d
+                    }
+                    _ => node,
+                };
+                Some((span, name, None))
+            }
+            "field_declaration" if in_type => {
+                let name = node.child_by_field_name("name")?;
+                Some((node, name, None))
+            }
+            _ => None,
+        },
+        Lang::C | Lang::Cpp => match kind {
+            "enumerator" => {
+                let name = node.child_by_field_name("name")?;
+                Some((node, name, None))
+            }
+            "field_declaration" if in_type => {
+                let declarator = node.child_by_field_name("declarator")?;
+                if has_function_declarator(declarator) {
+                    return None;
+                }
+                let name = declarator_name(declarator)?;
+                Some((node, name, None))
+            }
+            "declaration" if !in_type => {
+                let parent = node.parent()?;
+                if !matches!(parent.kind(), "translation_unit" | "declaration_list") {
+                    return None;
+                }
+                let declarator = node.child_by_field_name("declarator")?;
+                if has_function_declarator(declarator) {
+                    return None;
+                }
+                let name = declarator_name(declarator)?;
+                Some((node, name, None))
+            }
+            _ => None,
+        },
+    }
+}
+
+fn has_function_declarator(node: tree_sitter::Node) -> bool {
+    if node.kind() == "function_declarator" {
+        return true;
+    }
+    let mut c = node.walk();
+    for child in node.named_children(&mut c) {
+        if has_function_declarator(child) {
+            return true;
+        }
+    }
+    false
+}
+
+fn value_is_static(
+    node: tree_sitter::Node,
+    symbol: tree_sitter::Node,
+    src: &[u8],
+    lang: Lang,
+    in_type: bool,
+) -> bool {
+    if !in_type {
+        return true;
+    }
+    let text =
+        std::str::from_utf8(&src[symbol.start_byte()..symbol.end_byte()]).unwrap_or_default();
+    let has = |word| {
+        text.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == word)
+    };
+    match lang {
+        Lang::Rust => matches!(
+            node.kind(),
+            "const_item" | "static_item" | "enum_variant" | "associated_type"
+        ),
+        Lang::CSharp => node.kind() == "enum_member_declaration" || has("static") || has("const"),
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
+            node.kind() == "enum_assignment"
+                || node.parent().is_some_and(|p| p.kind() == "enum_body")
+                || has("static")
+        }
+        Lang::Cpp | Lang::C => node.kind() == "enumerator" || has("static") || has("constexpr"),
+        Lang::Python => true,
+        Lang::Go => false,
+    }
+}
+
+fn collect_type_member_bindings(
+    type_node: tree_sitter::Node,
+    src: &[u8],
+    lang: Lang,
+    bindings: &mut Vec<(String, Option<String>)>,
+) {
+    let mut c = type_node.walk();
+    for child in type_node.named_children(&mut c) {
+        if matches!(child.kind(), "parameter_list" | "formal_parameters") {
+            let mut pc = child.walk();
+            for param in child.named_children(&mut pc) {
+                collect_binding(param, src, lang, bindings);
+            }
+        } else if matches!(
+            child.kind(),
+            "declaration_list" | "class_body" | "field_declaration_list"
+        ) {
+            let mut bc = child.walk();
+            for member in child.named_children(&mut bc) {
+                match member.kind() {
+                    "field_declaration" if lang == Lang::CSharp => {
+                        let mut mc = member.walk();
+                        for sub in member.named_children(&mut mc) {
+                            if sub.kind() == "variable_declaration" {
+                                let ty = sub
+                                    .child_by_field_name("type")
+                                    .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
+                                    .filter(|t| !t.is_empty() && t != "var");
+                                let mut vc = sub.walk();
+                                for decl in sub.named_children(&mut vc) {
+                                    if decl.kind() == "variable_declarator"
+                                        && let Some(n) = decl.child_by_field_name("name")
+                                    {
+                                        bindings.push((
+                                            n.utf8_text(src).unwrap_or_default().to_string(),
+                                            ty.clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "property_declaration" if lang == Lang::CSharp => {
+                        let ty = member
+                            .child_by_field_name("type")
+                            .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
+                            .filter(|t| !t.is_empty());
+                        if let Some(n) = member.child_by_field_name("name") {
+                            bindings.push((n.utf8_text(src).unwrap_or_default().to_string(), ty));
+                        }
+                    }
+                    "field_declaration" if matches!(lang, Lang::Rust | Lang::Cpp) => {
+                        let ty = member
+                            .child_by_field_name("type")
+                            .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
+                            .filter(|t| !t.is_empty() && t != "auto");
+                        let name = member.child_by_field_name("name").or_else(|| {
+                            member
+                                .child_by_field_name("declarator")
+                                .and_then(declarator_name)
+                        });
+                        if let Some(n) = name {
+                            bindings.push((n.utf8_text(src).unwrap_or_default().to_string(), ty));
+                        }
+                    }
+                    "public_field_definition" | "field_definition" => {
+                        let ty = member
+                            .child_by_field_name("type")
+                            .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
+                            .filter(|t| !t.is_empty());
+                        if let Some(n) = member
+                            .child_by_field_name("name")
+                            .or_else(|| member.child_by_field_name("property"))
+                        {
+                            bindings.push((n.utf8_text(src).unwrap_or_default().to_string(), ty));
+                        }
+                    }
+                    "method_definition" if text_field(member, "name", src) == "constructor" => {
+                        if let Some(params) = member.child_by_field_name("parameters") {
+                            let mut pc = params.walk();
+                            for p in params.named_children(&mut pc) {
+                                collect_binding(p, src, lang, bindings);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn collect_call_type_arg_refs(
+    call: tree_sitter::Node,
+    src: &[u8],
+    caller: usize,
+    out: &mut Vec<CallSite>,
+) {
+    let Some(expr) = call
+        .child_by_field_name("function")
+        .or_else(|| call.child_by_field_name("type"))
+    else {
+        return;
+    };
+    let mut cursor = call.walk();
+    // Look for explicit type argument lists on the call or its function expression
+    let mut check_nodes = vec![call, expr];
+    if let Some(last) = expr.named_children(&mut cursor).last() {
+        check_nodes.push(last);
+    }
+    for target in check_nodes {
+        let mut tc = target.walk();
+        for child in target.named_children(&mut tc) {
+            if matches!(
+                child.kind(),
+                "type_argument_list" | "type_arguments" | "template_argument_list"
+            ) {
+                let mut ac = child.walk();
+                for arg in child.named_children(&mut ac) {
+                    let ty = owner_type(arg.utf8_text(src).unwrap_or_default());
+                    let simple = ty.rsplit("::").next().unwrap_or(&ty);
+                    let simple = simple.rsplit('.').next().unwrap_or(simple).trim();
+                    if !simple.is_empty()
+                        && simple
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_uppercase())
+                    {
+                        out.push(CallSite {
+                            caller,
+                            name: simple.to_string(),
+                            receiver: Some(ty),
+                            dispatch: false,
+                            is_value_ref: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn value_reference(
+    node: tree_sitter::Node,
+    src: &[u8],
+    bindings: &[(String, Option<String>)],
+    known_types: &HashSet<String>,
+    caller: &FnDef,
+    enclosing_type: Option<&FnDef>,
+    lang: Lang,
+) -> Option<(String, Option<String>)> {
+    let kind = node.kind();
+    let member_access = matches!(
+        kind,
+        "member_expression"
+            | "attribute"
+            | "field_expression"
+            | "selector_expression"
+            | "member_access_expression"
+            | "conditional_access_expression"
+            | "scoped_identifier"
+            | "qualified_identifier"
+    );
+    if !member_access
+        && kind != "identifier"
+        && !(kind == "struct_expression" && lang == Lang::Rust)
+    {
+        return None;
+    }
+    // Skip nodes that are the `function` or `type` target of a call expression,
+    // or part of an outer member/qualified path (we only emit at the outermost member access
+    // or standalone identifier).
+    let mut anc = node.parent();
+    while let Some(p) = anc {
+        let pk = p.kind();
+        if is_call(pk) {
+            if p.child_by_field_name("function")
+                .or_else(|| p.child_by_field_name("type"))
+                .is_some_and(|f| {
+                    node.start_byte() >= f.start_byte() && node.end_byte() <= f.end_byte()
+                })
+            {
+                return None;
+            }
+            break;
+        }
+        if matches!(
+            pk,
+            "using_directive"
+                | "use_declaration"
+                | "import_statement"
+                | "import_from_statement"
+                | "import_clause"
+                | "import_specifier"
+                | "namespace_declaration"
+                | "file_scoped_namespace_declaration"
+        ) {
+            return None;
+        }
+        if matches!(
+            pk,
+            "argument_list" | "arguments" | "block" | "statement_block" | "compound_statement"
+        ) {
+            break;
+        }
+        anc = p.parent();
+    }
+
+    if kind == "struct_expression" && lang == Lang::Rust {
+        let ty = node
+            .child_by_field_name("name")?
+            .utf8_text(src)
+            .ok()?
+            .trim();
+        let clean = owner_type(ty);
+        let simple = clean.rsplit("::").next().unwrap_or(&clean).to_string();
+        return Some((simple, Some(clean)));
+    }
+
+    if member_access {
+        // If this node is the receiver/prefix of a larger qualified/scoped identifier
+        // (e.g. `A::B` inside `A::B::C`), wait or let each segment resolve cleanly.
+        if let Some(parent) = node.parent()
+            && matches!(parent.kind(), "scoped_identifier" | "qualified_identifier")
+            && parent
+                .child_by_field_name("path")
+                .or_else(|| parent.child_by_field_name("scope"))
+                .is_some_and(|p| p.id() == node.id())
+        {
+            return None;
+        }
+        let name = simple_name(node, src)?;
+        let qualified = matches!(kind, "scoped_identifier" | "qualified_identifier");
+        let receiver_node = match kind {
+            "member_expression" | "attribute" => node.child_by_field_name("object"),
+            "field_expression" => node
+                .child_by_field_name("value")
+                .or_else(|| node.child_by_field_name("argument")),
+            "selector_expression" => node.child_by_field_name("operand"),
+            "member_access_expression" => node.child_by_field_name("expression"),
+            "conditional_access_expression" => node.child_by_field_name("condition"),
+            "scoped_identifier" => node.child_by_field_name("path"),
+            "qualified_identifier" => node.child_by_field_name("scope"),
+            _ => None,
+        }?;
+        let text = receiver_node.utf8_text(src).ok()?.trim();
+        let binding = bindings.iter().rev().find(|(bname, _)| bname == text);
+        if let Some((_, Some(ty))) = binding {
+            return Some((name, Some(ty.clone())));
+        }
+        let self_receiver =
+            (text == "self" && matches!(lang, Lang::Rust | Lang::Python) && !caller.is_static)
+                || (text == "Self" && lang == Lang::Rust)
+                || (text == "this"
+                    && matches!(
+                        lang,
+                        Lang::CSharp | Lang::Cpp | Lang::TypeScript | Lang::Tsx | Lang::JavaScript
+                    ));
+        if self_receiver {
+            let owner = caller
+                .owner
+                .as_deref()
+                .map(receiver_owner)
+                .or_else(|| enclosing_type.map(|t| receiver_owner(&t.qual)))?;
+            return Some((name, Some(owner)));
+        }
+        if (text == "base" && lang == Lang::CSharp)
+            || (text == "super" && matches!(lang, Lang::TypeScript | Lang::Tsx | Lang::JavaScript))
+        {
+            let base_ty = enclosing_type.and_then(|t| t.bases.first()).cloned()?;
+            return Some((name, Some(base_ty)));
+        }
+        if binding.is_some() {
+            return None;
+        }
+        let looks_like_type = text
+            .rsplit([':', '.'])
+            .next()
+            .and_then(|s| s.chars().next())
+            .is_some_and(|c| c.is_ascii_uppercase());
+        if qualified || known_types.contains(text) || looks_like_type {
+            return Some((name, Some(text.to_string())));
+        }
+        return None;
+    }
+
+    if kind == "identifier" {
+        if let Some(parent) = node.parent() {
+            let pk = parent.kind();
+            // Exclude declaration names, member access right-hand names, parameter names, etc.
+            if matches!(
+                pk,
+                "member_expression"
+                    | "attribute"
+                    | "field_expression"
+                    | "selector_expression"
+                    | "member_access_expression"
+                    | "member_binding_expression"
+                    | "scoped_identifier"
+                    | "qualified_identifier"
+                    | "qualified_name"
+                    | "parameter"
+                    | "parameter_declaration"
+                    | "required_parameter"
+                    | "optional_parameter"
+                    | "variable_declarator"
+                    | "let_declaration"
+                    | "function_item"
+                    | "function_definition"
+                    | "function_declaration"
+                    | "method_declaration"
+                    | "property_declaration"
+                    | "class_declaration"
+                    | "struct_declaration"
+                    | "record_declaration"
+                    | "interface_declaration"
+                    | "type_identifier"
+            ) {
+                // Allow RHS value of variable_declarator / let_declaration!
+                let is_rhs = match pk {
+                    "variable_declarator" => parent
+                        .child_by_field_name("name")
+                        .is_none_or(|n| n.id() != node.id()),
+                    "let_declaration" => parent
+                        .child_by_field_name("pattern")
+                        .is_none_or(|n| n.id() != node.id()),
+                    _ => false,
+                };
+                if !is_rhs {
+                    return None;
+                }
+            }
+        }
+        let text = node.utf8_text(src).ok()?.trim();
+        if text.is_empty()
+            || matches!(
+                text,
+                "true" | "false" | "null" | "None" | "self" | "this" | "base" | "super"
+            )
+        {
+            return None;
+        }
+        if bindings.iter().any(|(bname, _)| bname == text) {
+            return None;
+        }
+        let owner = caller
+            .owner
+            .as_deref()
+            .map(receiver_owner)
+            .or_else(|| enclosing_type.map(|t| receiver_owner(&t.qual)));
+        return Some((text.to_string(), owner));
+    }
+
+    None
 }
 
 fn trim_end(src: &[u8], start: usize, mut end: usize) -> usize {
@@ -1213,9 +2112,11 @@ fn call_receiver(
                     Lang::CSharp | Lang::Cpp | Lang::TypeScript | Lang::Tsx | Lang::JavaScript
                 ));
     if self_receiver {
-        return enclosing_type
-            .map(|t| receiver_owner(&t.qual))
-            .or_else(|| caller.owner.as_deref().map(receiver_owner))
+        return caller
+            .owner
+            .as_deref()
+            .map(receiver_owner)
+            .or_else(|| enclosing_type.map(|t| receiver_owner(&t.qual)))
             .map(|receiver| (receiver, dispatch));
     }
     if (text == "base" && lang == Lang::CSharp)

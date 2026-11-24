@@ -485,6 +485,7 @@ mod tests {
                         thinking: PRIVATE_THINKING.into(),
                         signature: Some(PRIVATE_THINKING.into()),
                         reasoning_id: None,
+                        reasoning_opaque: None,
                     },
                     ContentBlock::tool_use(
                         "bad-import",

@@ -3,6 +3,7 @@ mod cache;
 mod contracts;
 pub mod diffview;
 pub mod git;
+pub mod highlight;
 mod sources;
 pub mod syntax;
 pub mod ui;
@@ -104,7 +105,9 @@ pub fn load_analysis_with_status(
         include_tests,
     });
     for change in changes {
-        analysis.ensure_changed_file(&change.path);
+        if include_tests || !syntax::file_is_test_path(&change.path) {
+            analysis.ensure_changed_file(&change.path);
+        }
         if let Some(old_path) = &change.old_path {
             analysis.rename_file_origin(&change.path, old_path, change.status == 'R');
         }
@@ -161,7 +164,7 @@ mod tests {
         git(directory.path(), &["config", "user.name", "Calldive Tests"]);
         git(
             directory.path(),
-            &["config", "user.email", "calldive@example.invalid"],
+            &["config", "user.email", "logidiff@example.invalid"],
         );
         directory
     }

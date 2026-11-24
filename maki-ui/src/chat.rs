@@ -1615,6 +1615,7 @@ mod tests {
                     thinking: "reasoning".into(),
                     signature: None,
                     reasoning_id: None,
+                    reasoning_opaque: None,
                 },
                 ContentBlock::Text {
                     text: "answer".into(),
