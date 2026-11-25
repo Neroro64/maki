@@ -42,6 +42,18 @@ const MAX_FRAMES: usize = 32;
 const TOKENS_PER_FRAME: u32 = 1_500;
 /// Fraction of usable context window a snapcompact archive's frames may occupy.
 const MAX_WINDOW_FRACTION: u32 = 4;
+/// Total base64 byte budget across all frames in one archive. Gateways such as
+/// Copilot's `/chat/completions` enforce a hard 5 MiB (5,242,880 B) HTTP body
+/// limit and reject anything larger with `413 Request Entity Too Large` even
+/// when the prompt is only ~30k tokens. Keeping the archive's base64 frames
+/// within 3 MiB leaves >2 MiB of headroom for tools, system prompt, and recent
+/// turns across every provider.
+const MAX_ARCHIVE_BASE64_BYTES: usize = 3 * 1024 * 1024;
+/// Prior frames above this base64 size came from an older `CompressionType::Fast`
+/// build (~1.6 MiB base64 per full frame vs ~170 KiB under `Best`) and are
+/// losslessly re-encoded once on the next compaction so resumed sessions shrink
+/// below gateway body limits without dropping archive history.
+const RECOMPRESS_FRAME_BASE64_BYTES: usize = 512 * 1024;
 /// Verbatim text kept at each chronological edge, in characters (~3k tokens per
 /// edge), preserving formatting and indentation on the oldest and newest turns.
 const TEXT_EDGE_CHARS: usize = 12_000;
@@ -597,9 +609,13 @@ pub fn render_page(text: &str) -> Arc<str> {
         }
     }
 
+    encode_luma8_png(&pixels, width as u32, height as u32)
+}
+
+fn encode_luma8_png(pixels: &[u8], width: u32, height: u32) -> Arc<str> {
     let mut png_bytes = Vec::new();
-    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, PngFilter::NoFilter)
-        .write_image(&pixels, width as u32, height as u32, ExtendedColorType::L8)
+    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Best, PngFilter::NoFilter)
+        .write_image(pixels, width, height, ExtendedColorType::L8)
         .expect("encode grayscale PNG");
     Arc::from(STANDARD.encode(png_bytes))
 }
@@ -700,7 +716,9 @@ fn plan_middle(middle_raw: &str, max_frames: usize) -> (Vec<String>, usize) {
 
 /// Extract snapcompact PNG frames carried by an earlier archive turn in
 /// `messages`, removing them so user/tool images can still be replaced with
-/// `[image]` placeholders without destroying prior archive frames.
+/// `[image]` placeholders without destroying prior archive frames. Frames
+/// written by older `CompressionType::Fast` builds are losslessly re-encoded
+/// under `CompressionType::Best` so resumed sessions heal on their next compact.
 fn extract_prior_frames(messages: &mut [Message]) -> Vec<ImageSource> {
     let mut frames = Vec::new();
     for msg in messages {
@@ -715,13 +733,32 @@ fn extract_prior_frames(messages: &mut [Message]) -> Vec<ImageSource> {
         }
         for block in &msg.content {
             if let ContentBlock::Image { source } = block {
-                frames.push(source.clone());
+                frames.push(recompress_prior_frame(source));
             }
         }
         msg.content
             .retain(|block| !matches!(block, ContentBlock::Image { .. }));
     }
     frames
+}
+
+fn recompress_prior_frame(source: &ImageSource) -> ImageSource {
+    if source.data.len() <= RECOMPRESS_FRAME_BASE64_BYTES {
+        return source.clone();
+    }
+    let Ok(bytes) = STANDARD.decode(source.data.as_bytes()) else {
+        return source.clone();
+    };
+    let Ok(decoded) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png) else {
+        return source.clone();
+    };
+    let gray = decoded.into_luma8();
+    let reencoded = encode_luma8_png(gray.as_raw(), gray.width(), gray.height());
+    if reencoded.len() < source.data.len() {
+        ImageSource::new(ImageMediaType::Png, reencoded)
+    } else {
+        source.clone()
+    }
 }
 
 pub struct SnapResult {
@@ -751,8 +788,8 @@ pub fn compact_with_options(
     let (text_head, middle_raw, text_tail) = split_edges(&serialized, TEXT_EDGE_CHARS);
     let (new_pages, mut truncated_chars) = plan_middle(middle_raw, max_frames);
 
-    let total_frames = prior_frames.len() + new_pages.len();
     let mut kept_new_pages = new_pages;
+    let total_frames = prior_frames.len() + kept_new_pages.len();
     if total_frames > max_frames {
         let mut excess = total_frames - max_frames;
         let drop_prior = excess.min(prior_frames.len());
@@ -765,15 +802,33 @@ pub fn compact_with_options(
         }
     }
 
-    let rendered_frames: Vec<ImageSource> = prior_frames
-        .into_iter()
-        .chain(
-            kept_new_pages
-                .iter()
-                .map(|page| ImageSource::new(ImageMediaType::Png, render_page(page))),
-        )
+    let mut rendered_new: Vec<(ImageSource, usize)> = kept_new_pages
+        .iter()
+        .map(|page| {
+            let chars = strip_dim_markers(page).chars().count();
+            (ImageSource::new(ImageMediaType::Png, render_page(page)), chars)
+        })
         .collect();
 
+    let mut total_b64_bytes: usize = prior_frames
+        .iter()
+        .map(|src| src.data.len())
+        .chain(rendered_new.iter().map(|(src, _)| src.data.len()))
+        .sum();
+    while total_b64_bytes > MAX_ARCHIVE_BASE64_BYTES && !prior_frames.is_empty() {
+        let dropped = prior_frames.remove(0);
+        total_b64_bytes = total_b64_bytes.saturating_sub(dropped.data.len());
+    }
+    while total_b64_bytes > MAX_ARCHIVE_BASE64_BYTES && rendered_new.len() > 1 {
+        let (dropped, chars) = rendered_new.remove(0);
+        total_b64_bytes = total_b64_bytes.saturating_sub(dropped.data.len());
+        truncated_chars += chars;
+    }
+
+    let rendered_frames: Vec<ImageSource> = prior_frames
+        .into_iter()
+        .chain(rendered_new.into_iter().map(|(src, _)| src))
+        .collect();
     let has_frames = !rendered_frames.is_empty();
     let mut blocks: Vec<ContentBlock> = Vec::new();
 
@@ -1206,5 +1261,94 @@ mod tests {
             "a transcript under two edge pages stays verbatim text"
         );
         assert!(matches!(result.blocks[0], ContentBlock::Text { .. }));
+    }
+
+    const MAX_DENSE_FRAME_BASE64_BYTES: usize = 350 * 1024;
+
+    #[test]
+    fn full_page_compresses_compactly_and_recompresses_bloated_legacy_frames() {
+        let (cols, rows, _) = geometry();
+        let line: String = (0..cols - 1)
+            .map(|c| char::from(b'!' + (c % 90) as u8))
+            .collect();
+        let dense_page: String = (0..rows)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join(&NEWLINE_GLYPH.to_string());
+
+        let compressed_b64 = render_page(&dense_page);
+        assert!(
+            compressed_b64.len() <= MAX_DENSE_FRAME_BASE64_BYTES,
+            "a full dense 1568px frame must stay compact in base64 (got {} bytes)",
+            compressed_b64.len()
+        );
+
+        let decoded = image::load_from_memory(
+            &STANDARD.decode(compressed_b64.as_bytes()).unwrap(),
+        )
+        .unwrap()
+        .into_luma8();
+        let mut bloated_png = Vec::new();
+        PngEncoder::new_with_quality(
+            &mut bloated_png,
+            CompressionType::Fast,
+            PngFilter::NoFilter,
+        )
+        .write_image(
+            decoded.as_raw(),
+            decoded.width(),
+            decoded.height(),
+            ExtendedColorType::L8,
+        )
+        .unwrap();
+        let bloated_source =
+            ImageSource::new(ImageMediaType::Png, Arc::from(STANDARD.encode(bloated_png)));
+        assert!(bloated_source.data.len() > RECOMPRESS_FRAME_BASE64_BYTES);
+
+        let healed = recompress_prior_frame(&bloated_source);
+        assert_eq!(healed.data.as_ref(), compressed_b64.as_ref());
+    }
+
+    #[test]
+    fn archive_enforces_total_base64_byte_budget() {
+        let incompressible =
+            ImageSource::new(ImageMediaType::Png, Arc::from("A".repeat(1_200_000)));
+        let archive_turn = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!("{ARCHIVE_HEADER}¶user: old"),
+                },
+                ContentBlock::Image {
+                    source: incompressible.clone(),
+                },
+                ContentBlock::Image {
+                    source: incompressible.clone(),
+                },
+                ContentBlock::Image {
+                    source: incompressible,
+                },
+            ],
+            display_text: Some(String::new()),
+            ..Default::default()
+        };
+        let ack_turn = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: ARCHIVE_ACK.into(),
+            }],
+            ..Default::default()
+        };
+        let result = compact_with_options(&[archive_turn, ack_turn], MAX_FRAMES, None);
+        let total_b64: usize = result
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Image { source } => Some(source.data.len()),
+                _ => None,
+            })
+            .sum();
+        assert!(total_b64 <= MAX_ARCHIVE_BASE64_BYTES);
+        assert!(total_b64 > 0);
     }
 }
