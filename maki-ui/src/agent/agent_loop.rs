@@ -1,5 +1,6 @@
 use crate::agent::UnboundedSender;
 use std::sync::Arc;
+use std::time::Duration;
 
 use maki_agent::agent::{self, AgentHooks};
 use maki_agent::mcp::McpHandle;
@@ -18,6 +19,7 @@ use maki_providers::{AgentError, ContextGauge, Model};
 use maki_storage::blocking;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+use tokio::time::sleep;
 use tracing::error;
 
 use super::run_cancels::RunCancels;
@@ -118,7 +120,11 @@ impl AgentLoop {
             return;
         }
 
-        while self.notify_rx.recv().await.is_some() {
+        loop {
+            let notified = self.wait_for_queue_with_keepalive().await;
+            if !notified {
+                break;
+            }
             let mut last_run_id = None;
             while let Some(mut run) = self.queue.pop_run() {
                 let Some(run_id) = run.drop_cancelled(self.cancels.min_run_id()) else {
@@ -131,6 +137,43 @@ impl AgentLoop {
                 let event_tx = EventSender::new(self.agent_tx.clone(), run_id);
                 self.queue
                     .publish_if_empty(|| event_tx.try_send(AgentEvent::QueueDrained));
+            }
+        }
+    }
+
+    /// While background tasks are still running for this chat, periodically
+    /// sends a 1-token keepalive over the live prefix so the parent's prompt
+    /// cache stays warm until the background tasks settle.
+    async fn wait_for_queue_with_keepalive(&mut self) -> bool {
+        let interval = Duration::from_secs(self.seed.config.cache_keepalive_secs);
+        if interval.is_zero() || self.mailbox.outstanding() == 0 {
+            return self.notify_rx.recv().await.is_some();
+        }
+        let teardown = self.cancels.teardown().clone();
+        loop {
+            tokio::select! {
+                biased;
+                msg = self.notify_rx.recv() => return msg.is_some(),
+                () = sleep(interval) => {
+                    if self.mailbox.outstanding() == 0 {
+                        return self.notify_rx.recv().await.is_some();
+                    }
+                    let slot = self.seed.model_slot.load();
+                    let event_tx = EventSender::new(self.agent_tx.clone(), 0);
+                    agent::send_keepalive_once(
+                        agent::KeepaliveSpec {
+                            provider: &*slot.provider,
+                            model: &slot.model,
+                            history: &self.history,
+                            fast: self.seed.chat_opts().fast,
+                            session_id: Some(&self.seed.session_id),
+                            event_tx: &event_tx,
+                            ledger: None,
+                        },
+                        &teardown,
+                    )
+                    .await;
+                }
             }
         }
     }

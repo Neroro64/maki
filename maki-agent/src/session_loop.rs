@@ -14,6 +14,7 @@
 use std::future::Future;
 use std::mem;
 use std::sync::Arc;
+use std::time::Duration;
 
 use maki_providers::{Message, RequestOptions};
 use thiserror::Error;
@@ -31,8 +32,12 @@ pub trait TurnHost {
     /// Every run, before it is judged. `None` when the caller's cancel
     /// dropped it mid-flight.
     fn run_ended(&mut self, finished: Option<&Result<DoneReason, AgentError>>);
-}
 
+    /// Wait-time prompt-cache keepalive ping while background calls are out.
+    fn keepalive<'a>(&'a self, _fast: bool) -> Option<(Duration, crate::agent::KeepaliveSpec<'a>)> {
+        None
+    }
+}
 /// Why the caller got no answer.
 #[derive(Debug, Error)]
 pub enum CutShort {
@@ -111,7 +116,7 @@ pub async fn run_turns(
             | DoneReason::MaxTurns
             | DoneReason::Compact => {}
         }
-        match next_wake(control, mailbox, caller).await? {
+        match next_wake(control, mailbox, caller, host.keepalive(opts.fast)).await? {
             Some(woken) => notices = woken,
             None => return Ok(()),
         }
@@ -128,18 +133,32 @@ async fn race<T>(caller: Option<&CancelToken>, future: impl Future<Output = T>) 
 /// The notices to resume with, none when only the inbox woke it, or `None`
 /// once no moved call is out, nothing they reported is left unread and
 /// nothing waits in the inbox.
-async fn next_wake(
+async fn next_wake<'a>(
     control: &SessionControl,
     mailbox: &SessionMailbox,
     caller: Option<&CancelToken>,
+    keepalive: Option<(Duration, crate::agent::KeepaliveSpec<'a>)>,
 ) -> Result<Option<Vec<Message>>, CutShort> {
     let session = control.token();
     let wake = async {
-        tokio::select! {
-            biased;
-            () = session.cancelled() => None,
-            () = control.wait_nonempty() => Some(Vec::new()),
-            wake = mailbox.next_wake_before_answer() => wake,
+        let wait = async {
+            tokio::select! {
+                biased;
+                () = session.cancelled() => None,
+                () = control.wait_nonempty() => Some(Vec::new()),
+                wake = mailbox.next_wake_before_answer() => wake,
+            }
+        };
+        match keepalive {
+            Some((interval, spec)) if !interval.is_zero() && mailbox.outstanding() > 0 => {
+                let ping = crate::agent::keepalive_loop(interval, spec, session.clone());
+                tokio::select! {
+                    biased;
+                    w = wait => w,
+                    () = ping => None,
+                }
+            }
+            _ => wait.await,
         }
     };
     let woken = race(caller, wake).await.ok_or(CutShort::Cancelled)?;

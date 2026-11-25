@@ -82,6 +82,9 @@ are not re-listed here.
 - **Ctrl bracket keys cycle model tiers.**
 - **Ctrl+M binds the model picker** (Ctrl+L is swallowed by some terminals such as
   Ghostty and Windows Terminal).
+- **`/review` call-tree search** — `/` filters the tree by symbol name or file as you
+  type, `n`/`p` cycle matches (wrapping). Matches are underlined, and collapsed
+  ancestors expand so a symbol buried in a collapsed subtree is revealed.
 
 ### MCP
 - **OAuth logins start only from `/mcp auth <server>`.** Startup leaves `NeedsAuth`

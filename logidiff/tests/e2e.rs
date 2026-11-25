@@ -1495,9 +1495,9 @@ fn real_di_static_and_service_locator_entry_points_beat_test_callers_end_to_end(
     let eval_pos = dump
         .find("Core::Evaluator::Evaluate")
         .unwrap_or_else(|| panic!("missing DI entry point Evaluator::Evaluate:\n{dump}"));
-    let runner_pos = dump
-        .find("Core::CliRunner::Run")
-        .unwrap_or_else(|| panic!("missing static/service-locator entry point CliRunner::Run:\n{dump}"));
+    let runner_pos = dump.find("Core::CliRunner::Run").unwrap_or_else(|| {
+        panic!("missing static/service-locator entry point CliRunner::Run:\n{dump}")
+    });
     let new_test_pos = dump
         .find("+ Core.Tests::InfoPipelineTests::Process_NewEdgeCase")
         .unwrap_or_else(|| panic!("missing added test Process_NewEdgeCase:\n{dump}"));

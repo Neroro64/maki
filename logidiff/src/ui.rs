@@ -60,6 +60,17 @@ pub struct App {
     pub palette: DiffPalette,
     pub quit: bool,
     pub flash: Option<String>,
+    /// Incremental call-tree search query (matched against names and files).
+    pub search_query: String,
+    /// True while search text is being typed.
+    pub search_active: bool,
+    /// Ids of the tree rows matching `search_query`, in tree order.
+    pub search_matches: Vec<String>,
+    /// Index into `search_matches` of the row the cursor is on.
+    pub search_index: usize,
+    /// Every row the tree can show, cached for the current focus mode.
+    search_universe: Vec<TreeRow>,
+    search_universe_focus: Option<bool>,
     /// rendered detail pane (header + diff) for the current selection
     pub detail: Vec<Line<'static>>,
     pub detail_anchors: Vec<Option<DiffAnchor>>,
@@ -94,6 +105,12 @@ impl App {
             palette: DiffPalette::default(),
             quit: false,
             flash: None,
+            search_query: String::new(),
+            search_active: false,
+            search_matches: Vec::new(),
+            search_index: 0,
+            search_universe: Vec::new(),
+            search_universe_focus: None,
             detail: vec![],
             detail_anchors: vec![],
             detail_gap_indices: vec![],
@@ -267,6 +284,7 @@ impl App {
             self.sel = self.rows.len() - 1;
         }
         self.update_detail();
+        self.refresh_search();
     }
 
     fn selected_key(&self) -> Option<&String> {
@@ -829,6 +847,10 @@ impl App {
             self.handle_help_event(key);
             return;
         }
+        if self.search_active {
+            self.handle_search_key(key);
+            return;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('d' | 'u'))
         {
@@ -947,6 +969,11 @@ impl App {
                 self.show_help = !self.show_help;
                 self.help_scroll = 0;
             }
+            KeyCode::Char('/') => {
+                self.search_active = true;
+                self.focus = Focus::Tree;
+            }
+            KeyCode::Char('n' | 'p') => self.cycle_search(code == KeyCode::Char('n')),
             KeyCode::Char('Z') => {
                 self.toggle_all_gaps();
             }
@@ -1128,9 +1155,155 @@ impl App {
         self.detail_scroll = self.detail_scroll.min(self.max_detail_scroll());
     }
 
+    fn refresh_search(&mut self) {
+        self.search_matches.clear();
+        let query = self.search_query.to_ascii_lowercase();
+        if query.is_empty() {
+            self.search_index = 0;
+            self.search_universe.clear();
+            self.search_universe_focus = None;
+            return;
+        }
+        if self.search_universe_focus != Some(self.focus_mode) {
+            let rows = self.expanded_universe();
+            self.search_universe = rows;
+            self.search_universe_focus = Some(self.focus_mode);
+        }
+        for row in &self.search_universe {
+            if row_matches(&self.a, row, &query) {
+                self.search_matches.push(row.id.clone());
+            }
+        }
+        self.search_index = self
+            .search_index
+            .min(self.search_matches.len().saturating_sub(1));
+    }
+
+    /// Rows of the fully expanded tree, so search reaches collapsed subtrees too.
+    fn expanded_universe(&self) -> Vec<TreeRow> {
+        let mut expanded = HashSet::new();
+        loop {
+            let rows =
+                analysis::build_grouped_rows(&self.a, &self.roots, &expanded, self.focus_mode);
+            let mut added = false;
+            for row in &rows {
+                if row.has_children && expanded.insert(row.expand_key.clone()) {
+                    added = true;
+                }
+            }
+            if !added {
+                return rows;
+            }
+        }
+    }
+
+    /// Re-match after the query changed and follow the first match.
+    fn follow_first_match(&mut self) {
+        self.search_index = 0;
+        self.refresh_search();
+        self.jump_to_search_match(0);
+    }
+
+    fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.search_active = false;
+        self.search_index = 0;
+        self.search_matches.clear();
+        self.search_universe.clear();
+        self.search_universe_focus = None;
+    }
+
+    fn cycle_search(&mut self, forward: bool) {
+        if self.search_query.is_empty() {
+            self.flash = Some("press / to search".into());
+            return;
+        }
+        if self.search_matches.is_empty() {
+            self.refresh_search();
+        }
+        let total = self.search_matches.len();
+        if total == 0 {
+            self.flash = Some(format!("no tree row matches '{}'", self.search_query));
+            return;
+        }
+        self.search_index = if forward {
+            (self.search_index + 1) % total
+        } else {
+            (self.search_index + total - 1) % total
+        };
+        self.jump_to_search_match(self.search_index);
+    }
+
+    /// Move the cursor onto a match, expanding every collapsed ancestor above it.
+    fn jump_to_search_match(&mut self, index: usize) {
+        let Some(id) = self.search_matches.get(index).cloned() else {
+            return;
+        };
+        let Some(pos) = self.search_universe.iter().position(|r| r.id == id) else {
+            return;
+        };
+        let mut depth = self.search_universe[pos].depth;
+        for row in self.search_universe[..pos].iter().rev() {
+            if row.depth < depth {
+                depth = row.depth;
+                if row.has_children {
+                    self.expanded.insert(row.expand_key.clone());
+                }
+            }
+        }
+        self.rebuild_preserving(Some(&id));
+        self.focus = Focus::Tree;
+        self.detail_scroll = 0;
+        self.flash = Some(format!(
+            "search '{}' · {}/{} match{}",
+            self.search_query,
+            self.search_index + 1,
+            self.search_matches.len(),
+            if self.search_matches.len() == 1 {
+                ""
+            } else {
+                "es"
+            }
+        ));
+    }
+
+    fn handle_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.clear_search(),
+            KeyCode::Enter => self.search_active = false,
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.follow_first_match();
+                self.search_active = !self.search_query.is_empty();
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.search_query.push(ch);
+                self.follow_first_match();
+            }
+            _ => {}
+        }
+    }
+
     fn max_detail_scroll(&self) -> usize {
         self.detail.len().saturating_sub(self.detail_viewport)
     }
+}
+
+fn row_matches(a: &Analysis, row: &TreeRow, query: &str) -> bool {
+    if let Some(label) = &row.group_label {
+        return label.to_ascii_lowercase().contains(query);
+    }
+    let Some(node) = a.nodes.get(&row.key) else {
+        return false;
+    };
+    let shown = row.display_name.as_deref().unwrap_or(&node.name);
+    shown.to_ascii_lowercase().contains(query)
+        || node.name.to_ascii_lowercase().contains(query)
+        || a.label(&node.file).to_ascii_lowercase().contains(query)
 }
 
 fn format_shared_callers_badge(callers: &[String], from_coupled: bool) -> String {
@@ -1196,12 +1369,14 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
         .split(root[1]);
 
     // left: tree
+    let hits: HashSet<&str> = app.search_matches.iter().map(String::as_str).collect();
     let items: Vec<ListItem> = app
         .rows
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let sel = i == app.sel && app.focus == Focus::Tree;
+            let matched = hits.contains(r.id.as_str());
             let indent = "  ".repeat(r.depth);
             let expand_glyph = if r.has_children {
                 if app.expanded.contains(&r.expand_key) {
@@ -1308,6 +1483,11 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 ));
                 row_spans
             };
+            if matched {
+                for s in spans.iter_mut() {
+                    s.style = s.style.add_modifier(Modifier::UNDERLINED);
+                }
+            }
             if sel {
                 for s in spans.iter_mut() {
                     s.style = s.style.add_modifier(Modifier::REVERSED);
@@ -1382,8 +1562,21 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let flash = app.flash.take();
     let help = if let Some(msg) = flash {
         format!(" {msg}")
+    } else if app.search_active || !app.search_query.is_empty() {
+        let total = app.search_matches.len();
+        let at = (app.search_index + 1).min(total);
+        format!(
+            " search: '{}'{}  match {at}/{total}  · {} ",
+            app.search_query,
+            if app.search_active { "▏" } else { "" },
+            if app.search_active {
+                "type to filter · Enter keep · Esc clear"
+            } else {
+                "n/p cycle · / edit"
+            }
+        )
     } else {
-        " j/k move · Ctrl+D/U page · H/L scroll · enter/z expand · Z all gaps · x/X expand · e/E collapse · f focus · tab pane · ? help · q quit "
+        " j/k move · Ctrl+D/U page · H/L scroll · enter/z expand · Z all gaps · x/X expand · e/E collapse · f focus · tab pane · / search · n/p matches · ? help · q quit "
             .to_string()
     };
     f.render_widget(
@@ -1617,6 +1810,14 @@ pub fn build_help_lines(include_annotations: bool) -> Vec<Line<'static>> {
         key_row("e / E", "Collapse to roots / Collapse all nodes & groups"),
         key_row("f", "Toggle focus mode (changes-only vs full subtree)"),
         key_row("H / L", "Scroll tree horizontally by 8 columns"),
+        key_row(
+            "/",
+            "Search the call tree by symbol name or file (incremental)",
+        ),
+        key_row(
+            "n / p",
+            "Jump to the next / previous match (wraps, expands ancestors)",
+        ),
         Line::from(""),
         heading("Diff Pane Keys"),
         key_row("Tab", "Switch focus between Call Tree and Symbol Diff"),
@@ -2474,6 +2675,114 @@ mod tests {
             " e\u{301}x"
         );
         assert_eq!(plain(&scroll_line(Line::from("界e\u{301}x"), 3)), "x");
+    }
+
+    const SEARCH_BASE: &str = "fn target() { alpha(); beta(); }\n\
+fn alpha() { leaf_one(); quiet_one(); }\n\
+fn beta() { leaf_two(); quiet_two(); }\n\
+fn leaf_one() { let x = 1; }\n\
+fn leaf_two() { let x = 1; }\n\
+fn quiet_one() { deep_one(); }\n\
+fn quiet_two() { deep_two(); }\n\
+fn deep_one() { steady(); }\n\
+fn deep_two() { steady(); }\n\
+fn steady() { let s = 1; }\n";
+
+    fn search_app() -> App {
+        let head = SEARCH_BASE.replace("let x = 1", "let x = 2");
+        target_app(analyze(SEARCH_BASE, &head))
+    }
+
+    fn type_search(app: &mut App, query: &str) {
+        app.handle_key(KeyCode::Char('/'));
+        for ch in query.chars() {
+            app.handle_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+    }
+
+    fn selected_key(app: &App) -> String {
+        app.rows[app.sel].key.clone()
+    }
+
+    #[test]
+    fn search_cycles_visible_matches_with_n_and_p() {
+        let mut app = search_app();
+        type_search(&mut app, "leaf");
+        assert_eq!(app.search_matches.len(), 2);
+        assert_eq!(
+            selected_key(&app),
+            analysis::node_key("src/lib.rs", "leaf_one")
+        );
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(
+            selected_key(&app),
+            analysis::node_key("src/lib.rs", "leaf_two")
+        );
+        app.handle_key(KeyCode::Char('n'));
+        assert_eq!(
+            selected_key(&app),
+            analysis::node_key("src/lib.rs", "leaf_one")
+        );
+        app.handle_key(KeyCode::Char('p'));
+        assert_eq!(
+            selected_key(&app),
+            analysis::node_key("src/lib.rs", "leaf_two")
+        );
+        assert_eq!(app.focus, Focus::Tree);
+    }
+
+    #[test]
+    fn search_reveals_collapsed_match_and_escape_clears_it() {
+        let mut app = search_app();
+        let deep = analysis::node_key("src/lib.rs", "deep_one");
+        assert!(!app.rows.iter().any(|r| r.key == deep));
+        type_search(&mut app, "deep_one");
+        assert_eq!(selected_key(&app), deep);
+        assert!(app.rows.iter().any(|r| r.key == deep));
+        app.handle_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+        assert!(app.search_matches.is_empty());
+    }
+
+    #[test]
+    fn search_underlines_matches_and_the_footer_shows_the_prompt() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut app = search_app();
+        type_search(&mut app, "deep");
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let width = buffer.area.width;
+        let deep = analysis::node_key("src/lib.rs", "deep_one");
+        let row = tree_row_y(&app, &deep);
+        assert!(
+            (0..width).any(|x| buffer[(x, row)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)),
+            "the matched row should be underlined"
+        );
+        assert!(
+            !(0..width).any(|x| buffer[(x, 1)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)),
+            "unmatched rows keep their style"
+        );
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let footer: String = (0..width)
+            .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
+            .collect();
+        assert!(
+            footer.contains("search: 'deep'") && footer.contains("match 1/2"),
+            "{footer}"
+        );
+    }
+
+    fn tree_row_y(app: &App, key: &str) -> u16 {
+        u16::try_from(app.rows.iter().position(|r| r.key == key).unwrap() + 2).unwrap()
     }
 
     fn analyze(base: &str, head: &str) -> Analysis {

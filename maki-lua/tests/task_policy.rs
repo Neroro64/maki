@@ -86,7 +86,7 @@ const SCENARIO_OPEN_PARKED: &str = "open_parked";
 const STUB_PRELUDE: &str = r#"
 recorder = {
   prompts = {}, closed = 0, sessions = 0, acquired = 0, released = 0,
-  notices = {}, acquire_attempts = 0,
+  notices = {}, acquire_attempts = 0, assigned_tiers = {},
 }
 local sessions = {}
 local parked = {}
@@ -143,7 +143,7 @@ end
 
 maki.agent.resolve_model = function(ctx, opts)
   recorder.resolve_opts = opts
-  return { spec = "test/model", assigned_tier = opts.tier }
+  return { spec = "test/model", assigned_tier = recorder.assigned_tiers[opts.tier] }
 end
 
 maki.agent.system_prompt = function(ctx, opts)
@@ -297,6 +297,17 @@ maki.api.register_tool({
     parked[input.name] = nil
     done({ text = "@PLAIN_TEXT@" })
     return "released"
+  end,
+})
+
+maki.api.register_tool({
+  name = "assign_tier",
+  description = "mark a tier as user-assigned",
+  schema = { type = "object", properties = { tier = { type = "string" } } },
+  audiences = { "main" },
+  handler = function(input)
+    recorder.assigned_tiers[input.tier] = input.tier
+    return "assigned"
   end,
 })
 
@@ -494,6 +505,11 @@ fn model_spec_ignored_when_allow_model_off() {
         opts.get("spec").is_none_or(Value::is_null),
         "spec should not be forwarded when allow_model is off"
     );
+    assert_eq!(
+        opts["tier"],
+        json!("weak"),
+        "omitted model_tier must default to weak"
+    );
 }
 
 fn answer_schema() -> Value {
@@ -648,6 +664,7 @@ fn prompt_error_maps_to_sub_agent_error() {
 #[test_case::test_case(SCENARIO_PROMPT_ERROR, format!("{SUB_AGENT_ERROR_PREFIX}{ASSIGNED_MODEL_CONTEXT}{PROMPT_ERR_MSG}") ; "prompt")]
 fn assigned_tier_failure_names_the_assignment(scenario: &str, expected: String) {
     let (reg, _host) = load_task_host();
+    exec_tool(&reg, "assign_tier", json!({ "tier": ASSIGNED_TIER })).unwrap();
     let mut input = task_input(scenario, None);
     input["model_tier"] = json!(ASSIGNED_TIER);
     let err = exec_tool(&reg, TASK_TOOL, input).unwrap_err();

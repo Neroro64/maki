@@ -1311,6 +1311,9 @@ fn start_event_pump(
             if let AgentEvent::TurnComplete(tc) = &event {
                 cost.turn(tc.cost);
             }
+            if let AgentEvent::CacheKeepalive(ka) = &event {
+                cost.turn(ka.cost);
+            }
 
             let update = match event {
                 AgentEvent::PermissionRequest {

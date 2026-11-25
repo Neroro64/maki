@@ -42,6 +42,9 @@ pub(crate) fn build_body(
         "stream": true,
         "store": false,
     });
+    if let Some(max_output) = model.output_tokens() {
+        body["max_output_tokens"] = json!(max_output);
+    }
     if wire_tools.as_array().is_some_and(|a| !a.is_empty()) {
         body["tools"] = wire_tools;
     }

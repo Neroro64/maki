@@ -1416,6 +1416,7 @@ pub(super) async fn process_tool_calls(
     history: &mut super::history::History,
     event_tx: &crate::EventSender,
     ctx: &ToolContext,
+    request_session_id: Option<&SessionRef>,
 ) -> Result<bool, AgentError> {
     let tool_uses: Vec<(String, String, Value)> = response
         .message
@@ -1448,6 +1449,12 @@ pub(super) async fn process_tool_calls(
         event_tx.try_send(AgentEvent::ToolDone(Box::new(err.clone())));
     }
 
+    let skip_keepalive = super::keepalive::is_explicit_sleep_wait(&runnable);
+    let keepalive_interval = if skip_keepalive {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(ctx.config.cache_keepalive_secs)
+    };
     let mut ids = Vec::with_capacity(runnable.len());
     let mut calls = Vec::with_capacity(runnable.len());
     for (id, name, input) in runnable {
@@ -1472,8 +1479,32 @@ pub(super) async fn process_tool_calls(
     }
 
     // In the order the model issued the calls, whatever order they finished in.
-    let results: Vec<ToolDoneEvent> = join_all(calls)
-        .await
+    let joined_calls = {
+        let wait_calls = join_all(calls);
+        if keepalive_interval.is_zero() {
+            wait_calls.await
+        } else {
+            let ping = super::keepalive::keepalive_loop(
+                keepalive_interval,
+                super::keepalive::KeepaliveSpec {
+                    provider: &*ctx.provider,
+                    model: &ctx.model,
+                    history,
+                    fast: ctx.opts.fast,
+                    session_id: request_session_id,
+                    event_tx,
+                    ledger: Some(&ctx.ledger),
+                },
+                ctx.cancel.clone(),
+            );
+            tokio::select! {
+                biased;
+                res = wait_calls => res,
+                () = ping => unreachable!("keepalive_loop only exits on cancel or zero interval"),
+            }
+        }
+    };
+    let results: Vec<ToolDoneEvent> = joined_calls
         .into_iter()
         .zip(ids)
         .map(|(joined, id)| {
@@ -3658,6 +3689,7 @@ mod tests {
             &mut History::new(Vec::new()),
             &event_tx,
             &ctx,
+            None,
         )
         .await
         .unwrap();
@@ -3716,6 +3748,7 @@ mod tests {
             &mut history,
             &event_tx,
             &ctx,
+            None,
         )
         .await
         .unwrap();

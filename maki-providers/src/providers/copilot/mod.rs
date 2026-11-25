@@ -589,6 +589,7 @@ impl CopilotModel {
                 .any(|effort| effort == dialect::OFF),
             reasoning_efforts,
             adaptive_thinking: self.capabilities.supports.adaptive_thinking,
+            max_images: self.capabilities.limits.max_prompt_images,
             endpoint: self.endpoint(),
         }
     }
@@ -724,6 +725,7 @@ struct CopilotModelCapabilities {
 struct CopilotModelLimits {
     max_context_window_tokens: Option<u32>,
     max_output_tokens: Option<u32>,
+    max_prompt_images: Option<usize>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -744,6 +746,7 @@ struct CopilotModelInfo {
     reasoning_off: bool,
     adaptive_thinking: bool,
     endpoint: Endpoint,
+    max_images: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -875,6 +878,9 @@ fn chat_completions_body(
         "stream": true,
         "temperature": 0.1,
     });
+    if let Some(max_output) = model.output_tokens() {
+        body["max_tokens"] = json!(max_output);
+    }
     if wire_tools.as_array().is_some_and(|tools| !tools.is_empty()) {
         body["tools"] = wire_tools;
     }
@@ -925,6 +931,23 @@ fn sends_thinking(model: &Model, choice: ThinkingConfig) -> ThinkingConfig {
             )
         })
         .map_or(choice, |info| listed_sends_thinking(&info, choice))
+}
+
+pub(crate) fn max_images(model: &Model) -> Option<usize> {
+    if &*model.provider != SLUG {
+        return None;
+    }
+    let upstream_id = shared::strip_long_context(&model.id);
+    if let Some(max) = model_registry::provider_info::<CopilotModelInfo>(SLUG, &model.id)
+        .or_else(|| model_registry::provider_info::<CopilotModelInfo>(SLUG, upstream_id))
+        .and_then(|info| info.max_images)
+        .filter(|&n| n > 0)
+    {
+        return Some(max.min(crate::image::MAX_IMAGES));
+    }
+    upstream_id
+        .starts_with("gemini-")
+        .then_some(crate::image::COPILOT_GEMINI_MAX_IMAGES)
 }
 
 /// The responses and chat completions endpoints render thinking through the
@@ -1479,6 +1502,7 @@ mod tests {
             reasoning_off: true,
             adaptive_thinking: false,
             endpoint: Endpoint::Responses,
+            max_images: None,
         };
         let dialect = effort_dialect(&info);
 
@@ -1514,6 +1538,7 @@ mod tests {
             reasoning_off: false,
             adaptive_thinking: false,
             endpoint: Endpoint::ChatCompletions,
+            max_images: None,
         };
 
         let body = chat_completions_body(

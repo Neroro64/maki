@@ -155,6 +155,7 @@ With 0 you see only the header. The read, index and list tools default to 0, bec
 | `rtk` | bool | `true` | - | Rewrite the model's bash commands with [rtk](https://github.com/rtk-ai/rtk) when it is installed |
 | `checkpoint` | bool | `false` | - | Save turn-end filesystem checkpoints outside Git repositories; Git projects use hidden per-turn snapshot refs automatically |
 | `context_notes` | bool | `false` | - | Give the agent a context_notes notebook that survives compaction, with reminders near the compaction threshold |
+| `cache_keepalive_secs` | u64 | `240` | - | Seconds between lightweight prompt-cache keepalive pings while waiting on non-sleep tools or background tasks (0 to disable) |
 | `shell` | string | `auto` | - | Shell for string commands on Windows (`jobstart`, UI `!`): `auto` (Git Bash if installed, else `cmd.exe`), `cmd`, or a path to an executable |
 
 ### `provider`
@@ -303,6 +304,13 @@ maki.setup({
 | `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
 | `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
 | `timeout_secs` | integer | `120` | 5 | Kill the command after this many seconds. A call's `timeout` param overrides it. |
+
+### `plugins.batch`
+
+| Field | Type | Default | Min | Description |
+|-------|------|---------|-----|-------------|
+| `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
+| `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
 
 ### `plugins.code_execution`
 

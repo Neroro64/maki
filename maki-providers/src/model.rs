@@ -737,6 +737,13 @@ impl Model {
             .unwrap_or_else(|| self.family.supports_vision())
     }
 
+    /// Maximum number of images a single request to this model may carry.
+    /// Copilot's `/chat/completions` gateway caps Gemini models at 10 images
+    /// unless discovery reports a specific `max_prompt_images` limit.
+    pub fn max_images(&self) -> usize {
+        crate::providers::copilot::max_images(self).unwrap_or(crate::image::MAX_IMAGES)
+    }
+
     pub fn supports_tool_examples(&self) -> bool {
         self.supports_tool_examples_override
             .unwrap_or_else(|| self.family.supports_tool_examples())

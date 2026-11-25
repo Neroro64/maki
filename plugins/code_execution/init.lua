@@ -7,8 +7,8 @@ local ToolView = require("maki.tool_view")
 local output_limits = require("maki.output_limits")
 local partial = require("maki.partial")
 
-local DEFAULT_MAX_OUTPUT_LINES = 2000
-local DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024
+local DEFAULT_SCRIPT_MAX_OUTPUT_LINES = 500
+local DEFAULT_SCRIPT_MAX_OUTPUT_BYTES = 16 * 1024
 local MAX_SCRIPT_LINES = 2000
 local OPEN_READ_CHECK_LINES = 1
 local READ_INPUT_SLOTS = { "tool.read.input", "tool.*.input" }
@@ -352,6 +352,12 @@ local function handler(input, ctx)
   view:append({ { "Waiting for output...", "dim" } })
 
   local max_lines, max_bytes = output_limits.resolve(opts, ctx)
+  if max_lines and not opts.max_output_lines then
+    max_lines = math.min(max_lines, DEFAULT_SCRIPT_MAX_OUTPUT_LINES)
+  end
+  if max_bytes and not opts.max_output_bytes then
+    max_bytes = math.min(max_bytes, DEFAULT_SCRIPT_MAX_OUTPUT_BYTES)
+  end
 
   local waiting = true
   local collected = output_limits.collector(max_lines, max_bytes)

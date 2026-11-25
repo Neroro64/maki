@@ -533,9 +533,12 @@ impl UserData for LuaCtx {
             let name: Option<String> = part.opt("name")?;
             let output: String = part.opt("output")?.unwrap_or_default();
             let failed = part.opt_bool("is_error").unwrap_or(false);
+            let wake = part.opt_bool("wake").unwrap_or(true);
             let markdown = extract_format(&part) == LuaOutputFormat::Markdown;
             let label = TaskLabel::new(&tool, name.as_deref());
-            if !BackgroundTasks::of(lua).report_part(&home.id, &label, failed, &output, markdown) {
+            if !BackgroundTasks::of(lua)
+                .report_part(&home.id, &label, failed, &output, markdown, wake)
+            {
                 return Ok(err_pair(NO_PART_NOW_MSG));
             }
             Ok((Some(true), None))

@@ -79,7 +79,8 @@ const ARCHIVE_HEADER: &str = concat!(
     "¶call = tool call with <out>…</out> output. ",
     "In imaged frames, solid black blocks (█) mark line breaks.\n\n",
 );
-const ARCHIVE_ACK: &str = "Understood. I have reviewed the archived session history above and am ready to continue.";
+const ARCHIVE_ACK: &str =
+    "Understood. I have reviewed the archived session history above and am ready to continue.";
 
 const FONT_8X13: &str = include_str!("fonts/8x13.bdf");
 
@@ -171,9 +172,13 @@ pub(crate) fn geometry() -> (usize, usize, usize) {
 /// Scales `MAX_FRAMES` down on small context windows so the archive itself
 /// cannot exceed a quarter of usable context and immediately re-trigger
 /// auto-compaction on the next turn.
-pub(crate) fn frame_budget(usable_tokens: u32) -> usize {
+pub(crate) fn frame_budget(usable_tokens: u32, max_images: usize) -> usize {
     let by_window = (usable_tokens / MAX_WINDOW_FRACTION / TOKENS_PER_FRAME) as usize;
-    by_window.clamp(1, MAX_FRAMES)
+    let ceiling = max_images.min(MAX_FRAMES);
+    if ceiling == 0 {
+        return 0;
+    }
+    by_window.clamp(1, ceiling)
 }
 
 /// East Asian Wide / Fullwidth code points occupy two grid cells.
@@ -319,7 +324,8 @@ pub fn serialize(messages: &[Message]) -> String {
                              thinking: &mut Vec<String>,
                              text: &mut Vec<String>| {
                     if !thinking.is_empty() {
-                        let combined = truncate_for_summary(&thinking.join("\n"), THINKING_MAX_CHARS);
+                        let combined =
+                            truncate_for_summary(&thinking.join("\n"), THINKING_MAX_CHARS);
                         parts.push(format!("¶think: {DIM_ON}{combined}{DIM_OFF}"));
                     }
                     if !text.is_empty() {
@@ -724,10 +730,9 @@ fn extract_prior_frames(messages: &mut [Message]) -> Vec<ImageSource> {
     for msg in messages {
         let is_archive = msg.role == Role::User
             && msg.display_text.as_deref() == Some("")
-            && msg
-                .content
-                .first()
-                .is_some_and(|b| matches!(b, ContentBlock::Text { text } if text.starts_with(ARCHIVE_HEADER)));
+            && msg.content.first().is_some_and(
+                |b| matches!(b, ContentBlock::Text { text } if text.starts_with(ARCHIVE_HEADER)),
+            );
         if !is_archive {
             continue;
         }
@@ -806,7 +811,10 @@ pub fn compact_with_options(
         .iter()
         .map(|page| {
             let chars = strip_dim_markers(page).chars().count();
-            (ImageSource::new(ImageMediaType::Png, render_page(page)), chars)
+            (
+                ImageSource::new(ImageMediaType::Png, render_page(page)),
+                chars,
+            )
         })
         .collect();
 
@@ -1092,7 +1100,11 @@ mod tests {
             },
             Message {
                 role: Role::User,
-                content: vec![ContentBlock::tool_result("t_err", "panicked at foo.rs:12", true)],
+                content: vec![ContentBlock::tool_result(
+                    "t_err",
+                    "panicked at foo.rs:12",
+                    true,
+                )],
                 ..Default::default()
             },
         ];
@@ -1152,8 +1164,7 @@ mod tests {
             }
         }
 
-        let mut vision_model =
-            Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        let mut vision_model = Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
         vision_model.supports_vision_override = Some(true);
         let wire_input = vec![Message {
             role: Role::User,
@@ -1283,24 +1294,18 @@ mod tests {
             compressed_b64.len()
         );
 
-        let decoded = image::load_from_memory(
-            &STANDARD.decode(compressed_b64.as_bytes()).unwrap(),
-        )
-        .unwrap()
-        .into_luma8();
+        let decoded = image::load_from_memory(&STANDARD.decode(compressed_b64.as_bytes()).unwrap())
+            .unwrap()
+            .into_luma8();
         let mut bloated_png = Vec::new();
-        PngEncoder::new_with_quality(
-            &mut bloated_png,
-            CompressionType::Fast,
-            PngFilter::NoFilter,
-        )
-        .write_image(
-            decoded.as_raw(),
-            decoded.width(),
-            decoded.height(),
-            ExtendedColorType::L8,
-        )
-        .unwrap();
+        PngEncoder::new_with_quality(&mut bloated_png, CompressionType::Fast, PngFilter::NoFilter)
+            .write_image(
+                decoded.as_raw(),
+                decoded.width(),
+                decoded.height(),
+                ExtendedColorType::L8,
+            )
+            .unwrap();
         let bloated_source =
             ImageSource::new(ImageMediaType::Png, Arc::from(STANDARD.encode(bloated_png)));
         assert!(bloated_source.data.len() > RECOMPRESS_FRAME_BASE64_BYTES);
@@ -1350,5 +1355,12 @@ mod tests {
             .sum();
         assert!(total_b64 <= MAX_ARCHIVE_BASE64_BYTES);
         assert!(total_b64 > 0);
+    }
+
+    #[test]
+    fn frame_budget_respects_model_max_images_cap() {
+        let gemini = Model::from_spec("copilot/gemini-4-carbon").unwrap();
+        assert_eq!(gemini.max_images(), 10);
+        assert_eq!(frame_budget(264_000, gemini.max_images()), 10);
     }
 }

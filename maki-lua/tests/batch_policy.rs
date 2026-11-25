@@ -1845,3 +1845,36 @@ fn a_batch_that_cannot_move_for_its_child_says_why() {
         )
     );
 }
+
+/// Parallel background subagents in one batch queue intermediate completions
+/// quietly so an idle parent wakes once when the whole batch settles instead
+/// of re-sending its prompt on every child completion.
+#[test]
+fn background_subagent_siblings_wake_once_when_all_finish() {
+    let (mut batch, call) = MovableBatch::start(json!([
+        { "tool": HOOKED_TOOL, "parameters": { "tag": "sub_a", "subagent": true, "background": true } },
+        { "tool": HOOKED_TOOL, "parameters": { "tag": "sub_b", "subagent": true, "background": true } },
+    ]));
+    batch.wait_parked("sub_a");
+    batch.wait_parked("sub_b");
+    assert!(call.join().expect("batch thread").backgrounded);
+
+    batch.release("sub_a");
+    poll_until("first subagent notice queued", || {
+        (batch.mailbox.unsettled().len() == 1).then_some(())
+    });
+    assert!(
+        batch.mailbox.claim_wake().is_empty(),
+        "early background subagent must not wake an idle parent while siblings still run"
+    );
+
+    batch.release("sub_b");
+    let _ = batch.task_done();
+    let woken = poll_until("final subagent wakes the parent with both notices", || {
+        let w = batch.mailbox.claim_wake();
+        (!w.is_empty()).then_some(w)
+    });
+    assert_eq!(woken.len(), 2);
+    assert!(matches!(woken[0].answers, Some(TaskAnswer::Part(_))));
+    assert!(woken[1].settles().is_some());
+}

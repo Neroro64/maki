@@ -211,6 +211,18 @@ impl SessionTrack {
         }
     }
 
+    pub(crate) fn history(&self) -> &History {
+        &self.history
+    }
+
+    pub(crate) fn fast(&self) -> bool {
+        self.store.session.meta.fast
+    }
+
+    pub(crate) fn spend(&self) -> &RunLedger {
+        &self.spend
+    }
+
     /// One turn against this transcript. The returned guard is the only way to
     /// reach [`AgentRunParams`] and it persists on drop. An
     /// [`Agent`](crate::Agent) built from it borrows the guard, so borrowck

@@ -22,7 +22,7 @@ use strum::{Display, IntoStaticStr, VariantNames};
 use tracing::{debug, warn};
 
 use crate::TokenUsage;
-use crate::image::{Fix, IMAGE_EVICTION_STEP, MAX_IMAGES, fix_for_wire};
+use crate::image::{Fix, IMAGE_EVICTION_STEP, fix_for_wire};
 use crate::model::Model;
 
 const LOCAL_BUDGET_FIELD: &str = "thinking_budget_tokens";
@@ -278,7 +278,7 @@ fn plan_images(model: &Model, messages: &[Message]) -> Vec<PlannedImage> {
         })
         .collect();
     let vision = model.supports_vision();
-    let kept = images_kept(images.len());
+    let kept = images_kept(images.len(), model.max_images());
     images
         .into_iter()
         .enumerate()
@@ -414,9 +414,13 @@ pub async fn adapt_images_for_model<'a>(
 /// fill the gap one by one. It depends on the count alone, never on which
 /// images decode, so which ones are evicted only moves once per step. An
 /// unreadable image therefore holds its slot until it ages out.
-fn images_kept(total: usize) -> usize {
-    let over = total.saturating_sub(MAX_IMAGES);
-    total - over.div_ceil(IMAGE_EVICTION_STEP) * IMAGE_EVICTION_STEP
+fn images_kept(total: usize, max_images: usize) -> usize {
+    if total <= max_images {
+        return total;
+    }
+    let step = IMAGE_EVICTION_STEP.min(max_images).max(1);
+    let over = total - max_images;
+    total - over.div_ceil(step) * step
 }
 
 /// A new variant is not skew-safe: an older build drops the whole record, so
@@ -1932,6 +1936,7 @@ mod tests {
     use maki_storage::sessions::generate_title;
 
     use super::*;
+    use crate::image::MAX_IMAGES;
     use crate::model::ThinkingSupport as Support;
     use test_case::test_case;
 

@@ -733,6 +733,7 @@ pub enum AgentEvent {
         parts: Vec<ToolPart>,
     },
     TurnComplete(Box<TurnCompleteEvent>),
+    CacheKeepalive(Box<CacheKeepaliveEvent>),
     ToolResultsSubmitted {
         message: Box<Message>,
     },
@@ -1191,6 +1192,16 @@ pub struct TurnCompleteEvent {
     /// The model's context window, so consumers can gauge `context_size`
     /// against the ceiling without resolving the model.
     pub context_window: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CacheKeepaliveEvent {
+    pub usage: TokenUsage,
+    pub model: String,
+    #[serde(skip)]
+    pub cost: Option<f64>,
+    #[serde(skip)]
+    pub subsidised_list_cost: Option<f64>,
 }
 
 /// What one run spent, itself and everything it spawned.

@@ -590,6 +590,12 @@ async fn relay_session_events(
                     registry.update(id, |e| e.info.cost = cost);
                 }
             }
+            AgentEvent::CacheKeepalive(ka) => {
+                add_cost(&mut cost, ka.cost);
+                if let Upstream::Chat { registry, id, .. } = &upstream {
+                    registry.update(id, |e| e.info.cost = cost);
+                }
+            }
             AgentEvent::Done { .. } => {
                 let _ = done_tx.send(());
                 if !to_chat {
@@ -1892,6 +1898,33 @@ impl TurnHost for PromptHost<'_> {
                 .upstream
                 .send_history(&state.cancellation.ui_id, state.history.as_slice().to_vec());
         }
+    }
+
+    fn keepalive<'b>(
+        &'b self,
+        fast: bool,
+    ) -> Option<(Duration, maki_agent::agent::KeepaliveSpec<'b>)> {
+        let secs = self.state.params.config.cache_keepalive_secs;
+        if secs == 0 {
+            return None;
+        }
+        let session_id = self.state.params.request_session_id.as_ref().or(self
+            .state
+            .params
+            .session_id
+            .as_ref());
+        Some((
+            Duration::from_secs(secs),
+            maki_agent::agent::KeepaliveSpec {
+                provider: &*self.state.params.provider,
+                model: &self.state.params.model,
+                history: &self.state.history,
+                fast,
+                session_id,
+                event_tx: &self.state.sub_event_tx,
+                ledger: Some(&self.state.params.ledger),
+            },
+        ))
     }
 }
 

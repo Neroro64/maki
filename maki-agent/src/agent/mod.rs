@@ -4,6 +4,7 @@ mod frame;
 mod history;
 pub mod hook;
 mod instructions;
+mod keepalive;
 mod notes;
 mod run;
 mod snapcompact;
@@ -25,6 +26,7 @@ pub use instructions::{
     default_instruction_files, find_subdirectory_instructions, is_instruction_file,
     load_instruction_text, load_instructions,
 };
+pub use keepalive::{KeepaliveSpec, keepalive_loop, send_keepalive_once};
 #[cfg(test)]
 pub(crate) use run::testing;
 pub use run::{Agent, AgentParams, AgentRunParams, ModelSlot, resolve_compaction_model};

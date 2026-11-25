@@ -244,15 +244,13 @@ pub(super) async fn compact_history(
         // default so plugins that explicitly collapse secrets or noise take
         // effect without `RECENT_TOOL_RESULT_BUDGET` wiping older tool outputs.
         prepare_collapse(hooks, &mut compaction_history, usize::MAX).await;
-        let merged_instructions = join_lines([
-            config.compaction_instructions.as_deref(),
-            instructions,
-        ]);
+        let merged_instructions =
+            join_lines([config.compaction_instructions.as_deref(), instructions]);
         return snapcompact::history(
             history,
             compaction_history,
             summarized,
-            snapcompact::frame_budget(usable(hooks.model, config)),
+            snapcompact::frame_budget(usable(hooks.model, config), hooks.model.max_images()),
             merged_instructions.as_deref(),
             config.post_compaction_instructions.as_deref(),
             compact_start,

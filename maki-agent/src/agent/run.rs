@@ -1183,6 +1183,7 @@ impl<'h> Agent<'h> {
             self.history,
             &self.event_tx,
             &ctx,
+            self.request_session_id.as_ref(),
         )
         .await
     }

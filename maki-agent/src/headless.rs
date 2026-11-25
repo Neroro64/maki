@@ -271,6 +271,39 @@ impl Inputs {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn next_headless_input(
+    inputs: &mut Inputs,
+    interval: Duration,
+    provider: &Arc<dyn Provider>,
+    model: &Model,
+    track: &SessionTrack,
+    session_id: &SessionRef,
+    base_tx: &EventSender,
+    stop: &CancelToken,
+) -> Option<Next> {
+    if interval.is_zero() || inputs.keep_alive.mailbox.outstanding() == 0 {
+        return inputs.next().await;
+    }
+    let ping = crate::agent::keepalive_loop(
+        interval,
+        crate::agent::KeepaliveSpec {
+            provider: &**provider,
+            model,
+            history: track.history(),
+            fast: track.fast(),
+            session_id: Some(session_id),
+            event_tx: base_tx,
+            ledger: Some(track.spend()),
+        },
+        stop.clone(),
+    );
+    tokio::select! {
+        biased;
+        next = inputs.next() => next,
+        () = ping => None,
+    }
+}
 /// Nobody prompted this turn: the notices it is woken with are all it says.
 fn woken_input(like: &AgentInput) -> AgentInput {
     AgentInput {
@@ -609,7 +642,19 @@ pub async fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle,
         let mut run_id: u64 = 0;
         let mut listing = Listing::Due;
 
-        while let Some(next) = inputs.next().await {
+        let keepalive_interval = Duration::from_secs(params.config.cache_keepalive_secs);
+        while let Some(next) = next_headless_input(
+            &mut inputs,
+            keepalive_interval,
+            &provider,
+            &model,
+            &track,
+            &session_ref_clone,
+            &base_tx,
+            &params.stop,
+        )
+        .await
+        {
             let (trigger, cancel) = params.stop.child();
             let cancel_task = relay_cancel(&cancel_rx, trigger);
 

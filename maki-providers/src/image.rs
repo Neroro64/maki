@@ -25,6 +25,9 @@ pub(crate) const MAX_EDGE: u32 = 1568;
 /// Anthropic refuses a request carrying more than 100 images, and no other
 /// provider is more generous.
 pub(crate) const MAX_IMAGES: usize = 100;
+/// Copilot's `/chat/completions` gateway rejects Gemini requests carrying more
+/// than 10 images (`too many images: maximum allowed for model ... is 10`).
+pub(crate) const COPILOT_GEMINI_MAX_IMAGES: usize = 10;
 /// How many slots one eviction frees past [`MAX_IMAGES`]. Evicting edits an
 /// early message, which voids the cache and the thinking bound to it, so it
 /// happens once per this many new images, not on every one. Saving evictions

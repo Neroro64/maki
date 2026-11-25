@@ -44,7 +44,7 @@ const MODAL_PERCENT: u16 = 90;
 const SNIPPET_CONTEXT: usize = 2;
 const EDITOR_CONTEXT_HEIGHT: u16 = 3;
 const EDITOR_MIN_HEIGHT: u16 = 3;
-const REVIEW_HELP: &str = "v select · c annotate · a notes · s send · Tab pane · j/k move · Enter/z expand · X/E all · ? help · q close";
+const REVIEW_HELP: &str = "v select · c annotate · a notes · s send · Tab pane · j/k move · Enter/z expand · X/E all · / search · n/p matches · ? help · q close";
 const EDITOR_HINTS: &[(&str, &str)] =
     &[("Ctrl+S", "Save"), ("Enter", "Newline"), ("Esc", "Cancel")];
 const ANNOTATION_HINTS: &[(&str, &str)] = &[
@@ -340,6 +340,12 @@ impl Review {
         }
         if self.show_annotations {
             return self.handle_annotation_key(key.code);
+        }
+        if self.app.as_ref().is_some_and(|app| app.search_active) {
+            if let Some(app) = &mut self.app {
+                app.handle_event(key);
+            }
+            return None;
         }
         match key.code {
             KeyCode::Esc
@@ -647,12 +653,18 @@ impl Review {
             );
         }
         let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
-        let message = self.status.as_ref().map_or_else(
-            || format!(" {} notes · {REVIEW_HELP}", self.annotations.len()),
-            |status| format!(" {status} · a notes ({}) · q close", self.annotations.len()),
-        );
-        frame.render_widget(Clear, footer);
-        frame.render_widget(Paragraph::new(message).style(t.status_dim), footer);
+        let searching = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.search_active || !app.search_query.is_empty());
+        if !searching {
+            let message = self.status.as_ref().map_or_else(
+                || format!(" {} notes · {REVIEW_HELP}", self.annotations.len()),
+                |status| format!(" {status} · a notes ({}) · q close", self.annotations.len()),
+            );
+            frame.render_widget(Clear, footer);
+            frame.render_widget(Paragraph::new(message).style(t.status_dim), footer);
+        }
         if self.show_help {
             let lines = build_help_lines(true);
             let (_, inner) = modal(" Review Help & Color Legend ").render_with_footer(
@@ -887,6 +899,52 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn tree_search_stays_open_through_escape_and_typing() {
+        let analysis = logidiff::analysis::analyze(&logidiff::analysis::Inputs {
+            files: vec![(
+                "src/app.rs".into(),
+                Some("fn run() { helper(); }\nfn helper() { let x = 1; }\n".into()),
+                Some("fn run() { helper(); }\nfn helper() { let x = 2; }\n".into()),
+            )],
+            extra_head: vec![],
+            include_tests: true,
+        });
+        let roots = analysis.entry_points.clone();
+        let mut review = review();
+        review.app = Some(logidiff::ui::App::new(analysis, roots, false));
+        for code in [
+            KeyCode::Char('/'),
+            KeyCode::Char('h'),
+            KeyCode::Char('e'),
+            KeyCode::Char('l'),
+            KeyCode::Char('p'),
+        ] {
+            review.handle_key(key(code));
+        }
+        assert!(review.open);
+        let app = review.app.as_ref().unwrap();
+        assert!(app.search_active);
+        assert_eq!(app.search_query, "help");
+        assert_eq!(app.search_matches.len(), 1);
+        assert_eq!(
+            app.rows[app.sel].key,
+            logidiff::analysis::node_key("src/app.rs", "helper")
+        );
+        review.handle_key(key(KeyCode::Char('q')));
+        assert!(review.open);
+        assert_eq!(review.app.as_ref().unwrap().search_query, "helpq");
+        review.handle_key(key(KeyCode::Backspace));
+        assert_eq!(review.app.as_ref().unwrap().search_matches.len(), 1);
+        review.handle_key(key(KeyCode::Esc));
+        assert!(review.open);
+        let app = review.app.as_ref().unwrap();
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+        review.handle_key(key(KeyCode::Esc));
+        assert!(!review.open);
     }
 
     #[test]

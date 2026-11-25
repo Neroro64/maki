@@ -1138,6 +1138,7 @@ impl EventPump {
             | AgentEvent::ToolHeaderSnapshot { .. }
             | AgentEvent::LiveToolBuf { .. }
             | AgentEvent::Nudge
+            | AgentEvent::CacheKeepalive(_)
             | AgentEvent::Notice { .. }
             | AgentEvent::PromptProgress { .. }
             | AgentEvent::StreamClosed => {}

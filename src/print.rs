@@ -438,6 +438,7 @@ pub async fn run(params: PrintParams) -> Result<Interrupt> {
             | AgentEvent::ToolHeaderSnapshot { .. }
             | AgentEvent::LiveToolBuf { .. }
             | AgentEvent::Nudge
+            | AgentEvent::CacheKeepalive(_)
             | AgentEvent::Notice { .. }
             | AgentEvent::PromptProgress { .. }
             | AgentEvent::StreamClosed

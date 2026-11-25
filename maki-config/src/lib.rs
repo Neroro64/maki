@@ -60,6 +60,10 @@ pub const DEFAULT_COMPACTION_BUFFER: CompactionBuffer = CompactionBuffer::Percen
 /// An answer allowance, not a ceiling on the request: a turn asks for more
 /// where an effort level needs the room.
 pub const DEFAULT_MAX_TURN_OUTPUT: u32 = 32_768;
+/// Prompt-cache TTL on Anthropic, Gemini and OpenAI sticky slots is ~5 minutes
+/// (300s). Pinging every 240s while waiting on non-sleep tools or background
+/// tasks refreshes the prefix before expiry; `0` disables keepalive pings.
+pub const DEFAULT_CACHE_KEEPALIVE_SECS: u64 = 240;
 
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_LOW_SPEED_TIMEOUT_SECS: u64 = 120;
@@ -830,6 +834,7 @@ pub struct AgentFileConfig {
     pub rtk: Option<bool>,
     pub checkpoint: Option<bool>,
     pub context_notes: Option<bool>,
+    pub cache_keepalive_secs: Option<u64>,
     pub shell: Option<ShellPreference>,
 }
 
@@ -1495,6 +1500,12 @@ pub struct AgentConfig {
     pub context_notes: bool,
 
     #[config(
+        default = DEFAULT_CACHE_KEEPALIVE_SECS,
+        desc = "Seconds between lightweight prompt-cache keepalive pings while waiting on non-sleep tools or background tasks (0 to disable)"
+    )]
+    pub cache_keepalive_secs: u64,
+
+    #[config(
         default = ShellPreference::Auto,
         ty = "string",
         default_doc = "auto",
@@ -1537,6 +1548,9 @@ impl AgentConfig {
             rtk: file.rtk.unwrap_or(true),
             checkpoint: file.checkpoint.unwrap_or(false),
             context_notes: file.context_notes.unwrap_or(false),
+            cache_keepalive_secs: file
+                .cache_keepalive_secs
+                .unwrap_or(DEFAULT_CACHE_KEEPALIVE_SECS),
             shell: file.shell.unwrap_or_default(),
             max_turns: None,
             allowed_tools: Vec::new(),

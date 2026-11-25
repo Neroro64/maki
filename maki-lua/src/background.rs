@@ -588,6 +588,7 @@ impl BackgroundTasks {
         failed: bool,
         output: &str,
         markdown: bool,
+        wake: bool,
     ) -> bool {
         let Some(mailbox) = self
             .locked()
@@ -603,7 +604,7 @@ impl BackgroundTasks {
             BackgroundNotice {
                 text,
                 display: Some(&display),
-                wake: true,
+                wake,
                 end,
                 markdown,
             },

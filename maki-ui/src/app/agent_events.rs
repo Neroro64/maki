@@ -127,6 +127,10 @@ impl App {
             self.set_parts(id, parts);
             return;
         }
+        if matches!(envelope.event, AgentEvent::CacheKeepalive(_)) {
+            self.deliver(envelope, None);
+            return;
+        }
         // What an adopted subagent sent before its call moved belongs to its
         // task, not to the run, and may land after the next run started.
         if let Some(plugin) = task_id_of(&envelope).and_then(|id| self.task_plugin(id)) {
@@ -363,6 +367,14 @@ impl App {
                 let formatted = tc.usage.format_sum_cost(self.chats[chat_idx].cost);
                 self.chats[MAIN_CHAT].set_tool_turn_usage(tool_id, formatted);
             }
+        }
+        if let AgentEvent::CacheKeepalive(ka) = event {
+            self.bill(
+                chat_idx,
+                &ka.model,
+                ka.usage
+                    .billed_with_subsidised_list_cost(ka.cost, ka.subsidised_list_cost),
+            );
         }
 
         // Compaction is the one thing that lowers the context size with no turn

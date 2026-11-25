@@ -60,7 +60,8 @@ expand subtree (depth 5) · `X` expand all · `e` collapse to roots · `E` colla
 `f` focus relevant branches · `g/G` first/last row · `tab` switch pane ·
 `enter`/`space`/`z` toggle a folded unchanged section · `Z` toggle expanding all
 unchanged sections · `Shift+H`/`Shift+L` scroll the focused panel by 8 columns ·
-`?` help · `q` quit.
+`/` search the tree by symbol name or file (incremental) · `n`/`p` next/previous
+match (wraps; collapsed ancestors are expanded to reveal a match) · `?` help · `q` quit.
 
 The detail pane is syntax-highlighted (`+` green, `-` red, dimmed context,
 `⋯ N unchanged lines ⋯` between hunks). Unchanged symbols show their full source

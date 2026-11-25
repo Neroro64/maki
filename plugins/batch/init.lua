@@ -12,7 +12,10 @@
 --      batch.
 
 local ToolView = require("maki.tool_view")
+local output_limits = require("maki.output_limits")
 
+
+local opts = maki.api.register_options(output_limits.extend({}))
 local MAX_BATCH_SIZE = 25
 local SEPARATOR = "──────────────────"
 local BODY_INDENT = "  "
@@ -325,9 +328,12 @@ local function render_sections(children)
   return table.concat(out), failed
 end
 
-local function render_llm(children)
+local function render_llm(children, max_lines, max_bytes)
   local total = #children
   local sections, failed = render_sections(children)
+  if max_lines or max_bytes then
+    sections = output_limits.cut_middle(sections:gsub("\n\n$", ""), max_lines, max_bytes) .. "\n\n"
+  end
   if failed > 0 then
     return sections .. string.format(SUMMARY_MIXED_FMT, total - failed, total, failed)
   end
@@ -648,8 +654,9 @@ end
 function Batch:reply()
   local note = self.foreground_reason and string.format(FOREGROUND_NOTE, tostring(self.foreground_reason)) or ""
   local children = self:unreported()
+  local max_lines, max_bytes = output_limits.resolve(opts, self.ctx)
   return {
-    llm_output = note .. render_llm(children),
+    llm_output = note .. render_llm(children, max_lines, max_bytes),
     format = all_markdown(children) and MARKDOWN_FORMAT or nil,
     is_error = self.cancelled,
     body = self.buf,
@@ -713,12 +720,16 @@ function Batch:report_finished()
   end
   for _, c in ipairs(self.children) do
     if TERMINAL[c.status] and not c.reported then
+      -- A background subagent inside a batch is part of a parallel fan-out;
+      -- queue its intermediate notice quietly so it rides any active turn and
+      -- only the final child wakes an idle parent once the whole batch settles.
       c.reported = self.ctx:report_part({
         tool = c.tool,
         name = header_text(c),
         output = c.output,
         is_error = c.status == STATUS.ERROR,
         format = c.format,
+        wake = not (c.background and c.task_id),
       }) == true
     end
   end
@@ -751,7 +762,11 @@ function Batch:hand_over()
       .. (c.task_id and string.format(MOVED_ITEM_TASK_FMT, c.task_id) or "")
       .. (header ~= "" and string.format(MOVED_ITEM_HEADER_FMT, header) or "")
   end
+  local max_lines, max_bytes = output_limits.resolve(opts, self.ctx)
   local sections = render_sections(finished)
+  if #finished > 0 and (max_lines or max_bytes) then
+    sections = output_limits.cut_middle(sections:gsub("\n\n$", ""), max_lines, max_bytes) .. "\n\n"
+  end
   for _, c in ipairs(finished) do
     c.reported = true
   end

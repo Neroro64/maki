@@ -255,6 +255,7 @@ impl Chat {
                     }
                 }
             }
+            AgentEvent::CacheKeepalive(_) => {}
             AgentEvent::ToolResultsSubmitted { .. } => {
                 if let Some(usage) = self.pending_turn_usage.take() {
                     self.messages_panel.set_turn_usage_on_last_tool(usage);

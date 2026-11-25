@@ -12,6 +12,7 @@ local STRUCTURED_OUTPUT_DESCRIPTION = "Report your final result. Call it exactly
 local STRUCTURED_OUTPUT_ACK = "Output recorded."
 local STRUCTURED_OUTPUT_PROMPT_SUFFIX = "\n\nWhen finished, call the structured_output tool with your final result."
 local MAX_NUDGES = 2
+local DEFAULT_MODEL_TIER = "weak"
 local MAX_SCHEMA_ERRORS = 3
 local SCHEMA_COMPILE_ERROR = "invalid output_schema"
 local SCHEMA_ROOT_ERROR = "output_schema must have type object"
@@ -64,7 +65,7 @@ local schema = {
     },
     model_tier = {
       type = "string",
-      description = 'Model tier (optional, omit to use current model, capped at current tier):\n- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.\n- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.\n- "weak" (e.g. Haiku): Fast/cheap. Search, summarize, boilerplate, simple edits.',
+      description = 'Model tier (optional, defaults to "weak", capped at current tier):\n- "strong" (e.g. Opus): Deep reasoning, complex architecture, subtle bugs, most critical sections. ~5x cost of medium.\n- "medium" (e.g. Sonnet): Balanced. Refactors, features, multi-file changes.\n- "weak" (e.g. Haiku): Default. Fast/cheap. Search, summarize, boilerplate, simple edits.',
     },
     thinking = {
       description = "Thinking: off|adaptive|minimal|low|medium|high|xhigh|max|int budget. Omit to inherit parent; capped at parent.",
@@ -88,7 +89,7 @@ end
 if opts.allow_background then
   schema.properties.background = {
     type = "boolean",
-    description = "Run in the background. The result arrives as a message. Default to true unless your next step needs the result. Launch all in one batch. Never sleep or poll, end your turn when idle.",
+    description = "Run in the background. Use ONLY when you have independent foreground work to do right now; use a blocking batch without background=true when waiting on all subagents. Never sleep or poll, end your turn when idle.",
     needs_background = true,
   }
 end
@@ -140,9 +141,10 @@ function Runner.prepare(input, ctx)
     end
   end
 
+  local explicit_spec = opts.allow_model and input.model or nil
   local model, model_err = maki.agent.resolve_model(ctx, {
-    tier = input.model_tier,
-    spec = opts.allow_model and input.model or nil,
+    tier = input.model_tier or (not explicit_spec and DEFAULT_MODEL_TIER or nil),
+    spec = explicit_spec,
   })
   if model_err then
     return nil, model_err
