@@ -1322,7 +1322,10 @@ fn collect_go_receiver_member_bindings(
                                 .unwrap_or(embedded_ty)
                                 .trim();
                             if !leaf.is_empty() {
-                                bindings.push((format!("{recv_name}.{leaf}"), Some(embedded_ty.clone())));
+                                bindings.push((
+                                    format!("{recv_name}.{leaf}"),
+                                    Some(embedded_ty.clone()),
+                                ));
                             }
                         }
                     }
@@ -1365,9 +1368,9 @@ fn collect_type_body_bindings(
                                     if decl.kind() == "variable_declarator"
                                         && let Some(n) = decl.child_by_field_name("name")
                                     {
-                                        let ty = declared_ty.clone().or_else(|| {
-                                            inferred_initializer_type(decl, src, lang)
-                                        });
+                                        let ty = declared_ty
+                                            .clone()
+                                            .or_else(|| inferred_initializer_type(decl, src, lang));
                                         let bname =
                                             n.utf8_text(src).unwrap_or_default().to_string();
                                         push_member_binding(bindings, &bname, ty, lang);
@@ -1435,9 +1438,8 @@ fn collect_type_body_bindings(
                         collect_constructor_assigned_bindings(member, src, lang, bindings);
                     }
                     "expression_statement" if lang == Lang::Python => {
-                        if let Some(assign) = member
-                            .named_child(0)
-                            .filter(|n| n.kind() == "assignment")
+                        if let Some(assign) =
+                            member.named_child(0).filter(|n| n.kind() == "assignment")
                             && let Some(left) = assign.child_by_field_name("left")
                             && left.kind() == "identifier"
                         {
@@ -1496,15 +1498,12 @@ fn collect_constructor_assigned_bindings(
     bindings: &mut Vec<(String, Option<String>)>,
 ) {
     let mut param_types = Vec::new();
-    if let Some(params) = ctor_node
-        .child_by_field_name("parameters")
-        .or_else(|| {
-            let mut c = ctor_node.walk();
-            ctor_node
-                .named_children(&mut c)
-                .find(|n| matches!(n.kind(), "parameter_list" | "formal_parameters"))
-        })
-    {
+    if let Some(params) = ctor_node.child_by_field_name("parameters").or_else(|| {
+        let mut c = ctor_node.walk();
+        ctor_node
+            .named_children(&mut c)
+            .find(|n| matches!(n.kind(), "parameter_list" | "formal_parameters"))
+    }) {
         let mut pc = params.walk();
         for p in params.named_children(&mut pc) {
             collect_binding(p, src, lang, &mut param_types);
@@ -1717,14 +1716,11 @@ fn service_locator_or_ctor_call_type(
             return Some(ty);
         }
         // Value-passed class/token: `container.get(ServiceA)`, `inject(ServiceA)`, `container.resolve(ServiceA)`
-        if let Some(args) = call
-            .child_by_field_name("arguments")
-            .or_else(|| {
-                let mut c = call.walk();
-                call.named_children(&mut c)
-                    .find(|n| matches!(n.kind(), "argument_list" | "arguments"))
-            })
-            && let Some(first_arg) = args.named_child(0)
+        if let Some(args) = call.child_by_field_name("arguments").or_else(|| {
+            let mut c = call.walk();
+            call.named_children(&mut c)
+                .find(|n| matches!(n.kind(), "argument_list" | "arguments"))
+        }) && let Some(first_arg) = args.named_child(0)
         {
             let arg = if first_arg.kind() == "argument" {
                 first_arg.named_child(0).unwrap_or(first_arg)
@@ -2487,7 +2483,9 @@ fn collect_binding(
         .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
         .filter(|t| !t.is_empty() && !matches!(t.as_str(), "var" | "auto"))
         .or_else(|| {
-            (!parameter).then(|| inferred_initializer_type(node, src, lang)).flatten()
+            (!parameter)
+                .then(|| inferred_initializer_type(node, src, lang))
+                .flatten()
         });
     let mut names = Vec::new();
     let mut c = node.walk();

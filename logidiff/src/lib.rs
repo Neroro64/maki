@@ -46,7 +46,7 @@ pub fn review_with_cache_status(
     } else {
         head
     };
-    let mut app = ui::App::new(analysis, roots, false);
+    let mut app = ui::App::new(analysis, roots, true);
     app.flash = Some(match cache_status {
         CacheStatus::Hit => format!("reviewing {base} → {head_label} (cached)"),
         CacheStatus::Miss => format!("reviewing {base} → {head_label}"),
@@ -203,6 +203,7 @@ mod tests {
         fs::write(repo.join("staged.txt"), "staged\n").unwrap();
         git(repo, &["add", "staged.txt"]);
         let app = review(repo, None, None).unwrap();
+        assert!(app.focus_mode);
         for path in [
             "modified.txt",
             "supported.rs",

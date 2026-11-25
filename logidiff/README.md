@@ -23,7 +23,7 @@ logidiff HEAD -e 'IWorker::Run'
 logidiff HEAD -e 'src/x.rs::run'
 logidiff HEAD --dump          # print the review tree, no TUI
 logidiff HEAD --json          # full analysis as one JSON document
-logidiff --all --tests --focus
+logidiff --all --tests --no-focus
 ```
 
 `base` defaults to `HEAD~1`; `head` defaults to the working tree when a base is
@@ -34,7 +34,7 @@ given. Flags:
   ambiguous matches list every candidate key.
 - `--dump` / `--json` — non-interactive output (mutually exclusive).
 - `--all` — include clean entry points. `--tests` — include test symbols.
-- `--focus` — start with unchanged branches hidden (TUI only).
+- `--focus` / `--no-focus` — TUI starts focused on changes by default; `--no-focus` starts with unchanged branches visible.
 - `--repo <path>` — repository root (default: cwd).
 
 ## Status glyphs
@@ -56,10 +56,11 @@ selected pair · `s` swap · `/` filter · `i` custom revision · `q`/`esc` quit
 
 Review: `j/k` move · `Ctrl+D`/`Ctrl+U` half-page scroll · `enter`/`space`/`l`
 toggle expansion · `h` collapse the row or its nearest expanded ancestor · `x`
-expand subtree (depth 5) · `e` collapse to roots · `f` focus relevant branches ·
-`g/G` first/last row · `tab` switch pane · `enter`/`space`/`z` toggle a folded
-unchanged section · `Z` toggle expanding all unchanged sections ·
-`Shift+H`/`Shift+L` scroll the focused panel by 8 columns · `?` help · `q` quit.
+expand subtree (depth 5) · `X` expand all · `e` collapse to roots · `E` collapse all ·
+`f` focus relevant branches · `g/G` first/last row · `tab` switch pane ·
+`enter`/`space`/`z` toggle a folded unchanged section · `Z` toggle expanding all
+unchanged sections · `Shift+H`/`Shift+L` scroll the focused panel by 8 columns ·
+`?` help · `q` quit.
 
 The detail pane is syntax-highlighted (`+` green, `-` red, dimmed context,
 `⋯ N unchanged lines ⋯` between hunks). Unchanged symbols show their full source

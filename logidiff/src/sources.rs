@@ -366,55 +366,56 @@ fn changed_terms(files: &ChangedSources) -> (HashSet<String>, HashSet<String>, H
                 }
             }
         };
-        let seed_internal_callers = |parsed: &syntax::ParsedFile,
-                                     other_hashes: &HashSet<(&str, bool, u64)>,
-                                     terms: &mut HashSet<String>,
-                                     down_hierarchy: &mut HashSet<String>,
-                                     up_hierarchy: &mut HashSet<String>| {
-            let mut changed_indices = HashSet::new();
-            for (idx, symbol) in parsed.fns.iter().enumerate() {
-                let key = (
-                    symbol.qual.as_str(),
-                    symbol.kind == syntax::SymbolKind::Type,
-                    symbol.body_hash,
-                );
-                if !other_hashes.contains(&key) {
-                    add_symbol(symbol, terms, down_hierarchy, up_hierarchy);
-                    changed_indices.insert(idx);
-                }
-            }
-            if changed_indices.is_empty() {
-                return;
-            }
-            let mut by_name: std::collections::HashMap<&str, Vec<usize>> =
-                std::collections::HashMap::new();
-            for (idx, symbol) in parsed.fns.iter().enumerate() {
-                if symbol.kind != syntax::SymbolKind::Type {
-                    by_name.entry(symbol.name.as_str()).or_default().push(idx);
-                }
-            }
-            let mut callers_by_callee: Vec<Vec<usize>> = vec![Vec::new(); parsed.fns.len()];
-            for call in parsed.calls.iter().chain(parsed.value_refs.iter()) {
-                if let Some(targets) = by_name.get(call.name.as_str()) {
-                    for &target in targets {
-                        callers_by_callee[target].push(call.caller);
+        let seed_internal_callers =
+            |parsed: &syntax::ParsedFile,
+             other_hashes: &HashSet<(&str, bool, u64)>,
+             terms: &mut HashSet<String>,
+             down_hierarchy: &mut HashSet<String>,
+             up_hierarchy: &mut HashSet<String>| {
+                let mut changed_indices = HashSet::new();
+                for (idx, symbol) in parsed.fns.iter().enumerate() {
+                    let key = (
+                        symbol.qual.as_str(),
+                        symbol.kind == syntax::SymbolKind::Type,
+                        symbol.body_hash,
+                    );
+                    if !other_hashes.contains(&key) {
+                        add_symbol(symbol, terms, down_hierarchy, up_hierarchy);
+                        changed_indices.insert(idx);
                     }
                 }
-            }
-            let mut visited = changed_indices.clone();
-            let mut stack: Vec<usize> = changed_indices.into_iter().collect();
-            while let Some(callee) = stack.pop() {
-                for &caller in &callers_by_callee[callee] {
-                    if visited.insert(caller) {
-                        let symbol = &parsed.fns[caller];
-                        if !symbol.is_test {
-                            add_symbol(symbol, terms, down_hierarchy, up_hierarchy);
+                if changed_indices.is_empty() {
+                    return;
+                }
+                let mut by_name: std::collections::HashMap<&str, Vec<usize>> =
+                    std::collections::HashMap::new();
+                for (idx, symbol) in parsed.fns.iter().enumerate() {
+                    if symbol.kind != syntax::SymbolKind::Type {
+                        by_name.entry(symbol.name.as_str()).or_default().push(idx);
+                    }
+                }
+                let mut callers_by_callee: Vec<Vec<usize>> = vec![Vec::new(); parsed.fns.len()];
+                for call in parsed.calls.iter().chain(parsed.value_refs.iter()) {
+                    if let Some(targets) = by_name.get(call.name.as_str()) {
+                        for &target in targets {
+                            callers_by_callee[target].push(call.caller);
                         }
-                        stack.push(caller);
                     }
                 }
-            }
-        };
+                let mut visited = changed_indices.clone();
+                let mut stack: Vec<usize> = changed_indices.into_iter().collect();
+                while let Some(callee) = stack.pop() {
+                    for &caller in &callers_by_callee[callee] {
+                        if visited.insert(caller) {
+                            let symbol = &parsed.fns[caller];
+                            if !symbol.is_test {
+                                add_symbol(symbol, terms, down_hierarchy, up_hierarchy);
+                            }
+                            stack.push(caller);
+                        }
+                    }
+                }
+            };
         if let Some(parsed) = &base_parsed {
             seed_internal_callers(
                 parsed,

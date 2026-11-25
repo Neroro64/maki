@@ -101,7 +101,7 @@ impl App {
             detail_cache: HashMap::new(),
         };
         warmup_paths(app.a.nodes.values().map(|n| n.file.as_str()));
-        app.reset_default_expansion();
+        app.expand_to_changes();
         app.rebuild();
         let any_grouped = app
             .rows
@@ -119,6 +119,88 @@ impl App {
             }
         }
         app
+    }
+
+    fn compute_change_reaching_nodes(&self) -> HashSet<String> {
+        let mut reaching: HashSet<String> = self
+            .a
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.status.is_change())
+            .map(|(k, _)| k.clone())
+            .collect();
+        loop {
+            let mut added = false;
+            for (key, node) in &self.a.nodes {
+                if reaching.contains(key) || (self.focus_mode && !node.relevant) {
+                    continue;
+                }
+                let reaches = node
+                    .callees
+                    .iter()
+                    .chain(node.implementations.iter())
+                    .chain(node.consumers.iter())
+                    .any(|child| child != key && reaching.contains(child));
+                if reaches {
+                    reaching.insert(key.clone());
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        reaching
+    }
+
+    fn expand_to_changes(&mut self) {
+        self.expanded.clear();
+        let reaching = self.compute_change_reaching_nodes();
+        loop {
+            let rows =
+                analysis::build_grouped_rows(&self.a, &self.roots, &self.expanded, self.focus_mode);
+            let mut added = false;
+            for r in rows {
+                if !r.has_children {
+                    continue;
+                }
+                let should_expand = if r.group_label.is_some() {
+                    true
+                } else {
+                    let direct_kids = analysis::children_of(&self.a, &r.key, self.focus_mode);
+                    let has_changed_descendant = direct_kids.iter().any(|c| reaching.contains(c));
+                    // Also expand if `r` absorbed a sub-trie (e.g. changed Type header absorbing changed methods)
+                    let has_absorbed_children = direct_kids.is_empty();
+                    has_changed_descendant || has_absorbed_children
+                };
+                if should_expand && self.expanded.insert(r.expand_key) {
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
+    fn expand_all(&mut self) {
+        loop {
+            let rows =
+                analysis::build_grouped_rows(&self.a, &self.roots, &self.expanded, self.focus_mode);
+            let mut added = false;
+            for r in rows {
+                if r.has_children && self.expanded.insert(r.expand_key) {
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
+    fn collapse_all(&mut self) {
+        self.expanded.clear();
     }
 
     fn reset_default_expansion(&mut self) {
@@ -985,6 +1067,16 @@ impl App {
                 self.rebuild();
                 self.flash = Some("collapsed to roots".into());
             }
+            KeyCode::Char('E') => {
+                self.collapse_all();
+                self.rebuild();
+                self.flash = Some("collapsed all".into());
+            }
+            KeyCode::Char('X') => {
+                self.expand_all();
+                self.rebuild();
+                self.flash = Some("expanded all".into());
+            }
             KeyCode::Char('x') => {
                 if let Some(base) = self.rows.get(self.sel) {
                     let root_id = base.id.clone();
@@ -1291,7 +1383,7 @@ pub fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let help = if let Some(msg) = flash {
         format!(" {msg}")
     } else {
-        " j/k move · Ctrl+D/U page · H/L scroll · enter/z expand · Z all gaps · x subtree · e collapse · f focus · tab pane · ? help · q quit "
+        " j/k move · Ctrl+D/U page · H/L scroll · enter/z expand · Z all gaps · x/X expand · e/E collapse · f focus · tab pane · ? help · q quit "
             .to_string()
     };
     f.render_widget(
@@ -1519,9 +1611,10 @@ pub fn build_help_lines(include_annotations: bool) -> Vec<Line<'static>> {
         ),
         key_row("h", "Collapse current node, or jump to & collapse parent"),
         key_row(
-            "x / e",
-            "Expand subtree (5 levels) / Reset & collapse to roots",
+            "x / X",
+            "Expand subtree (5 levels) / Expand all nodes & groups",
         ),
+        key_row("e / E", "Collapse to roots / Collapse all nodes & groups"),
         key_row("f", "Toggle focus mode (changes-only vs full subtree)"),
         key_row("H / L", "Scroll tree horizontally by 8 columns"),
         Line::from(""),
@@ -2410,6 +2503,7 @@ mod tests {
         let head = base.replace("target();", "target(); target();");
         let a = analyze(&base, &head);
         let mut app = App::new(a, vec![analysis::node_key("src/lib.rs", "caller")], false);
+        app.handle_key(KeyCode::Enter);
         app.handle_key(KeyCode::Down);
         assert_eq!(
             app.selected_key(),
@@ -2996,7 +3090,19 @@ public sealed class IssueOwnershipSettings(string defaultOwner, string infraOwne
             .collect();
         let mut app = App::new(a, roots, true);
 
-        // Before expanding the coupled callers, verify bracket + collapsed preview hint
+        // Initial view expands all subtrees needed to make every change visible;
+        // pressing `e` collapses to roots so we can also test collapsed coupled-caller hints.
+        assert!(
+            app.rows
+                .iter()
+                .any(|r| r.key.ends_with("::ResolveBuildInfrastructureOwnership"))
+        );
+        assert!(
+            app.rows
+                .iter()
+                .any(|r| r.key.ends_with("::GetBuildInfrastructureOwner"))
+        );
+        app.handle_key(KeyCode::Char('e'));
         let create_build_idx = app
             .rows
             .iter()
@@ -3111,6 +3217,9 @@ fn leaf_d() {}
         let entry_key = analysis::node_key("src/lib.rs", "entry");
         let mut app = App::new(a, vec![entry_key], true);
 
+        // Initial view expands all subtrees with changes; `e` collapses back to roots
+        assert!(app.rows.iter().any(|r| r.key.ends_with("::leaf_d")));
+        app.handle_key(KeyCode::Char('e'));
         // Expand sym_a -> reveals unique_x and shared_c [← sym_a, sym_b]
         let a_idx = app
             .rows
@@ -3181,6 +3290,12 @@ fn sub() {}
         let roots = a.entry_points.clone();
         let mut app = App::new(a, roots, true);
 
+        // Initial view already expands `work` to reveal `sub`; `e` collapses back to roots
+        assert_eq!(
+            app.rows.iter().filter(|r| r.key.ends_with("::sub")).count(),
+            1
+        );
+        app.handle_key(KeyCode::Char('e'));
         // Expand alpha::run_a's child `work` -> shows `sub`
         let first_helper_idx = app
             .rows
@@ -3217,5 +3332,73 @@ fn sub() {}
             1,
             "collapsing beta branch must not collapse alpha branch above"
         );
+    }
+
+    #[test]
+    fn initial_review_defaults_to_focus_changes_and_expands_all_changed_subtrees() {
+        let base = r#"
+pub fn entry() {
+    unchanged_mid();
+    clean_branch();
+}
+fn unchanged_mid() {
+    deep_modified();
+}
+fn deep_modified() -> i32 { 1 }
+fn to_be_removed() -> i32 { 9 }
+fn clean_branch() {
+    clean_leaf();
+}
+fn clean_leaf() {}
+"#;
+        let head = r#"
+pub fn entry() {
+    unchanged_mid();
+    clean_branch();
+}
+fn unchanged_mid() {
+    deep_modified();
+    newly_added();
+}
+fn deep_modified() -> i32 { 2 }
+fn newly_added() {}
+fn clean_branch() {
+    clean_leaf();
+}
+fn clean_leaf() {}
+"#;
+        let a = analyze(base, head);
+        let roots: Vec<String> = a
+            .entry_points
+            .iter()
+            .filter(|k| a.nodes.get(*k).is_some_and(|n| n.relevant))
+            .cloned()
+            .collect();
+        let mut app = App::new(a, roots, true);
+        assert!(app.focus_mode);
+
+        let visible_keys: Vec<&str> = app.rows.iter().map(|r| r.key.as_str()).collect();
+        assert!(visible_keys.iter().any(|k| k.ends_with("::entry")));
+        assert!(visible_keys.iter().any(|k| k.ends_with("::unchanged_mid")));
+        assert!(visible_keys.iter().any(|k| k.ends_with("::deep_modified")));
+        assert!(visible_keys.iter().any(|k| k.ends_with("::newly_added")));
+        assert!(visible_keys.iter().any(|k| k.ends_with("::to_be_removed")));
+        assert!(!visible_keys.iter().any(|k| k.ends_with("::clean_branch")));
+        assert!(!visible_keys.iter().any(|k| k.ends_with("::clean_leaf")));
+
+        // Collapse all (`E`) collapses every expandable row
+        app.handle_key(KeyCode::Char('E'));
+        assert!(app.expanded.is_empty());
+        assert!(!app.rows.iter().any(|r| r.key.ends_with("::deep_modified")));
+
+        // Toggle focus off (`f`) and Expand all (`X`) expands even clean branches
+        app.handle_key(KeyCode::Char('f'));
+        assert!(!app.focus_mode);
+        app.handle_key(KeyCode::Char('X'));
+        let all_keys: Vec<&str> = app.rows.iter().map(|r| r.key.as_str()).collect();
+        assert!(all_keys.iter().any(|k| k.ends_with("::deep_modified")));
+        assert!(all_keys.iter().any(|k| k.ends_with("::newly_added")));
+        assert!(all_keys.iter().any(|k| k.ends_with("::clean_branch")));
+        assert!(all_keys.iter().any(|k| k.ends_with("::clean_leaf")));
     }
 }

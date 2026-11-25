@@ -43,9 +43,13 @@ struct Args {
     #[arg(long)]
     tests: bool,
 
-    /// start with unchanged branches hidden
+    /// start with unchanged branches hidden (default in TUI; pass --no-focus for full tree)
     #[arg(long)]
     focus: bool,
+
+    /// start with unchanged branches visible in the TUI
+    #[arg(long, conflicts_with = "focus")]
+    no_focus: bool,
 }
 
 fn main() -> Result<()> {
@@ -270,7 +274,7 @@ fn main() -> Result<()> {
     }
 
     // TUI
-    let mut app = ui::App::new(a, roots, args.focus);
+    let mut app = ui::App::new(a, roots, !args.no_focus);
     app.flash = Some(format!("reviewing {base} → {head_label}"));
     ui::run(&mut app)?;
     Ok(())

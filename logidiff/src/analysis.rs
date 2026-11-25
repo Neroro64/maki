@@ -1246,8 +1246,7 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                     },
                 );
             }
-            let all_head_files: Vec<&FileData> =
-                head_files.iter().chain(extras.iter()).collect();
+            let all_head_files: Vec<&FileData> = head_files.iter().chain(extras.iter()).collect();
             attach_contracts(&head_contracts_saved, &all_head_files, &mut nodes);
             let refreshed_universe = Universe::new(all_head_files, head_contracts_saved);
             for (file, data) in head_files.iter().enumerate() {
@@ -2372,11 +2371,13 @@ fn mark_relevant(nodes: &mut HashMap<String, Node>) {
                 && n.callers.is_empty()
                 && (has_prod_external_caller(n)
                     || n.contracts.iter().any(|c| {
-                        nodes
-                            .get(c)
-                            .is_some_and(|cn| cn.kind != SymbolKind::Type && has_prod_external_caller(cn))
+                        nodes.get(c).is_some_and(|cn| {
+                            cn.kind != SymbolKind::Type && has_prod_external_caller(cn)
+                        })
                     })
-                    || !nodes.values().any(|other| other.file == n.file && other.status.is_change()))
+                    || !nodes
+                        .values()
+                        .any(|other| other.file == n.file && other.status.is_change()))
         })
         .map(|n| n.key.clone())
         .collect();
@@ -3501,10 +3502,7 @@ pub fn children_with_kind(a: &Analysis, key: &str, focus: bool) -> Vec<(String, 
                 && !cn.status.is_change()
                 && cn.kind == SymbolKind::Declaration
                 && !cn.implementations.is_empty()
-                && cn
-                    .implementations
-                    .iter()
-                    .all(|imp| n.callees.contains(imp))
+                && cn.implementations.iter().all(|imp| n.callees.contains(imp))
             {
                 return false;
             }

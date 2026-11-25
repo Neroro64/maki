@@ -44,7 +44,7 @@ const MODAL_PERCENT: u16 = 90;
 const SNIPPET_CONTEXT: usize = 2;
 const EDITOR_CONTEXT_HEIGHT: u16 = 3;
 const EDITOR_MIN_HEIGHT: u16 = 3;
-const REVIEW_HELP: &str = "v select · c annotate · a notes · s send · Tab pane · j/k move · Enter/z expand · ? help · q close";
+const REVIEW_HELP: &str = "v select · c annotate · a notes · s send · Tab pane · j/k move · Enter/z expand · X/E all · ? help · q close";
 const EDITOR_HINTS: &[(&str, &str)] =
     &[("Ctrl+S", "Save"), ("Enter", "Newline"), ("Esc", "Cancel")];
 const ANNOTATION_HINTS: &[(&str, &str)] = &[
