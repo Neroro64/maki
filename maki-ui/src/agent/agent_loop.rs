@@ -317,6 +317,7 @@ impl AgentLoop {
                 tool_output_lines: self.seed.tool_output_lines,
                 permissions: Arc::clone(&self.seed.permissions),
                 session_id: Some(self.seed.session_id.clone()),
+                request_session_id: None,
                 background_for: BackgroundFor::None,
                 task_id: None,
                 mailbox: Some(self.mailbox.clone()),

@@ -127,6 +127,11 @@ pub struct AgentParams {
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
     pub session_id: Option<SessionRef>,
+    /// Cache-affinity key sent to the provider on LLM requests (`None` falls
+    /// back to `session_id`). Subagents set their own stable key here so a
+    /// task child's distinct system prompt and tool set never evict the
+    /// parent's sticky prefix cache while tools still see `session_id`.
+    pub request_session_id: Option<SessionRef>,
     /// The chat session a plugin runs this agent for in the background, `None`
     /// for anything the user watches. Its file writes are denied while the
     /// chat plans, see [`crate::AgentSeed::background_write_block`]. Subagents
@@ -195,6 +200,7 @@ pub struct Agent<'h> {
     permissions: Arc<PermissionManager>,
     opts: RequestOptions,
     session_id: Option<SessionRef>,
+    request_session_id: Option<SessionRef>,
     background_for: BackgroundFor,
     /// The task whose tool call opened this run: `Some` only for a task
     /// child, whose hooks see it as `ctx.task_id`.
@@ -249,6 +255,9 @@ impl<'h> Agent<'h> {
             reauth_attempts: 0,
             overflow_recoveries: 0,
             opts: RequestOptions::default(),
+            request_session_id: params
+                .request_session_id
+                .or_else(|| params.session_id.clone()),
             session_id: params.session_id,
             background_for: params.background_for,
             task_id: params.task_id,
@@ -733,7 +742,7 @@ impl<'h> Agent<'h> {
                 tools,
                 opts: self.opts,
                 output_budget: self.config.max_turn_output,
-                session_id: self.session_id.as_ref(),
+                session_id: self.request_session_id.as_ref(),
                 retry: self.timeouts.retry,
             },
             Some(self.gauge),
@@ -1497,6 +1506,7 @@ pub(crate) mod testing {
                 Arc::default(),
             )),
             session_id: None,
+            request_session_id: None,
             background_for: BackgroundFor::None,
             task_id: None,
             mailbox: None,
@@ -1613,6 +1623,7 @@ mod tests {
         tools: Value,
         messages: Vec<Value>,
         opts: RequestOptions,
+        session_id: Option<String>,
     }
 
     impl CapturedRequest {
@@ -1670,7 +1681,7 @@ mod tests {
             tools: &'a Value,
             _: &'a UnboundedSender<ProviderEvent>,
             opts: RequestOptions,
-            _: Option<&'a SessionRef>,
+            session_id: Option<&'a SessionRef>,
         ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
             Box::pin(async move {
                 self.requests.lock().unwrap().push(CapturedRequest {
@@ -1682,6 +1693,7 @@ mod tests {
                         .map(|m| serde_json::to_value(m).unwrap())
                         .collect(),
                     opts,
+                    session_id: session_id.map(|s| s.as_str().to_owned()),
                 });
                 let mut responses = self.responses.lock().unwrap();
                 assert!(!responses.is_empty(), "MockProvider: no more responses");
@@ -4775,6 +4787,41 @@ mod tests {
             .expect("valid session id");
         agent.session_id = Some(session.clone());
         assert_eq!(agent.tool_context(Arc::default()).session_id, Some(session));
+    }
+
+    #[tokio::test]
+    async fn request_session_id_overrides_provider_key_without_changing_tool_session() {
+        let mut history = History::new(Vec::new());
+        let provider = MockProvider::new(vec![text_response(StopReason::EndTurn)]);
+        let requests = Arc::clone(&provider.requests);
+        let chat_session = SessionRef::generate();
+        let subagent_session = SessionRef::generate();
+        let mut params = agent_params(Arc::new(provider), default_model());
+        params.session_id = Some(chat_session.clone());
+        params.request_session_id = Some(subagent_session.clone());
+
+        let (raw_tx, _rx) = unbounded_channel();
+        let mut gauge = ContextGauge::default();
+        let mut agent = Agent::new(
+            params,
+            AgentRunParams {
+                history: &mut history,
+                gauge: &mut gauge,
+                event_tx: EventSender::new(raw_tx, 0),
+                context: sync_builder(|_, _| fixed_context()),
+            },
+        );
+        assert_eq!(
+            agent.tool_context(Arc::default()).session_id,
+            Some(chat_session)
+        );
+
+        agent.run(default_input()).await.unwrap();
+        let captured = requests.lock().unwrap();
+        assert_eq!(
+            captured[0].session_id.as_deref(),
+            Some(subagent_session.as_str())
+        );
     }
 
     fn answer_only(

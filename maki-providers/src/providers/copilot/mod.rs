@@ -284,7 +284,7 @@ impl Copilot {
         turn: CopilotTurn<'_>,
     ) -> Result<StreamResponse, AgentError> {
         let auth = self.auth().await?;
-        let body = chat_completions_body(
+        let mut body = chat_completions_body(
             turn.model,
             turn.messages,
             turn.system,
@@ -292,6 +292,9 @@ impl Copilot {
             turn.thinking,
             self.reasoning_info(&turn.model.id).as_deref(),
         );
+        if let Some(session) = turn.session_id {
+            body[PROMPT_CACHE_KEY_FIELD] = json!(session.as_str());
+        }
 
         let request = self.build_post(&auth, CHAT_COMPLETIONS_PATH, &body, &[], turn.session_id)?;
         super::ok_sse(&self.client, request, self.stream_timeout, |body| {
@@ -1719,6 +1722,8 @@ mod tests {
             recorded[2].headers.values(INTERACTION_ID_HEADER),
             [session.as_str()]
         );
+        let chat_body: Value = serde_json::from_slice(&recorded[1].body).unwrap();
+        assert_eq!(chat_body[PROMPT_CACHE_KEY_FIELD], session.as_str());
         let responses_body: Value = serde_json::from_slice(&recorded[2].body).unwrap();
         assert_eq!(responses_body[PROMPT_CACHE_KEY_FIELD], session.as_str());
     }

@@ -8,6 +8,7 @@ use maki_providers::{
     ContentBlock, ContextGauge, IMAGE_PLACEHOLDER, Message, Model, RequestOptions, Role,
     StreamResponse,
 };
+use maki_storage::id::SessionRef;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
@@ -251,6 +252,11 @@ pub(super) async fn compact_history(
     compaction_history.push(Message::user(summary_prompt(config, instructions)));
 
     let empty_tools = serde_json::json!([]);
+    // Distinct per compaction so the summariser's system prompt and empty tool
+    // list never overwrite the live conversation's sticky cache entry, while
+    // gateways that require a session header (e.g. OpenCode Go) still get one,
+    // and retries within the same compaction reuse it.
+    let summary_session = hooks.session_id.map(|_| SessionRef::generate());
     let mut retried_empty = false;
     let mut attempt = 0;
 
@@ -265,7 +271,7 @@ pub(super) async fn compact_history(
                 tools: &empty_tools,
                 opts: RequestOptions::default(),
                 output_budget: SUMMARY_OUTPUT_BUDGET,
-                session_id: hooks.session_id,
+                session_id: summary_session.as_ref(),
                 retry,
             },
             // A stripped, collapsed rewrite of the transcript, far smaller than
@@ -771,7 +777,6 @@ mod tests {
         ContentBlock, Message, Model, ProviderEvent, RequestOptions, Role, StopReason,
         StreamResponse, TokenUsage,
     };
-    use maki_storage::id::SessionRef;
     use serde_json::Value;
     use test_case::test_case;
     use tokio::sync::mpsc::UnboundedSender;
@@ -2105,17 +2110,37 @@ mod tests {
         assert!(requests[1].len() < requests[0].len(), "{NO_COLLAPSE_MSG}");
     }
 
-    /// OpenCode Go rejects requests without `x-opencode-session`, so the
-    /// summariser must ride the conversation's id like every other turn.
+    /// OpenCode Go rejects requests without `x-opencode-session`, while cache
+    /// routers key sticky prefix slots off `session_id`: compaction sends its
+    /// own fresh `SessionRef` when the conversation has one, keeping `None`
+    /// when it does not.
+    #[test_case(true ; "with_session")]
+    #[test_case(false ; "without_session")]
     #[tokio::test]
-    async fn compact_history_sends_the_conversations_session_id() {
-        let provider = MockProvider::new(vec![Ok(text_response(StopReason::EndTurn))]);
+    async fn compact_history_isolates_summary_session_id(has_session: bool) {
+        let provider = MockProvider::new(vec![
+            Ok(StreamResponse {
+                stop_reason: Some(StopReason::EndTurn),
+                ..Default::default()
+            }),
+            Ok(text_response(StopReason::EndTurn)),
+        ]);
         let mut history = History::new(vec![Message::user("work".into())]);
-        let session = SessionRef::generate();
-        summarize_history(&provider, &mut history, 0, Some(&session)).await;
+        let session = has_session.then(SessionRef::generate);
+        summarize_history(&provider, &mut history, 0, session.as_ref()).await;
 
         let sessions = provider.sessions.lock().unwrap();
-        assert_eq!(sessions[0].as_deref(), Some(session.as_str()));
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0], sessions[1]);
+        match &session {
+            Some(chat) => {
+                let sent = sessions[0]
+                    .as_deref()
+                    .expect("compaction sent a session id");
+                assert_ne!(sent, chat.as_str());
+            }
+            None => assert!(sessions[0].is_none()),
+        }
     }
 
     const CARRIED: &str = "answer this next";

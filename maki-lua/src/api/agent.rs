@@ -35,7 +35,7 @@ use maki_providers::{
     AgentError, ContentBlock, ContextGauge, Message, Model, RequestOptions, Role, ThinkingConfig,
     add_cost,
 };
-use maki_storage::id::MakiId;
+use maki_storage::id::{MakiId, SessionRef};
 use maki_storage::now_epoch;
 use maki_storage::sessions::StoredThinking;
 use mlua::{
@@ -1417,6 +1417,7 @@ async fn session(
             tool_output_lines: maki_config::ToolOutputLines::default(),
             permissions: Arc::clone(&agent_ctx.permissions),
             session_id: agent_ctx.session_id.clone(),
+            request_session_id: Some(SessionRef::from(cancellation.mailbox.session_id())),
             // Once the call moves nobody watches its writes, so they honour
             // plan mode from then on, as other background work does.
             background_for: match (&agent_ctx.background_for, &agent_ctx.call) {
@@ -2334,7 +2335,6 @@ mod tests {
         AgentError, ContentBlock, Message, ModelInfo, ProviderEvent, Role, StopReason,
         StreamResponse, TokenUsage,
     };
-    use maki_storage::id::SessionRef;
     use maki_storage::sessions::Effort;
     use mlua::AnyUserData;
     use serde_json::json;
@@ -2814,6 +2814,75 @@ mod tests {
             requests.recv().unwrap(),
             format!("You analyse evidence.\n{CHILD_INSTRUCTIONS}")
         );
+    }
+
+    struct SessionIdRecorder(Sender<Option<String>>);
+
+    impl Provider for SessionIdRecorder {
+        fn stream_message<'a>(
+            &'a self,
+            _: &'a Model,
+            _: &'a [Message],
+            _: &'a str,
+            _: &'a JsonValue,
+            _: &'a UnboundedSender<ProviderEvent>,
+            _: RequestOptions,
+            session_id: Option<&'a SessionRef>,
+        ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+            Box::pin(async move {
+                self.0
+                    .send(session_id.map(|s| s.as_str().to_owned()))
+                    .unwrap();
+                Ok(StreamResponse {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::Text {
+                            text: CHILD_RESPONSE.into(),
+                        }],
+                        ..Default::default()
+                    },
+                    stop_reason: Some(StopReason::EndTurn),
+                    ..Default::default()
+                })
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_requests_use_own_stable_cache_key_instead_of_parent_session_id() {
+        let lua = Lua::new();
+        lua.set_app_data(SpawnedTasks::default());
+        lua.set_app_data(Arc::new(ToolRegistry::new()));
+        let (sent, seen) = channel();
+        let parent_session = SessionRef::generate();
+        let mut ctx = stub_ctx_with(&AgentMode::Build, None, Some(PARENT_ID));
+        ctx.session_id = Some(parent_session.clone());
+        ctx.provider = Arc::new(SessionIdRecorder(sent));
+
+        let sess = native_session(&lua, &ctx).await;
+        for _ in 0..2 {
+            let (_, error) = prompt(lua.clone(), sess.borrow().unwrap(), CHILD_REQUEST.into())
+                .await
+                .unwrap();
+            assert!(error.is_none(), "{error:?}");
+        }
+        let inner_state = sess.borrow::<LuaSession>().unwrap().inner.clone();
+        assert_eq!(
+            inner_state.lock().await.params.session_id,
+            Some(parent_session.clone())
+        );
+        close(lua.clone(), sess.borrow().unwrap(), None)
+            .await
+            .unwrap();
+
+        let first = seen.recv().unwrap().expect("subagent sent a session id");
+        let second = seen.recv().unwrap().expect("subagent sent a session id");
+        assert_eq!(first, second);
+        assert_ne!(first, parent_session.as_str());
     }
 
     const NUDGE: &str = "new finding, hurry up";
