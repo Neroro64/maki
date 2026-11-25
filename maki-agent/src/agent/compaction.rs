@@ -235,20 +235,34 @@ pub(super) async fn compact_history(
     let summarized = history.len().saturating_sub(carry_len);
     let mut compaction_history: Vec<Message> = history.as_slice()[..summarized].to_vec();
     remove_orphaned_tool_results(&mut compaction_history);
-    strip_images(&mut compaction_history);
-    strip_thinking(&mut compaction_history);
-    prepare_collapse(hooks, &mut compaction_history, RECENT_TOOL_RESULT_BUDGET).await;
 
     if snapcompact::strategy_enabled(config, hooks.model) {
+        // Snapcompact bounds every tool result to `TOOL_RESULT_MAX_CHARS` and
+        // every thinking block to `THINKING_MAX_CHARS` during serialization,
+        // and extracts prior snapcompact frames before replacing user/tool
+        // screenshots. Still fire `agent.compact.prepare` with an unbounded
+        // default so plugins that explicitly collapse secrets or noise take
+        // effect without `RECENT_TOOL_RESULT_BUDGET` wiping older tool outputs.
+        prepare_collapse(hooks, &mut compaction_history, usize::MAX).await;
+        let merged_instructions = join_lines([
+            config.compaction_instructions.as_deref(),
+            instructions,
+        ]);
         return snapcompact::history(
             history,
             compaction_history,
             summarized,
-            event_tx,
+            snapcompact::frame_budget(usable(hooks.model, config)),
+            merged_instructions.as_deref(),
+            config.post_compaction_instructions.as_deref(),
             compact_start,
-        );
+        )
+        .await;
     }
 
+    strip_images(&mut compaction_history);
+    strip_thinking(&mut compaction_history);
+    prepare_collapse(hooks, &mut compaction_history, RECENT_TOOL_RESULT_BUDGET).await;
     compaction_history.push(Message::user(summary_prompt(config, instructions)));
 
     let empty_tools = serde_json::json!([]);
@@ -1062,30 +1076,84 @@ mod tests {
     #[tokio::test]
     async fn compact_archives_history_as_frames_for_vision_models() {
         let provider = MockProvider::new(Vec::new());
-        let mut history = History::new(vec![
-            Message::user("first".into()),
-            Message {
+        let mut entries = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "first".into(),
+            }],
+            created_at: Some(100),
+            ..Default::default()
+        }];
+        // Exceed the 64 KiB `RECENT_TOOL_RESULT_BUDGET` so an older tool result
+        // proves snapcompact does not wipe earlier tool outputs to `[tool result]`.
+        entries.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::tool_use(
+                "old_tool",
+                "read",
+                serde_json::json!({"path": "important_spec.md"}),
+            )],
+            created_at: Some(200),
+            ..Default::default()
+        });
+        entries.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::tool_result(
+                "old_tool",
+                "CRITICAL_SPEC_TOKEN_42",
+                false,
+            )],
+            created_at: Some(300),
+            ..Default::default()
+        });
+        for i in 0..40 {
+            let id = format!("bulk_{i}");
+            entries.push(Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: "reply".into(),
-                }],
+                content: vec![ContentBlock::tool_use(
+                    &id,
+                    "read",
+                    serde_json::json!({"path": format!("f{i}.rs")}),
+                )],
+                created_at: Some(400 + i),
                 ..Default::default()
-            },
-        ]);
+            });
+            entries.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(&id, "x".repeat(2_000), false)],
+                created_at: Some(400 + i),
+                ..Default::default()
+            });
+        }
+        entries.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: CARRIED.into(),
+            }],
+            created_at: Some(5_000),
+            ..Default::default()
+        });
+
+        let mut history = History::new(entries);
         let registry = ToolRegistry::new();
-        let (raw_tx, _rx) = unbounded_channel();
+        let (raw_tx, mut rx) = unbounded_channel();
         let mut vision_model = default_model();
         vision_model.supports_vision_override = Some(true);
         let cancel = CancelToken::none();
+        let config = AgentConfig {
+            compaction_instructions: Some(CONFIG_EXTRA.into()),
+            post_compaction_instructions: Some(POST.into()),
+            ..Default::default()
+        };
         let compacted = compact_history(
             &provider,
             &vision_model,
             &mut history,
             &EventSender::new(raw_tx, 0),
             &test_hooks(&registry, None, &vision_model, &cancel),
-            &AgentConfig::default(),
-            None,
-            0,
+            &config,
+            Some(REQUEST_EXTRA),
+            1,
             RetryPolicy::default(),
             &RunLedger::default(),
         )
@@ -1096,18 +1164,50 @@ mod tests {
             provider.requests.lock().unwrap().is_empty(),
             "snapcompact must not call the summarizer"
         );
-        let msgs = history.as_slice();
-        assert_eq!(msgs.len(), 2);
+        let events: Vec<_> = iter::from_fn(|| rx.try_recv().ok())
+            .map(|e| e.event)
+            .collect();
         assert!(
-            msgs[1]
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnComplete(_))),
+            "snapcompact must not spam TurnComplete with bitmap frames"
+        );
+
+        let msgs = history.as_slice();
+        // [archive User, ack Assistant, synthetic POST, carried User]
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(compacted.carried, 1);
+        assert!(matches!(msgs[0].role, Role::User));
+        assert_eq!(msgs[0].display_text.as_deref(), Some(""));
+        assert!(matches!(msgs[1].role, Role::Assistant));
+        assert!(
+            msgs[0]
                 .content
                 .iter()
-                .any(|b| matches!(b, ContentBlock::Text { .. })),
-            "the archive keeps a text edge"
+                .any(|b| matches!(b, ContentBlock::Image { .. })),
+            "long archive produces PNG frames in the User message"
         );
-        assert_eq!(compacted.carried, 0);
+        assert!(
+            msgs[0]
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("CRITICAL_SPEC_TOKEN_42"))),
+            "older tool results beyond 64 KiB survive in snapcompact"
+        );
+        assert!(
+            msgs[0]
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text.contains(CONFIG_EXTRA) && text.contains(REQUEST_EXTRA))),
+            "compaction instructions are preserved on the archive"
+        );
+        assert_eq!(msgs[2].first_text_content(), Some(POST));
+        assert_eq!(msgs[3].first_text_content(), Some(CARRIED));
+        for msg in msgs {
+            assert_eq!(msg.created_at, Some(5_000));
+        }
     }
-
     /// The measurement the gauge holds is of the transcript compaction just
     /// deleted, so left in place it sizes every later turn against a session
     /// that no longer exists.

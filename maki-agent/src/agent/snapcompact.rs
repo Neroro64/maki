@@ -7,36 +7,50 @@
 //! of the billed-token cost of the raw text. No model, API key, or network is
 //! involved, so it is also safe for overflow recovery.
 //!
-//! The rebuilt context is ordered oldest→newest: verbatim text at the oldest
-//! edge, the imaged middle, then verbatim text at the newest edge.
+//! The rebuilt context is ordered oldest→newest inside a synthetic user turn:
+//! verbatim text at the oldest edge, the imaged middle, then verbatim text at
+//! the newest edge, followed by an assistant acknowledgement so every provider
+//! receives valid alternating turns with images in the user role.
 
-use std::collections::HashMap;
-use std::io::Cursor;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use image::{ImageBuffer, Luma};
+use image::ExtendedColorType;
+use image::ImageEncoder as _;
+use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use maki_config::{AgentConfig, CompactionStrategy};
-use maki_providers::{ContentBlock, ImageMediaType, ImageSource, Message, Model, Role, TokenUsage};
+use maki_providers::{ContentBlock, ImageMediaType, ImageSource, Message, Model, Role};
+use maki_storage::blocking;
 use tracing::info;
 
 use super::compaction::Compacted;
-use super::history::{History, strip_thinking};
-use crate::{AgentError, AgentEvent, EventSender, TurnCompleteEvent};
+use super::history::{History, stamp_new};
+use crate::AgentError;
 
-/// Frame edge in pixels. Width fixes the grid columns; height hugs the rows the
-/// text actually fills.
-const FRAME_SIZE: usize = 2576;
-/// Upper bound on frames carried in one archive; the imaged middle foveates
-/// (drops its oldest dense slice) past this.
-const MAX_FRAMES: usize = 80;
-/// Verbatim text kept at each chronological edge, in pages of frame capacity.
-const TEXT_EDGE_PAGES: usize = 1;
-/// Tool-result bodies are truncated head+tail to keep the archive dense.
+/// Matches `maki_providers::image::MAX_EDGE` (1568px): any larger dimension
+/// forces `adapt_images_for_model` (and Anthropic server-side) to downscale
+/// with a triangle filter, blurring 1px strokes in the 8x13 bitmap font.
+const FRAME_SIZE: usize = 1568;
+/// Hard cap on frames in one archive, staying well below `MAX_IMAGES` (100) so
+/// later tool screenshots do not evict archive pages and void the prompt cache.
+const MAX_FRAMES: usize = 32;
+/// Matches `maki_providers::tokens::TOKENS_PER_IMAGE` so frame budgeting agrees
+/// with `ContextGauge::reset`.
+const TOKENS_PER_FRAME: u32 = 1_500;
+/// Fraction of usable context window a snapcompact archive's frames may occupy.
+const MAX_WINDOW_FRACTION: u32 = 4;
+/// Verbatim text kept at each chronological edge, in characters (~3k tokens per
+/// edge), preserving formatting and indentation on the oldest and newest turns.
+const TEXT_EDGE_CHARS: usize = 12_000;
 const TOOL_RESULT_MAX_CHARS: usize = 2_000;
 const TOOL_ARG_MAX_CHARS: usize = 500;
 const TOOL_CALL_MAX_CHARS: usize = 2_000;
-const TRUNCATE_HEAD_RATIO: f64 = 0.6;
+const THINKING_MAX_CHARS: usize = 1_000;
+const TRUNCATE_HEAD_NUM: usize = 3;
+const TRUNCATE_HEAD_DEN: usize = 5;
 /// Zero-width ink toggles: shift-out/shift-in wrap dim tool-output spans.
 const DIM_ON: char = '\u{0e}';
 const DIM_OFF: char = '\u{0f}';
@@ -46,7 +60,14 @@ const NEWLINE_GLYPH: char = '\u{2588}';
 const INK_BLACK: u8 = 0;
 const INK_DIM: u8 = 128;
 const BG: u8 = 255;
-const MAX_FRAME_SIZE: usize = 16_384;
+
+const ARCHIVE_HEADER: &str = concat!(
+    "[Compacted session history archive]\n",
+    "Legend: ¶user = user message, ¶think = reasoning, ¶ai = assistant reply, ",
+    "¶call = tool call with <out>…</out> output. ",
+    "In imaged frames, solid black blocks (█) mark line breaks.\n\n",
+);
+const ARCHIVE_ACK: &str = "Understood. I have reviewed the archived session history above and am ready to continue.";
 
 const FONT_8X13: &str = include_str!("fonts/8x13.bdf");
 
@@ -123,16 +144,24 @@ fn parse_bdf(text: &str, cell_w: usize, cell_h: usize) -> Font {
 }
 
 fn font() -> &'static Font {
-    static FONT: std::sync::OnceLock<Font> = std::sync::OnceLock::new();
+    static FONT: OnceLock<Font> = OnceLock::new();
     FONT.get_or_init(|| parse_bdf(FONT_8X13, 8, 13))
 }
 
 /// Grid geometry shared with the pagination math: columns across the frame,
 /// rows down it, and the cell budget one frame holds.
-fn geometry() -> (usize, usize, usize) {
+pub(crate) fn geometry() -> (usize, usize, usize) {
     let cols = FRAME_SIZE / font().cell_w;
     let rows = FRAME_SIZE / font().cell_h;
     (cols, rows, cols * rows)
+}
+
+/// Scales `MAX_FRAMES` down on small context windows so the archive itself
+/// cannot exceed a quarter of usable context and immediately re-trigger
+/// auto-compaction on the next turn.
+pub(crate) fn frame_budget(usable_tokens: u32) -> usize {
+    let by_window = (usable_tokens / MAX_WINDOW_FRACTION / TOKENS_PER_FRAME) as usize;
+    by_window.clamp(1, MAX_FRAMES)
 }
 
 /// East Asian Wide / Fullwidth code points occupy two grid cells.
@@ -166,78 +195,120 @@ const fn cell_units(cp: u32) -> usize {
     }
 }
 
-fn truncate_for_summary(text: &str, max_chars: usize, head_ratio: f64) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
+fn char_byte_offset(text: &str, char_pos: usize) -> usize {
+    text.char_indices()
+        .nth(char_pos)
+        .map_or(text.len(), |(idx, _)| idx)
+}
+
+fn truncate_for_summary(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
         return text.to_string();
     }
-    let head = (max_chars as f64 * head_ratio) as usize;
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    let head = max_chars * TRUNCATE_HEAD_NUM / TRUNCATE_HEAD_DEN;
     let tail = max_chars - head;
-    let mut out: String = chars[..head].iter().collect();
+    let head_end = char_byte_offset(text, head);
+    let tail_start = char_byte_offset(text, total_chars - tail);
+    let mut out = String::with_capacity(head_end + (text.len() - tail_start) + '…'.len_utf8());
+    out.push_str(&text[..head_end]);
     out.push('…');
-    out.extend(chars[chars.len() - tail..].iter());
+    out.push_str(&text[tail_start..]);
     out
 }
 
 fn strip_dim_markers(text: &str) -> String {
+    if !text.contains([DIM_ON, DIM_OFF]) {
+        return text.to_string();
+    }
     text.chars()
-        .filter(|c| *c != DIM_ON && *c != DIM_OFF)
+        .filter(|&c| c != DIM_ON && c != DIM_OFF)
         .collect()
 }
 
 /// Serialize the discarded history into conversation-dense text. Tool results
 /// merge into their originating call, truncated head+tail and wrapped in a dim
 /// span so archived conversation reads louder than archived tool noise.
+///
+/// Prior snapcompact archives keep their existing PNG frames via [`extract_prior_frames`]
+/// rather than turning them into `[image]` placeholders, so their framing headers
+/// are stripped if re-serialized.
 pub fn serialize(messages: &[Message]) -> String {
-    let results: HashMap<&str, &str> = messages
+    let results: HashMap<&str, (&str, bool)> = messages
         .iter()
         .flat_map(|msg| msg.content.iter())
         .filter_map(|block| match block {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
+                is_error,
                 ..
-            } => Some((tool_use_id.as_str(), content.as_str())),
+            } => Some((tool_use_id.as_str(), (content.as_str(), *is_error))),
             _ => None,
         })
         .collect();
 
     let mut parts: Vec<String> = Vec::new();
-    let mut merged: Vec<&str> = Vec::new();
+    let mut merged: HashSet<&str> = HashSet::with_capacity(results.len());
 
     for msg in messages {
+        if msg.is_context_update() {
+            continue;
+        }
         match msg.role {
             Role::User => {
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => {
-                            let text = strip_dim_markers(text);
-                            if !text.trim().is_empty() {
-                                parts.push(format!("¶user: {}", text.trim()));
+                            let cleaned = strip_archive_chrome(&strip_dim_markers(text));
+                            let trimmed = cleaned.trim();
+                            if !trimmed.is_empty() {
+                                if trimmed.starts_with("¶user:")
+                                    || trimmed.starts_with("¶ai:")
+                                    || trimmed.starts_with("¶call:")
+                                    || trimmed.starts_with("¶think:")
+                                {
+                                    parts.push(trimmed.to_string());
+                                } else {
+                                    parts.push(format!("¶user: {trimmed}"));
+                                }
                             }
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            is_error,
                             ..
                         } => {
-                            if merged.contains(&tool_use_id.as_str()) {
+                            if merged.contains(tool_use_id.as_str()) {
                                 continue;
                             }
-                            parts.push(format!("¶call:\n{}", render_result_block(content)));
+                            parts.push(format!(
+                                "¶call:\n{}",
+                                render_result_block(content, *is_error)
+                            ));
                         }
                         _ => {}
                     }
                 }
             }
             Role::Assistant => {
+                if msg.content.len() == 1
+                    && matches!(&msg.content[0], ContentBlock::Text { text } if text == ARCHIVE_ACK)
+                {
+                    continue;
+                }
                 let mut pending_thinking: Vec<String> = Vec::new();
                 let mut pending_text: Vec<String> = Vec::new();
                 let flush = |parts: &mut Vec<String>,
                              thinking: &mut Vec<String>,
                              text: &mut Vec<String>| {
                     if !thinking.is_empty() {
-                        parts.push(format!("¶think: {}", thinking.join("\n")));
+                        let combined = truncate_for_summary(&thinking.join("\n"), THINKING_MAX_CHARS);
+                        parts.push(format!("¶think: {DIM_ON}{combined}{DIM_OFF}"));
                     }
                     if !text.is_empty() {
                         parts.push(format!("¶ai: {}", text.join("\n")));
@@ -263,34 +334,13 @@ pub fn serialize(messages: &[Message]) -> String {
                             id, name, input, ..
                         } => {
                             flush(&mut parts, &mut pending_thinking, &mut pending_text);
-                            merged.push(id.as_str());
-                            let args_str = input
-                                .as_object()
-                                .map(|map| {
-                                    map.iter()
-                                        .map(|(key, value)| {
-                                            format!(
-                                                "{key}={}",
-                                                truncate_for_summary(
-                                                    &value.to_string(),
-                                                    TOOL_ARG_MAX_CHARS,
-                                                    TRUNCATE_HEAD_RATIO,
-                                                )
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                })
-                                .unwrap_or_default();
-                            let args = truncate_for_summary(
-                                &args_str,
-                                TOOL_CALL_MAX_CHARS,
-                                TRUNCATE_HEAD_RATIO,
-                            );
+                            merged.insert(id.as_str());
+                            let args_str = format_tool_input(input);
+                            let args = truncate_for_summary(&args_str, TOOL_CALL_MAX_CHARS);
                             let mut line = format!("¶call: {name}({args})");
-                            if let Some(result) = results.get(id.as_str()) {
+                            if let Some(&(result, is_error)) = results.get(id.as_str()) {
                                 line.push('\n');
-                                line.push_str(&render_result_block(result));
+                                line.push_str(&render_result_block(result, is_error));
                             }
                             parts.push(line);
                         }
@@ -305,15 +355,44 @@ pub fn serialize(messages: &[Message]) -> String {
     parts.join("\n\n")
 }
 
-fn render_result_block(raw: &str) -> String {
-    let body = truncate_for_summary(
-        &strip_dim_markers(raw),
-        TOOL_RESULT_MAX_CHARS,
-        TRUNCATE_HEAD_RATIO,
-    );
-    format!("<out>\n{DIM_ON}{body}{DIM_OFF}\n</out>")
+fn format_tool_input(input: &serde_json::Value) -> String {
+    match input.as_object() {
+        Some(map) => map
+            .iter()
+            .map(|(key, value)| {
+                let rendered = match value.as_str() {
+                    Some(s) => truncate_for_summary(s, TOOL_ARG_MAX_CHARS),
+                    None => truncate_for_summary(&value.to_string(), TOOL_ARG_MAX_CHARS),
+                };
+                format!("{key}={rendered}")
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        None if input.is_null() => String::new(),
+        None => truncate_for_summary(&input.to_string(), TOOL_ARG_MAX_CHARS),
+    }
 }
 
+fn render_result_block(raw: &str, is_error: bool) -> String {
+    let body = truncate_for_summary(&strip_dim_markers(raw), TOOL_RESULT_MAX_CHARS);
+    let tag = if is_error { "err" } else { "out" };
+    format!("<{tag}>\n{DIM_ON}{body}{DIM_OFF}\n</{tag}>")
+}
+
+fn strip_archive_chrome(text: &str) -> String {
+    let text = text.strip_prefix(ARCHIVE_HEADER).unwrap_or(text);
+    let mut lines: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("-------------- imaged middle ")
+            || line.starts_with("-------------- middle history ")
+            || line.starts_with("-------------- compaction notes")
+        {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
 fn fold_char(cp: u32, ch: char, font: &Font) -> Option<String> {
     if cp < 0x20 {
         return None;
@@ -347,13 +426,14 @@ fn fold_char(cp: u32, ch: char, font: &Font) -> Option<String> {
     Some(folded.to_string())
 }
 
-/// Prepare text for printing: collapse horizontal whitespace runs, fold
-/// newlines to the full-block glyph, fold unsupported symbols to ASCII, and
-/// drop decorative emoji.
+/// Prepare text for bitmap printing: collapse horizontal whitespace runs, fold
+/// single or repeated newlines to one full-block glyph, fold unsupported
+/// symbols to ASCII, and drop unrenderable glyphs.
 pub fn normalize(text: &str) -> String {
     let font = font();
     let mut out = String::with_capacity(text.len());
     let mut space = false;
+    let mut newline = false;
     for ch in text.chars() {
         let cp = ch as u32;
         if ch == DIM_ON || ch == DIM_OFF {
@@ -361,16 +441,23 @@ pub fn normalize(text: &str) -> String {
             continue;
         }
         if ch == '\n' || ch == '\r' {
-            out.push(NEWLINE_GLYPH);
+            newline = true;
             space = false;
             continue;
         }
         if ch.is_whitespace() {
-            space = true;
+            if !newline {
+                space = true;
+            }
             continue;
         }
         if let Some(folded) = fold_char(cp, ch, font) {
-            if space && !out.is_empty() {
+            if newline {
+                if !out.is_empty() {
+                    out.push(NEWLINE_GLYPH);
+                }
+                newline = false;
+            } else if space && !out.is_empty() {
                 out.push(' ');
             }
             space = false;
@@ -382,14 +469,28 @@ pub fn normalize(text: &str) -> String {
 
 /// Split normalized text into pages that each fill at most `capacity` grid
 /// cells, inserting a one-cell pad before a wide glyph that would straddle the
-/// right edge. Pages are contiguous substrings, so each renders from cell 0.
+/// right edge. Tracks active dim spans across page boundaries so each page
+/// renders independently with accurate ink.
 fn paginate(text: &str, capacity: usize, cols: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
     let mut pages: Vec<String> = Vec::new();
-    let mut start = 0;
-    let mut cell = 0;
+    let mut start = 0usize;
+    let mut cell = 0usize;
     let mut has_cell = false;
-    for (i, &ch) in chars.iter().enumerate() {
+    let mut dim_active = false;
+    let mut page_starts_dim = false;
+
+    for (byte_idx, ch) in text.char_indices() {
+        match ch {
+            DIM_ON => {
+                dim_active = true;
+                continue;
+            }
+            DIM_OFF => {
+                dim_active = false;
+                continue;
+            }
+            _ => {}
+        }
         let w = cell_units(ch as u32);
         if w == 0 {
             continue;
@@ -399,19 +500,29 @@ fn paginate(text: &str, capacity: usize, cols: usize) -> Vec<String> {
             at += 1;
         }
         if has_cell && at + w > capacity {
-            pages.push(chars[start..i].iter().collect());
-            start = i;
+            let mut page = String::with_capacity(byte_idx - start + 2);
+            if page_starts_dim {
+                page.push(DIM_ON);
+            }
+            page.push_str(&text[start..byte_idx]);
+            pages.push(page);
+            start = byte_idx;
+            page_starts_dim = dim_active;
             at = 0;
         }
         cell = at + w;
         has_cell = true;
     }
     if has_cell {
-        pages.push(chars[start..].iter().collect());
+        let mut page = String::with_capacity(text.len() - start + 1);
+        if page_starts_dim {
+            page.push(DIM_ON);
+        }
+        page.push_str(&text[start..]);
+        pages.push(page);
     }
     pages
 }
-
 fn used_rows(text: &str, cols: usize, rows: usize) -> usize {
     let mut cursor = 0usize;
     for ch in text.chars() {
@@ -429,18 +540,17 @@ fn used_rows(text: &str, cols: usize, rows: usize) -> usize {
 }
 
 /// Rasterize one page of normalized text onto a white canvas using the 8x13
-/// pixel font, then encode it as a grayscale PNG. Returns base64 PNG data.
-pub fn render_page(text: &str) -> Vec<u8> {
+/// pixel font, then encode it once as base64 grayscale PNG.
+pub fn render_page(text: &str) -> Arc<str> {
     let font = font();
     let (cols, rows, capacity) = geometry();
     let height = used_rows(text, cols, rows) * font.cell_h;
-    let width = FRAME_SIZE.min(MAX_FRAME_SIZE);
+    let width = FRAME_SIZE;
     let mut pixels = vec![BG; width * height];
 
-    let codes: Vec<char> = text.chars().collect();
     let mut dim = false;
     let mut cursor = 0usize;
-    for &ch in &codes {
+    for ch in text.chars() {
         if cursor >= capacity {
             break;
         }
@@ -487,15 +597,12 @@ pub fn render_page(text: &str) -> Vec<u8> {
         }
     }
 
-    let buffer: ImageBuffer<Luma<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(width as u32, height as u32, pixels).expect("canvas sized to pixels");
-    let mut out = Vec::new();
-    buffer
-        .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-        .expect("encode PNG");
-    STANDARD.encode(out).into()
+    let mut png_bytes = Vec::new();
+    PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, PngFilter::NoFilter)
+        .write_image(&pixels, width as u32, height as u32, ExtendedColorType::L8)
+        .expect("encode grayscale PNG");
+    Arc::from(STANDARD.encode(png_bytes))
 }
-
 fn blit_glyph(
     pixels: &mut [u8],
     width: usize,
@@ -546,33 +653,75 @@ fn fill_cell(
     }
 }
 
-/// Lay out the accumulated archive text with verbatim text at both chronological
-/// edges and images in the middle. Past `max_frames` the imaged middle drops its
-/// oldest pages.
-fn plan(text: &str, max_frames: usize) -> (String, Vec<String>, String, usize) {
+/// Split serialized (un-normalized, indentation-preserving) text into a
+/// verbatim oldest edge, a raw middle slice to normalize + rasterize, and a
+/// verbatim newest edge.
+fn split_edges(serialized: &str, edge_chars: usize) -> (&str, &str, &str) {
+    if edge_chars == 0 {
+        return ("", serialized, "");
+    }
+    let total_chars = serialized.chars().count();
+    if total_chars <= 2 * edge_chars {
+        return (serialized, "", "");
+    }
+    let head_end = char_byte_offset(serialized, edge_chars);
+    let tail_start = char_byte_offset(serialized, total_chars - edge_chars);
+    (
+        &serialized[..head_end],
+        &serialized[head_end..tail_start],
+        &serialized[tail_start..],
+    )
+}
+
+/// Lay out the middle slice onto at most `max_frames` pages, dropping the
+/// oldest pages first when the archive exceeds the frame budget.
+fn plan_middle(middle_raw: &str, max_frames: usize) -> (Vec<String>, usize) {
+    if middle_raw.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let normalized = normalize(middle_raw);
+    if normalized.is_empty() {
+        return (Vec::new(), 0);
+    }
+    if max_frames == 0 {
+        let dropped = strip_dim_markers(&normalized).chars().count();
+        return (Vec::new(), dropped);
+    }
     let (cols, _rows, capacity) = geometry();
-    let edge_cap = TEXT_EDGE_PAGES * capacity;
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= 2 * edge_cap {
-        return (text.to_string(), Vec::new(), String::new(), 0);
-    }
-    let text_head: String = chars[..edge_cap].iter().collect();
-    let text_tail: String = chars[chars.len() - edge_cap..].iter().collect();
-    if max_frames < 1 {
-        let truncated = chars.len() - text_head.chars().count() - text_tail.chars().count();
-        return (text_head, Vec::new(), text_tail, truncated);
-    }
-    let image_text: String = chars[edge_cap..chars.len() - edge_cap].iter().collect();
-    if image_text.is_empty() {
-        return (text.to_string(), Vec::new(), String::new(), 0);
-    }
-    let mut pages = paginate(&image_text, capacity, cols);
-    let mut truncated = 0;
+    let mut pages = paginate(&normalized, capacity, cols);
+    let mut truncated = 0usize;
     if pages.len() > max_frames {
-        let dropped: Vec<String> = pages.drain(..pages.len() - max_frames).collect();
-        truncated = dropped.iter().map(String::len).sum();
+        for dropped in pages.drain(..pages.len() - max_frames) {
+            truncated += strip_dim_markers(&dropped).chars().count();
+        }
     }
-    (text_head, pages, text_tail, truncated)
+    (pages, truncated)
+}
+
+/// Extract snapcompact PNG frames carried by an earlier archive turn in
+/// `messages`, removing them so user/tool images can still be replaced with
+/// `[image]` placeholders without destroying prior archive frames.
+fn extract_prior_frames(messages: &mut [Message]) -> Vec<ImageSource> {
+    let mut frames = Vec::new();
+    for msg in messages {
+        let is_archive = msg.role == Role::User
+            && msg.display_text.as_deref() == Some("")
+            && msg
+                .content
+                .first()
+                .is_some_and(|b| matches!(b, ContentBlock::Text { text } if text.starts_with(ARCHIVE_HEADER)));
+        if !is_archive {
+            continue;
+        }
+        for block in &msg.content {
+            if let ContentBlock::Image { source } = block {
+                frames.push(source.clone());
+            }
+        }
+        msg.content
+            .retain(|block| !matches!(block, ContentBlock::Image { .. }));
+    }
+    frames
 }
 
 pub struct SnapResult {
@@ -581,89 +730,168 @@ pub struct SnapResult {
 }
 
 /// Run a snapcompact pass over the messages being discarded. Fully local:
-/// serializes them, lays the archive out with text edges and an imaged middle,
-/// and renders the middle to PNG frames.
+/// preserves prior archive frames, serializes text/thinking/tool rounds, keeps
+/// indentation-intact text edges, and renders the middle to 1568px-max PNG
+/// frames.
+#[cfg(test)]
 pub fn compact(messages: &[Message]) -> SnapResult {
-    let mut stripped = messages.to_vec();
-    strip_thinking(&mut stripped);
-    strip_images(&mut stripped);
-    let serialized = serialize(&stripped);
-    let normalized = normalize(&serialized);
-    let (text_head, pages, text_tail, truncated) = plan(&normalized, MAX_FRAMES);
+    compact_with_options(messages, MAX_FRAMES, None)
+}
 
+pub fn compact_with_options(
+    messages: &[Message],
+    max_frames: usize,
+    instructions: Option<&str>,
+) -> SnapResult {
+    let mut working = messages.to_vec();
+    let mut prior_frames = extract_prior_frames(&mut working);
+    replace_non_archive_images(&mut working);
+
+    let serialized = serialize(&working);
+    let (text_head, middle_raw, text_tail) = split_edges(&serialized, TEXT_EDGE_CHARS);
+    let (new_pages, mut truncated_chars) = plan_middle(middle_raw, max_frames);
+
+    let total_frames = prior_frames.len() + new_pages.len();
+    let mut kept_new_pages = new_pages;
+    if total_frames > max_frames {
+        let mut excess = total_frames - max_frames;
+        let drop_prior = excess.min(prior_frames.len());
+        prior_frames.drain(..drop_prior);
+        excess -= drop_prior;
+        if excess > 0 && excess <= kept_new_pages.len() {
+            for dropped in kept_new_pages.drain(..excess) {
+                truncated_chars += strip_dim_markers(&dropped).chars().count();
+            }
+        }
+    }
+
+    let rendered_frames: Vec<ImageSource> = prior_frames
+        .into_iter()
+        .chain(
+            kept_new_pages
+                .iter()
+                .map(|page| ImageSource::new(ImageMediaType::Png, render_page(page))),
+        )
+        .collect();
+
+    let has_frames = !rendered_frames.is_empty();
     let mut blocks: Vec<ContentBlock> = Vec::new();
+
+    let mut head = String::from(ARCHIVE_HEADER);
     if !text_head.is_empty() {
-        let suffix = if pages.is_empty() {
-            ""
-        } else {
-            "\n-------------- imaged middle below\n"
-        };
-        blocks.push(ContentBlock::Text {
-            text: plain_text(&text_head) + suffix,
-        });
+        head.push_str(&plain_text(text_head));
+        if has_frames {
+            head.push_str("\n-------------- imaged middle below\n");
+        }
     }
-    for page in &pages {
-        blocks.push(ContentBlock::Image {
-            source: ImageSource::new(
-                ImageMediaType::Png,
-                STANDARD.encode(render_page(page)).into(),
-            ),
-        });
+    blocks.push(ContentBlock::Text { text: head });
+
+    for source in rendered_frames {
+        blocks.push(ContentBlock::Image { source });
     }
+
+    let mut tail = String::new();
     if !text_tail.is_empty() {
-        let prefix = if pages.is_empty() {
-            "-------------- middle history omitted above\n"
-        } else {
+        let divider = if has_frames {
             "-------------- imaged middle above\n"
+        } else {
+            "-------------- middle history omitted above\n"
         };
-        let tail = prefix.to_string() + &plain_text(&text_tail);
+        tail.push_str(divider);
+        tail.push_str(&plain_text(text_tail));
+    }
+    if let Some(notes) = instructions.map(str::trim).filter(|s| !s.is_empty()) {
+        if !tail.is_empty() {
+            tail.push_str("\n\n");
+        }
+        tail.push_str("-------------- compaction notes\n");
+        tail.push_str(notes);
+    }
+    if !tail.is_empty() {
         match blocks.last_mut() {
-            Some(ContentBlock::Text { text }) => text.push_str(&tail),
+            Some(ContentBlock::Text { text }) => {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&tail);
+            }
             _ => blocks.push(ContentBlock::Text { text: tail }),
         }
     }
 
+    let frame_count = blocks
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .count();
+    let archived_chars = serialized.chars().count();
     let mut summary = format!(
-        "Archived {} chars of history onto {} snapcompact frame{}.",
-        normalized.chars().count(),
-        pages.len(),
-        if pages.len() == 1 { "" } else { "s" }
+        "Archived {archived_chars} chars of history onto {frame_count} snapcompact frame{}.",
+        if frame_count == 1 { "" } else { "s" }
     );
-    if truncated > 0 {
+    if truncated_chars > 0 {
         summary.push_str(&format!(
-            " {truncated} chars of the oldest middle were dropped to fit the frame budget."
+            " {truncated_chars} chars of the oldest middle were dropped to fit the frame budget."
         ));
     }
     SnapResult { blocks, summary }
 }
 
-/// Replaces `history` with a bitmap archive of the discarded transcript, no
-/// model call. The carried tail re-appends verbatim, exactly as the summarizer
-/// path leaves it.
-pub fn history(
+/// Replaces `history` with a bitmap archive of the discarded transcript on the
+/// blocking pool, with no model call. Uses a hidden `Role::User` archive turn
+/// and a `Role::Assistant` acknowledgement so every provider wire codec
+/// forwards the PNG frames cleanly, and preserves monotonic timestamps and
+/// `post_compaction_instructions` just like `rebuild_history`.
+pub async fn history(
     history: &mut History,
     compaction_history: Vec<Message>,
     summarized: usize,
-    event_tx: &EventSender,
-    compact_start: std::time::Instant,
+    max_frames: usize,
+    instructions: Option<&str>,
+    post_compaction_instructions: Option<&str>,
+    compact_start: Instant,
 ) -> Result<Compacted, AgentError> {
-    let SnapResult { blocks, summary } = compact(&compaction_history);
-    let archive = Message {
-        role: Role::Assistant,
-        content: blocks,
-        ..Default::default()
-    };
-    let _ = event_tx.send(AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
-        message: archive.clone(),
-        usage: TokenUsage::default(),
-        model: String::new(),
-        cost: None,
-        subsidised_list_cost: None,
-        context_size: Some(0),
-        context_window: 0,
-    })));
+    let notes = instructions.map(str::to_owned);
+    let SnapResult { blocks, summary } = blocking(move || {
+        Ok::<_, String>(compact_with_options(
+            &compaction_history,
+            max_frames,
+            notes.as_deref(),
+        ))
+    })
+    .await
+    .map_err(|message| AgentError::Config { message })?;
 
-    let mut new_history = vec![Message::user("What did we do so far?".into()), archive];
+    let carried_at = history
+        .as_slice()
+        .get(summarized)
+        .and_then(|m| m.created_at);
+    let stamp = |msg: Message| {
+        stamp_new(Message {
+            created_at: carried_at,
+            ..msg
+        })
+    };
+    let archive_user = stamp(Message {
+        role: Role::User,
+        content: blocks,
+        display_text: Some(String::new()),
+        ..Default::default()
+    });
+    let archive_ack = stamp(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: ARCHIVE_ACK.into(),
+        }],
+        ..Default::default()
+    });
+
+    let mut new_history = vec![archive_user, archive_ack];
+    if let Some(post) = post_compaction_instructions
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        new_history.push(stamp(Message::synthetic(post.to_owned())));
+    }
     let summary_len = new_history.len();
     new_history.extend_from_slice(&history.as_slice()[summarized..]);
     history.restart(new_history);
@@ -683,17 +911,21 @@ pub fn history(
 fn plain_text(text: &str) -> String {
     text.chars()
         .map(|ch| if ch == NEWLINE_GLYPH { '\n' } else { ch })
-        .filter(|ch| *ch != DIM_ON && *ch != DIM_OFF)
+        .filter(|&ch| ch != DIM_ON && ch != DIM_OFF)
         .collect()
 }
 
-fn strip_images(messages: &mut [Message]) {
+fn replace_non_archive_images(messages: &mut [Message]) {
     for msg in messages {
-        msg.content
-            .retain(|block| !matches!(block, ContentBlock::Image { .. }));
+        for block in &mut msg.content {
+            if matches!(block, ContentBlock::Image { .. }) {
+                *block = ContentBlock::Text {
+                    text: maki_providers::IMAGE_PLACEHOLDER.into(),
+                };
+            }
+        }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,51 +990,85 @@ mod tests {
     }
 
     #[test]
-    fn plan_keeps_text_edges_and_images_middle() {
-        let capacity = {
-            let (c, r, cap) = geometry();
-            let _ = (c, r);
-            cap
-        };
-        let text = "y".repeat(capacity * 3);
-        let (head, pages, tail, truncated) = plan(&text, MAX_FRAMES);
-        assert_eq!(head.chars().count(), capacity);
-        assert_eq!(tail.chars().count(), capacity);
-        assert!(!pages.is_empty());
-        assert_eq!(truncated, 0);
+    fn split_edges_preserves_indentation_and_middle() {
+        let indented = "    def foo():\n        return 42\n";
+        let filler = "m".repeat(TEXT_EDGE_CHARS * 3);
+        let serialized = format!("{indented}{filler}{indented}");
+        let (head, middle, tail) = split_edges(&serialized, TEXT_EDGE_CHARS);
+        assert!(head.starts_with(indented));
+        assert!(tail.ends_with(indented));
+        assert!(!middle.is_empty());
     }
 
     #[test]
-    fn plan_drops_oldest_middle_past_max_frames() {
-        let capacity = {
-            let (c, r, cap) = geometry();
-            let _ = (c, r);
-            cap
-        };
-        let text = "z".repeat(capacity * 200);
-        let (_, pages, _, truncated) = plan(&text, 4);
+    fn plan_middle_drops_oldest_pages_past_max_frames() {
+        let (_cols, _rows, capacity) = geometry();
+        let text = "z".repeat(capacity * 10);
+        let (pages, truncated) = plan_middle(&text, 4);
         assert_eq!(pages.len(), 4);
         assert!(truncated > 0);
     }
 
     #[test]
-    fn render_page_produces_decodable_png() {
-        let data = render_page("Hello world. Again.");
-        let bytes = STANDARD.decode(&data).unwrap();
-        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    fn paginate_carries_dim_state_across_page_boundary() {
+        let (cols, _rows, capacity) = geometry();
+        let text = format!("{DIM_ON}{}{DIM_OFF}", "d".repeat(capacity + 20));
+        let pages = paginate(&text, capacity, cols);
+        assert_eq!(pages.len(), 2);
+        assert!(pages[1].starts_with(DIM_ON));
     }
 
     #[test]
-    fn compact_builds_text_and_image_blocks() {
+    fn serialize_preserves_thinking_and_marks_errors() {
+        let messages = vec![
+            Message::user("diagnose crash".into()),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "root cause is null pointer in foo.rs".into(),
+                        signature: Some("sig".into()),
+                        reasoning_id: None,
+                        reasoning_opaque: None,
+                    },
+                    ContentBlock::tool_use("t_err", "bash", json!({"command": "cargo test"})),
+                ],
+                ..Default::default()
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result("t_err", "panicked at foo.rs:12", true)],
+                ..Default::default()
+            },
+        ];
+        let text = serialize(&messages);
+        assert!(text.contains("¶think:"));
+        assert!(text.contains("root cause is null pointer in foo.rs"));
+        assert!(text.contains("<err>"));
+        assert!(text.contains("panicked at foo.rs:12"));
+    }
+
+    #[test]
+    fn render_page_produces_decodable_png_within_provider_edge_limit() {
+        let data = render_page("Hello world. Again.");
+        let bytes = STANDARD.decode(data.as_bytes()).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let img = image::load_from_memory(&bytes).unwrap();
+        assert!(img.width() <= 1568);
+        assert!(img.height() <= 1568);
+    }
+
+    #[tokio::test]
+    async fn compact_frames_pass_adapt_images_for_model_untouched() {
         let mut messages = vec![Message::user("first task".into())];
-        for i in 0..120 {
+        for i in 0..40 {
             let id = format!("t{i}");
             messages.push(Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::tool_use(
                     &id,
                     "bash",
-                    json!({"command": "x".repeat(2000)}),
+                    json!({"command": "x".repeat(600)}),
                 )],
                 ..Default::default()
             });
@@ -814,13 +1080,107 @@ mod tests {
         }
         let result = compact(&messages);
         assert!(matches!(result.blocks[0], ContentBlock::Text { .. }));
-        assert!(
-            result
-                .blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Image { .. }))
-        );
+        let frame_count = result
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert!(frame_count > 0);
         assert!(result.summary.contains("snapcompact frame"));
+
+        for block in &result.blocks {
+            if let ContentBlock::Image { source } = block {
+                let bytes = STANDARD
+                    .decode(source.data.as_bytes())
+                    .expect("single base64 layer");
+                assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+            }
+        }
+
+        let mut vision_model =
+            Model::from_spec("anthropic/claude-sonnet-4-20250514").unwrap();
+        vision_model.supports_vision_override = Some(true);
+        let wire_input = vec![Message {
+            role: Role::User,
+            content: result.blocks,
+            display_text: Some(String::new()),
+            ..Default::default()
+        }];
+        let adapted = maki_providers::adapt_images_for_model(&vision_model, &wire_input).await;
+        assert!(
+            matches!(adapted, std::borrow::Cow::Borrowed(_)),
+            "wire-ready 1568px PNG frames must not be dropped or re-encoded"
+        );
+        let adapted_images = adapted[0]
+            .content
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert_eq!(adapted_images, frame_count);
+    }
+
+    #[test]
+    fn second_compaction_retains_prior_archive_frames() {
+        let mut messages = vec![Message::user("phase one".into())];
+        for i in 0..30 {
+            let id = format!("p1_{i}");
+            messages.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::tool_use(
+                    &id,
+                    "read",
+                    json!({"path": format!("src/file_{i}.rs")}),
+                )],
+                ..Default::default()
+            });
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(&id, "a".repeat(1500), false)],
+                ..Default::default()
+            });
+        }
+        let first = compact(&messages);
+        let first_frames = first
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert!(first_frames > 0);
+
+        let mut second_input = vec![
+            Message {
+                role: Role::User,
+                content: first.blocks,
+                display_text: Some(String::new()),
+                ..Default::default()
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: ARCHIVE_ACK.into(),
+                }],
+                ..Default::default()
+            },
+            Message::user("phase two short turn".into()),
+        ];
+        second_input.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "done phase two".into(),
+            }],
+            ..Default::default()
+        });
+
+        let second = compact(&second_input);
+        let second_frames = second
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Image { .. }))
+            .count();
+        assert!(
+            second_frames >= first_frames,
+            "prior snapcompact frames must survive a second compaction instead of collapsing to [image]"
+        );
     }
 
     #[test]
