@@ -2166,15 +2166,21 @@ end)
 
 -- ── skills registry ──
 
-case("skills_rows_filters_enabled_by_prefix_in_name_order", function()
+case("skills_rows_filters_enabled_by_substring_in_name_order", function()
   Skills.set({
     { name = "privacy", description = "d", enabled = true },
-    { name = "git-release", description = "d", enabled = true },
-    { name = "gitoff", description = "d", enabled = false },
+    { name = "auto-fix", description = "d", enabled = true },
+    { name = "fix-lint", description = "d", enabled = true },
+    { name = "fixoff", description = "d", enabled = false },
   })
-  local rows = Skills.rows("git", 10)
-  eq(#rows, 1, "the disabled match is dropped")
-  eq(rows[1].insert, "/skill:git-release", "the insert carries the /skill: shape")
+  local rows = Skills.rows("FIX", 10)
+  eq(#rows, 2, "both substring and prefix matches are kept, disabled dropped")
+  eq(rows[1].insert, "/skill:auto-fix", "name order")
+  eq(rows[1].highlights[1][1], 6, "highlight starts at matched substring")
+  eq(rows[1].highlights[1][2], 8, "highlight ends at matched substring")
+  eq(rows[2].insert, "/skill:fix-lint")
+  eq(rows[2].highlights[1][1], 1)
+  eq(rows[2].highlights[1][2], 3)
   Skills.set({})
 end)
 

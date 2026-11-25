@@ -145,7 +145,6 @@ The rules:
 | [`maki.model`](#maki-model) | The model behind the focused session. |
 | [`maki.net`](#maki-net) | HTTP, plain TCP, and Unix sockets for plugins. |
 | [`maki.net.Conn`](#maki-net-Conn) | A TCP or Unix socket connection, from `maki.net.connect`, `maki.net.connect_unix` or `Listener:accept`. |
-| [`maki.net.Listener`](#maki-net-Listener) | A Unix socket listener opened by `maki.net.listen_unix`. |
 | [`maki.provider`](#maki-provider) | Providers implemented in Lua. |
 | [`maki.pwsh`](#maki-pwsh) | Persistent PowerShell sessions: `maki.pwsh.exec` runs a command in a process that stays alive across tool calls, so variables and cwd persist. |
 | [`maki.provider.auth`](#maki-provider-auth) | Credential storage for the providers this plugin registered. |
@@ -5428,78 +5427,6 @@ maki.async.spawn(function()
 end)
 ```
 
----
-
-### `maki.net.connect_unix()` {#maki-net-connect_unix}
-
-```lua
-maki.net.connect_unix({path}, {opts?})
-```
-
-Connect to the Unix socket at {path}.
-
-{opts} fields:
-- `timeout` (`integer`) Connect timeout in seconds, max 60 (default 10).
-  0 means the default.
-
-Requires the `run` [plugin permission](#plugin-permissions).
-
-**Parameters:**
-
-- `{path}` (`string`) Absolute path of the socket, or one starting with `~/`.
-- `{opts?}` (`table?`) Options (see above).
-
-**Returns:** ([`maki.net.Conn?`](#maki-net-Conn), `string?`) The connection, or nil plus an error string.
-
-**Example:**
-
-```lua
-maki.async.spawn(function()
-  local conn, err = maki.net.connect_unix("/run/user/1000/app/control.sock")
-  if not conn then return maki.log.error(err) end
-  conn:write("status\n")
-  print(conn:read())
-  conn:close()
-end)
-```
-
----
-
-### `maki.net.listen_unix()` {#maki-net-listen_unix}
-
-```lua
-maki.net.listen_unix({path})
-```
-
-Listen on the Unix socket at {path}.
-
-Fails if a file exists at {path}, so remove a stale socket first. The one
-exception is a path this plugin already listens on, which it takes over,
-so it can listen again after `/reload`. Keep the socket in a directory
-only your user can write, so no other user can swap the file.
-
-Requires the `run` [plugin permission](#plugin-permissions).
-
-**Parameters:**
-
-- `{path}` (`string`) Absolute path of the socket, or one starting with `~/`.
-
-**Returns:** ([`maki.net.Listener?`](#maki-net-Listener), `string?`) The listener, or nil plus an error string.
-
-**Example:**
-
-```lua
-maki.async.spawn(function()
-  local listener = assert(maki.net.listen_unix("/run/user/1000/app/inbox.sock"))
-  while true do
-    local conn = listener:accept()
-    if not conn then break end
-    print(conn:read())
-    conn:close()
-  end
-end)
-```
-
 
 ## maki.net.Conn {#maki-net-Conn}
 
@@ -5570,48 +5497,6 @@ Conn:close()
 
 Close the connection. A read or write in flight ends with an error.
 Extra calls do nothing.
-
-
-## maki.net.Listener {#maki-net-Listener}
-
-A Unix socket listener opened by `maki.net.listen_unix`.
-
-It closes and removes its socket file on `:close()`, when the handle
-is garbage collected, and when the plugin unloads.
-
----
-
-### `Listener:accept()` {#Listener-accept}
-
-```lua
-Listener:accept()
-```
-
-Wait for the next client and return its connection. Returns `nil, nil`
-once the listener is closed, also when it closes during the wait.
-Only one `accept` at a time: a second one while one waits returns an
-error.
-
-**Returns:** ([`maki.net.Conn?`](#maki-net-Conn), `string?`) The connection, nil plus an error string, or nil, nil once closed.
-
-**Example:**
-
-```lua
-local conn, err = listener:accept()
-if err then return maki.log.error(err) end
-if not conn then print("listener closed") end
-```
-
----
-
-### `Listener:close()` {#Listener-close}
-
-```lua
-Listener:close()
-```
-
-Stop listening and remove the socket file. A pending `accept` returns
-`nil, nil`. Extra calls do nothing.
 
 
 ## maki.provider {#maki-provider}
@@ -10619,10 +10504,10 @@ function Skills.publish(get_fn)
 function Skills.set(skills)
 function Skills.get()
 
--- Rows for `/skill:<prefix>` completion: every enabled skill whose name starts
--- with the prefix, case-insensitive, name order. The insert is the whole token,
--- so the popup writes `/skill:name` over `/skill:pre`.
-function Skills.rows(prefix, limit)
+-- Rows for `/skill:<query>` completion: every enabled skill whose name
+-- contains {query}, case-insensitive, name order. The insert is the whole
+-- token, so the popup writes `/skill:name` over `/skill:query`.
+function Skills.rows(query, limit)
 ```
 
 ### `require("maki.test_helpers")`

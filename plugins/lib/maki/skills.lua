@@ -39,25 +39,34 @@ function Skills.get()
   return type(list) == "table" and list or fallback
 end
 
--- Rows for `/skill:<prefix>` completion: every enabled skill whose name starts
--- with the prefix, case-insensitive, name order. The insert is the whole token,
--- so the popup writes `/skill:name` over `/skill:pre`.
-function Skills.rows(prefix, limit)
-  local needle = (prefix or ""):lower()
-  local names = {}
+-- Rows for `/skill:<query>` completion: every enabled skill whose name
+-- contains {query}, case-insensitive, name order. The insert is the whole
+-- token, so the popup writes `/skill:name` over `/skill:query`.
+function Skills.rows(query, limit)
+  local needle = (query or ""):lower()
+  local matches = {}
   for _, s in ipairs(Skills.get()) do
-    if s.enabled ~= false and (needle == "" or s.name:lower():sub(1, #needle) == needle) then
-      names[#names + 1] = s.name
+    if s.enabled ~= false then
+      if needle == "" then
+        matches[#matches + 1] = { name = s.name, highlights = {} }
+      else
+        local start, stop = s.name:lower():find(needle, 1, true)
+        if start then
+          matches[#matches + 1] = { name = s.name, highlights = { { start, stop } } }
+        end
+      end
     end
   end
-  table.sort(names)
+  table.sort(matches, function(a, b)
+    return a.name < b.name
+  end)
   local rows = {}
-  for i = 1, math.min(limit, #names) do
-    local name = names[i]
+  for i = 1, math.min(limit, #matches) do
+    local m = matches[i]
     rows[i] = {
-      label = name,
-      insert = "/skill:" .. name,
-      highlights = prefix == "" and {} or { { 1, #prefix } },
+      label = m.name,
+      insert = "/skill:" .. m.name,
+      highlights = m.highlights,
     }
   end
   return rows

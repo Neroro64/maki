@@ -355,30 +355,33 @@ end)
 -- ----------------------------------------------------------- skill completion
 
 local SKILLS = {
+  { name = "auto-fix", description = "Auto fix", location = "l", enabled = true },
   { name = "git-release", description = "Cut a release", location = "l", enabled = true },
   { name = "privacy", description = "Privacy", location = "l", enabled = true },
-  { name = "off", description = "Off", location = "l", enabled = false },
+  { name = "fix-off", description = "Off", location = "l", enabled = false },
 }
 
-case("a_skill_token_lists_enabled_skills_by_prefix", function()
+case("a_skill_token_lists_enabled_skills_in_name_order", function()
   Skills.set(SKILLS)
   local h = harness(function(hh)
     hh.input = { text = "/skill:", cursor = 7, version = 3, session_id = SESSION }
     Menu.refresh(hh.input)
   end)
-  eq(row(h, 1), " git-release", "enabled skills, name order")
-  eq(row(h, 2), " privacy")
-  eq(row(h, 3), nil, "a disabled skill is not offered")
+  eq(row(h, 1), " auto-fix", "enabled skills, name order")
+  eq(row(h, 2), " git-release")
+  eq(row(h, 3), " privacy")
+  eq(row(h, 4), nil, "a disabled skill is not offered")
   Skills.set({})
 end)
 
-case("a_skill_prefix_narrows_the_rows", function()
+case("a_skill_query_matches_by_substring", function()
   Skills.set(SKILLS)
   local h = harness(function(hh)
-    hh.input = { text = "/skill:pr", cursor = 9, version = 3, session_id = SESSION }
+    hh.input = { text = "/skill:fix", cursor = 10, version = 3, session_id = SESSION }
     Menu.refresh(hh.input)
   end)
-  eq(row(h, 1), " privacy", "only the prefix match is left")
+  eq(row(h, 1), " auto-fix", "contains match is offered")
+  eq(row(h, 2), nil, "disabled contains match is skipped")
   Skills.set({})
 end)
 
@@ -405,17 +408,22 @@ case("is_auth_arg_wants_the_command_before_the_token", function()
   eq(Mcp.is_auth_arg("run /mcp auth gi", 13), false, "the command must start the line")
 end)
 
-case("auth_rows_list_servers_by_name_prefix", function()
+case("auth_rows_list_servers_by_name_substring", function()
   local saved = maki.mcp
-  maki.mcp = { servers = function() return MCP_SERVERS end }
+  maki.mcp = {
+    servers = function()
+      return MCP_SERVERS
+    end,
+  }
   local rows = Mcp.rows("", 10)
   eq(#rows, 2, "every configured server, name order")
   eq(rows[1].label, "github")
   eq(rows[2].label, "notion")
-  rows = Mcp.rows("gi", 10)
+  rows = Mcp.rows("HUB", 10)
   eq(#rows, 1)
   eq(rows[1].insert, "github")
-  eq(rows[1].highlights[1][2], 2, "the two matched bytes")
+  eq(rows[1].highlights[1][1], 4, "highlight starts at hub")
+  eq(rows[1].highlights[1][2], 6, "highlight ends at hub")
   maki.mcp = saved
 end)
 
@@ -428,9 +436,9 @@ case("an_auth_argument_lists_servers", function()
   eq(row(h, 2), " notion")
 end)
 
-case("an_auth_prefix_narrows_the_rows", function()
+case("an_auth_query_narrows_the_rows_by_substring", function()
   local h = harness(function(hh)
-    hh.input = { text = "/mcp auth gi", cursor = 12, version = 3, session_id = SESSION }
+    hh.input = { text = "/mcp auth hub", cursor = 13, version = 3, session_id = SESSION }
     Menu.refresh(hh.input)
   end)
   eq(row(h, 1), " github")

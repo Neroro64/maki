@@ -78,7 +78,7 @@ Disabled skills are saved to `skills.json` in the [state dir](/docs/configuratio
 
 ## Completing a skill name
 
-Type `/skill:` and press **Tab** to complete a skill name, the same way [Tab completes a path](/docs/context/#completing-a-path-with-tab). `/skill:git<Tab>` lists the skills starting with `git`; accepting writes `/skill:git-release`. Disabled skills are not offered.
+Type `/skill:` and press **Tab** to complete a skill name, the same way [Tab completes a path](/docs/context/#completing-a-path-with-tab). `/skill:release<Tab>` lists the skills whose name contains `release`, and accepting writes `/skill:git-release`. Disabled skills are not offered.
 
 ## The builtin: maki-plugin-dev
 

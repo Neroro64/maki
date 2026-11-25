@@ -82,27 +82,6 @@ function M.sorted(skills)
   return out
 end
 
--- Rows for `/skill:<prefix>` completion: every enabled skill whose name starts
--- with the prefix, case-insensitive. The insert is the whole token, so the
--- popup writes `/skill:name` over `/skill:pre`.
-function M.skill_rows(skills, prefix, limit)
-  local needle = prefix:lower()
-  local rows = {}
-  for _, s in ipairs(M.sorted(skills)) do
-    if s.enabled ~= false and (needle == "" or s.name:lower():sub(1, #needle) == needle) then
-      rows[#rows + 1] = {
-        label = s.name,
-        insert = "/skill:" .. s.name,
-        highlights = prefix == "" and {} or { { 1, #prefix } },
-      }
-      if #rows >= limit then
-        break
-      end
-    end
-  end
-  return rows
-end
-
 -- Flip {name} in the disabled set in place and return the set, so the picker's
 -- live key handler can rebuild its rows from the same table it toggled.
 function M.toggle_disabled(disabled, name)

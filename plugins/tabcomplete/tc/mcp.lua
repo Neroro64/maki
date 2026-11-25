@@ -15,28 +15,35 @@ function Mcp.is_auth_arg(text, start)
   return text:sub(1, start):find(PREFIX) ~= nil
 end
 
--- Rows for the server-name token: every configured server whose name starts
--- with {prefix}, case-insensitive, name order.
-function Mcp.rows(prefix, limit)
+-- Rows for the server-name token: every configured server whose name contains
+-- {query}, case-insensitive, name order.
+function Mcp.rows(query, limit)
   local servers
   if maki.mcp and maki.mcp.servers then
     servers = maki.mcp.servers()
   end
-  local needle = (prefix or ""):lower()
-  local names = {}
+  local needle = (query or ""):lower()
+  local matches = {}
   for _, s in ipairs(servers or {}) do
-    if needle == "" or s.name:lower():sub(1, #needle) == needle then
-      names[#names + 1] = s.name
+    if needle == "" then
+      matches[#matches + 1] = { name = s.name, highlights = {} }
+    else
+      local start, stop = s.name:lower():find(needle, 1, true)
+      if start then
+        matches[#matches + 1] = { name = s.name, highlights = { { start, stop } } }
+      end
     end
   end
-  table.sort(names)
+  table.sort(matches, function(a, b)
+    return a.name < b.name
+  end)
   local rows = {}
-  for i = 1, math.min(limit, #names) do
-    local name = names[i]
+  for i = 1, math.min(limit, #matches) do
+    local m = matches[i]
     rows[i] = {
-      label = name,
-      insert = name,
-      highlights = prefix == "" and {} or { { 1, #prefix } },
+      label = m.name,
+      insert = m.name,
+      highlights = m.highlights,
     }
   end
   return rows

@@ -9252,7 +9252,8 @@ const TAB_FILE: &str = "completed.txt";
 #[test_case(".\\comp", "./completed.txt" ; "windows_path")]
 #[test_case("/cd ./comp", "/cd ./completed.txt" ; "command_argument_path")]
 #[test_case("/cd .\\comp", "/cd ./completed.txt" ; "command_argument_windows_path")]
-#[test_case("/skill:complete", "/skill:complete-code" ; "skill_name")]
+#[test_case("/skill:complete", "/skill:complete-code" ; "skill_name_prefix")]
+#[test_case("/skill:code", "/skill:complete-code" ; "skill_name_contains")]
 fn tab_completes_the_token_while_typing(text: &str, completed: &str) {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join(TAB_FILE), "").unwrap();
