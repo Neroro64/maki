@@ -1434,3 +1434,81 @@ fn value_and_settings_changes_link_to_consumers_without_duplicate_file_roots() {
         "settings record/method must expand to its consumer:\n{dump}"
     );
 }
+
+#[test]
+fn real_di_static_and_service_locator_entry_points_beat_test_callers_end_to_end() {
+    let repo = Repo::new("real-entry-points");
+    fs::create_dir_all(repo.root.join("tests")).unwrap();
+    repo.write(
+        "src/IPipeline.cs",
+        "namespace Core;\npublic interface IPipeline<TIn, TOut> {\n    TOut Process(TIn input);\n}\n",
+    );
+    repo.write(
+        "src/InfoPipeline.cs",
+        "namespace Core;\npublic sealed class InfoPipeline : IPipeline<string, int> {\n    public int Process(string input) => Enrich(input);\n    private int Enrich(string input) => Helper.Parse(input) + 1;\n}\n",
+    );
+    repo.write(
+        "src/Helper.cs",
+        "namespace Core;\npublic static class Helper {\n    public static int Parse(string s) => s.Length;\n    public static int Normalize(string s) => s.Length;\n}\n",
+    );
+    repo.write(
+        "src/Evaluator.cs",
+        "namespace Core;\npublic sealed class Evaluator(IPipeline<string, int> pipeline) {\n    public int Evaluate(string raw) => pipeline.Process(raw);\n}\n",
+    );
+    repo.write(
+        "src/CliRunner.cs",
+        "namespace Core;\npublic sealed class CliRunner(IServiceProvider sp) {\n    public int Run(string raw) {\n        var eval = sp.GetRequiredService<Evaluator>();\n        return eval.Evaluate(raw) + Helper.Normalize(raw);\n    }\n}\n",
+    );
+    repo.write(
+        "tests/InfoPipelineTests.cs",
+        "namespace Core.Tests;\npublic sealed class InfoPipelineTests {\n    private readonly InfoPipeline _sut = new InfoPipeline();\n    [Fact] public void Process_CaseOne() => _sut.Process(\"a\");\n    [Fact] public void Process_CaseTwo() => _sut.Process(\"bb\");\n    [Fact] public void Normalize_Case() => Helper.Normalize(\"ccc\");\n}\n",
+    );
+    repo.commit_all("base");
+
+    // Modify `InfoPipeline.Enrich` and `Helper.Normalize`, and add one new test in `InfoPipelineTests.cs`
+    repo.write(
+        "src/InfoPipeline.cs",
+        "namespace Core;\npublic sealed class InfoPipeline : IPipeline<string, int> {\n    public int Process(string input) => Enrich(input);\n    private int Enrich(string input) => Helper.Parse(input) + 10;\n}\n",
+    );
+    repo.write(
+        "src/Helper.cs",
+        "namespace Core;\npublic static class Helper {\n    public static int Parse(string s) => s.Length;\n    public static int Normalize(string s) => s.Trim().Length;\n}\n",
+    );
+    repo.write(
+        "tests/InfoPipelineTests.cs",
+        "namespace Core.Tests;\npublic sealed class InfoPipelineTests {\n    private readonly InfoPipeline _sut = new InfoPipeline();\n    [Fact] public void Process_CaseOne() => _sut.Process(\"a\");\n    [Fact] public void Process_CaseTwo() => _sut.Process(\"bb\");\n    [Fact] public void Normalize_Case() => Helper.Normalize(\"ccc\");\n    [Fact] public void Process_NewEdgeCase() => _sut.Process(\" d \");\n}\n",
+    );
+    repo.commit_all("head");
+
+    let (code, dump, err) = repo.run(&["HEAD~1", "HEAD", "--tests", "--dump"]);
+    assert_eq!(code, 0, "{err}");
+
+    // Unchanged tests (`CaseOne`, `CaseTwo`, `CaseThree`) MUST NOT flood the roots!
+    for unchanged_test in ["Process_CaseOne", "Process_CaseTwo", "Normalize_Case"] {
+        assert!(
+            !dump.contains(unchanged_test),
+            "unchanged test '{unchanged_test}' polluted entry points:\n{dump}"
+        );
+    }
+    // Real production entry points (`Evaluator::Evaluate` via DI interface, `CliRunner::Run` via static + service locator)
+    // MUST appear before the newly added test `Process_NewEdgeCase`!
+    let eval_pos = dump
+        .find("Core::Evaluator::Evaluate")
+        .unwrap_or_else(|| panic!("missing DI entry point Evaluator::Evaluate:\n{dump}"));
+    let runner_pos = dump
+        .find("Core::CliRunner::Run")
+        .unwrap_or_else(|| panic!("missing static/service-locator entry point CliRunner::Run:\n{dump}"));
+    let new_test_pos = dump
+        .find("+ Core.Tests::InfoPipelineTests::Process_NewEdgeCase")
+        .unwrap_or_else(|| panic!("missing added test Process_NewEdgeCase:\n{dump}"));
+    assert!(
+        runner_pos < eval_pos && eval_pos < new_test_pos,
+        "CliRunner::Run must own Evaluator::Evaluate and rank ahead of test roots:\n{dump}"
+    );
+    let (_, eval_dump, err) = repo.run(&["HEAD~1", "HEAD", "--tests", "--dump", "-e", "Evaluate"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        eval_dump.contains("  Core::InfoPipeline::Process"),
+        "InfoPipeline::Process must nest under Evaluator::Evaluate:\n{eval_dump}"
+    );
+}

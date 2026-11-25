@@ -94,6 +94,8 @@ pub struct Node {
     #[serde(default)]
     pub external_consumers: Vec<String>,
     pub relevant: bool,
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 pub fn node_key(file: &str, name: &str) -> String {
@@ -242,6 +244,7 @@ fn file_node(path: &str, base: Option<&String>, head: Option<&String>) -> Node {
         consumers: Vec::new(),
         external_consumers: Vec::new(),
         relevant: true,
+        is_test: syntax::file_is_test_path(path),
     }
 }
 
@@ -400,6 +403,7 @@ struct DefId {
 }
 
 type OwnerFingerprint<'a> = (Lang, bool, u64, &'a str, Option<&'a str>);
+type ResolvedExtraCalls = (Vec<String>, Vec<String>, Vec<String>);
 
 #[derive(Default)]
 struct RevisionGroup {
@@ -795,6 +799,7 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                     consumers: Vec::new(),
                     external_consumers: Vec::new(),
                     relevant: status.is_change(),
+                    is_test: f.is_test,
                 },
             );
         }
@@ -843,6 +848,7 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                     consumers: Vec::new(),
                     external_consumers: Vec::new(),
                     relevant: true,
+                    is_test: data.fns[function].is_test,
                 },
             );
         }
@@ -871,8 +877,9 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                 if data.display[i].is_none() {
                     continue;
                 }
-                // In head_files, data.keys[i] is already in `nodes`.
-                // In base_files, paired symbols point to their head key!
+                // Walk UP (`contracts`) from changed symbols AND from non-test callable
+                // members of changed files (so unchanged `ClassA::method_b` calling changed
+                // `ClassA::method_c` still pulls in its `InterfaceA::method_b` contract!).
                 let changed = data
                     .keys
                     .get(i)
@@ -882,6 +889,8 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                 if changed {
                     up_pending.push((file, i));
                     down_pending.push((file, i));
+                } else if !data.fns[i].is_test && data.fns[i].kind != SymbolKind::Type {
+                    up_pending.push((file, i));
                 }
             }
         }
@@ -950,15 +959,10 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
                 consumers: Vec::new(),
                 external_consumers: Vec::new(),
                 relevant: false,
+                is_test: data.fns[function].is_test,
             },
         );
         label_paths.insert(data.path.clone());
-    }
-    for (path, src) in &inputs.extra_head {
-        if label_paths.contains(path) {
-            head_srcs.insert(path.clone(), src.clone());
-            base_srcs.insert(path.clone(), src.clone());
-        }
     }
     attach_contracts(
         &head_contracts,
@@ -1001,65 +1005,282 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
             }
         }
     }
-    let head_universe = Universe::new(
-        head_files.iter().chain(extras.iter()).collect(),
-        head_contracts,
-    );
-    let base_universe = Universe::new(
-        base_files.iter().chain(extras.iter()).collect(),
-        base_contracts,
-    );
     let mut incoming_consumers: HashMap<String, Vec<String>> = HashMap::new();
-    for (file, data) in head_files.iter().enumerate() {
-        for (function, key) in data.keys.iter().enumerate() {
-            if let Some(key) = key {
-                let (callees, value_refs, lost, _ext_val_refs) =
-                    head_universe.resolve_calls(file, function, Some(&removed_names));
-                for vref in value_refs {
-                    if &vref != key && nodes.contains_key(&vref) {
-                        incoming_consumers
-                            .entry(vref)
-                            .or_default()
-                            .push(key.clone());
+    let mut extra_resolved: Vec<Vec<Option<ResolvedExtraCalls>>>;
+    let head_contracts_saved = {
+        let head_universe = Universe::new(
+            head_files.iter().chain(extras.iter()).collect(),
+            head_contracts,
+        );
+        let base_universe = Universe::new(
+            base_files.iter().chain(extras.iter()).collect(),
+            base_contracts,
+        );
+        for (file, data) in head_files.iter().enumerate() {
+            for (function, key) in data.keys.iter().enumerate() {
+                if let Some(key) = key {
+                    let (callees, value_refs, lost, _ext_val_refs) =
+                        head_universe.resolve_calls(file, function, Some(&removed_names));
+                    for vref in value_refs {
+                        if &vref != key && nodes.contains_key(&vref) {
+                            incoming_consumers
+                                .entry(vref)
+                                .or_default()
+                                .push(key.clone());
+                        }
                     }
+                    let node = nodes.get_mut(key).unwrap();
+                    node.callees = callees;
+                    node.lost_callees = lost;
                 }
-                let node = nodes.get_mut(key).unwrap();
-                node.callees = callees;
-                node.lost_callees = lost;
             }
         }
-    }
-    for (file, data) in base_files.iter().enumerate() {
-        for (function, key) in data.keys.iter().enumerate() {
-            if targets[file][function].is_none()
-                && let Some(key) = key
-            {
-                let (callees, value_refs, lost, _ext_val_refs) =
-                    base_universe.resolve_calls(file, function, None);
-                for vref in value_refs {
-                    if &vref != key && nodes.contains_key(&vref) {
-                        incoming_consumers
-                            .entry(vref)
-                            .or_default()
-                            .push(key.clone());
+        for (file, data) in base_files.iter().enumerate() {
+            for (function, key) in data.keys.iter().enumerate() {
+                if targets[file][function].is_none()
+                    && let Some(key) = key
+                {
+                    let (callees, value_refs, lost, _ext_val_refs) =
+                        base_universe.resolve_calls(file, function, None);
+                    for vref in value_refs {
+                        if &vref != key && nodes.contains_key(&vref) {
+                            incoming_consumers
+                                .entry(vref)
+                                .or_default()
+                                .push(key.clone());
+                        }
                     }
+                    let node = nodes.get_mut(key).unwrap();
+                    node.callees = callees;
+                    node.lost_callees = lost;
                 }
-                let node = nodes.get_mut(key).unwrap();
-                node.callees = callees;
-                node.lost_callees = lost;
             }
         }
-    }
-    for (file, data) in extras.iter().enumerate() {
-        for (function, display) in data.display.iter().enumerate() {
-            if display.is_none() {
+        extra_resolved = extras
+            .iter()
+            .enumerate()
+            .map(|(file, data)| {
+                data.display
+                    .iter()
+                    .enumerate()
+                    .map(|(function, display)| {
+                        display.as_ref().map(|_| {
+                            let (callees, value_refs, lost, _) = head_universe.resolve_calls(
+                                head_files.len() + file,
+                                function,
+                                Some(&removed_names),
+                            );
+                            (callees, value_refs, lost)
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        head_universe.contracts
+    };
+
+    // Promote real unchanged production callers from `extras` into the review graph
+    // whenever an upstream in-scope production symbol (reached from a change or called
+    // by tests) has no in-scope production caller, so DI/interface/static/service-locator
+    // callers appear as the true review entry points instead of test methods.
+    const MAX_PROMOTED_CALLERS_PER_TARGET: usize = 8;
+    {
+        let mut reverse_prod: HashMap<String, Vec<String>> = HashMap::new();
+        for (key, node) in &nodes {
+            if node.is_test || node.kind == SymbolKind::Type {
                 continue;
             }
-            let (callees, value_refs, lost, _ext_val_refs) = head_universe.resolve_calls(
-                head_files.len() + file,
-                function,
-                Some(&removed_names),
-            );
+            for callee in &node.callees {
+                if callee != key
+                    && nodes
+                        .get(callee)
+                        .is_some_and(|cn| !cn.is_test && cn.kind != SymbolKind::Type)
+                {
+                    reverse_prod
+                        .entry(callee.clone())
+                        .or_default()
+                        .push(key.clone());
+                }
+            }
+        }
+        // Walk upstream from changed production symbols to find all affected production methods
+        let mut prod_affected: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = nodes
+            .iter()
+            .filter(|(_, n)| !n.is_test && n.status.is_change() && n.kind != SymbolKind::File)
+            .map(|(k, _)| k.clone())
+            .collect();
+        while let Some(curr) = queue.pop_front() {
+            if !prod_affected.insert(curr.clone()) {
+                continue;
+            }
+            if let Some(parents) = reverse_prod.get(&curr) {
+                for p in parents {
+                    queue.push_back(p.clone());
+                }
+            }
+        }
+
+        let mut candidate_targets: Vec<String> = prod_affected.iter().cloned().collect();
+        for node in nodes.values() {
+            if node.is_test {
+                for callee in &node.callees {
+                    if nodes.get(callee).is_some_and(|cn| !cn.is_test) {
+                        candidate_targets.push(callee.clone());
+                    }
+                }
+            }
+        }
+        sort_dedup(&mut candidate_targets);
+
+        let mut extra_callers_by_target: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        for (file, data) in extras.iter().enumerate() {
+            for (function, resolved) in extra_resolved[file].iter().enumerate() {
+                if data.keys[function].is_some() || data.fns[function].is_test {
+                    continue;
+                }
+                let Some((callees, _, _)) = resolved else {
+                    continue;
+                };
+                for callee in callees {
+                    extra_callers_by_target
+                        .entry(callee.clone())
+                        .or_default()
+                        .push((file, function));
+                }
+            }
+        }
+
+        let mut promoted_ids: Vec<(usize, usize)> = Vec::new();
+        for target in &candidate_targets {
+            let Some(target_node) = nodes.get(target) else {
+                continue;
+            };
+            if target_node.is_test {
+                continue;
+            }
+            let has_in_scope_prod_caller = reverse_prod
+                .get(target)
+                .is_some_and(|parents| !parents.is_empty());
+            let has_test_caller = nodes
+                .values()
+                .any(|n| n.is_test && n.callees.contains(target));
+            let has_method_contract = !target_node.status.is_change()
+                && target_node.contracts.iter().any(|c| {
+                    nodes
+                        .get(c)
+                        .is_some_and(|cn| cn.kind != SymbolKind::Type && !cn.status.is_change())
+                });
+            // Promote external production callers when:
+            // - `target` has no in-scope production caller AND (`has_test_caller` or `has_method_contract`), OR
+            // - `target`'s only in-scope production callers are themselves unchanged wrappers called ONLY by tests!
+            let only_test_driven_wrappers = has_in_scope_prod_caller
+                && reverse_prod[target].iter().all(|p| {
+                    let pn = &nodes[p];
+                    !pn.status.is_change()
+                        && !reverse_prod.get(p).is_some_and(|gp| !gp.is_empty())
+                        && extra_callers_by_target.get(p).is_none_or(Vec::is_empty)
+                });
+            if (has_in_scope_prod_caller && !only_test_driven_wrappers)
+                || (!has_test_caller && !has_method_contract && !only_test_driven_wrappers)
+            {
+                continue;
+            }
+            let mut candidates: Vec<(usize, usize)> = Vec::new();
+            if let Some(list) = extra_callers_by_target.get(target) {
+                candidates.extend(list.iter().copied());
+            }
+            for contract in &target_node.contracts {
+                if nodes
+                    .get(contract)
+                    .is_some_and(|cn| cn.kind != SymbolKind::Type)
+                    && let Some(list) = extra_callers_by_target.get(contract)
+                {
+                    candidates.extend(list.iter().copied());
+                }
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+            if candidates.is_empty() || candidates.len() > MAX_PROMOTED_CALLERS_PER_TARGET {
+                continue;
+            }
+            promoted_ids.extend(candidates);
+        }
+        promoted_ids.sort_unstable();
+        promoted_ids.dedup();
+
+        if !promoted_ids.is_empty() {
+            for &(file, function) in &promoted_ids {
+                if extras[file].keys[function].is_some() {
+                    continue;
+                }
+                let data = &mut extras[file];
+                let Some(name) = data.display[function].as_ref().cloned() else {
+                    continue;
+                };
+                let key = node_key(&data.path, &name);
+                data.keys[function] = Some(key.clone());
+                let span = data.span(function);
+                label_paths.insert(data.path.clone());
+                nodes.insert(
+                    key.clone(),
+                    Node {
+                        key,
+                        file: data.path.clone(),
+                        name,
+                        kind: data.fns[function].kind,
+                        status: Status::Unchanged,
+                        head: Some(span.clone()),
+                        base: Some(span),
+                        moved_from: None,
+                        callers: Vec::new(),
+                        external_callers: Vec::new(),
+                        callees: Vec::new(),
+                        lost_callees: Vec::new(),
+                        implementations: Vec::new(),
+                        contracts: Vec::new(),
+                        consumers: Vec::new(),
+                        external_consumers: Vec::new(),
+                        relevant: false,
+                        is_test: false,
+                    },
+                );
+            }
+            let all_head_files: Vec<&FileData> =
+                head_files.iter().chain(extras.iter()).collect();
+            attach_contracts(&head_contracts_saved, &all_head_files, &mut nodes);
+            let refreshed_universe = Universe::new(all_head_files, head_contracts_saved);
+            for (file, data) in head_files.iter().enumerate() {
+                for (function, key) in data.keys.iter().enumerate() {
+                    if let Some(key) = key {
+                        let (callees, _, lost, _) =
+                            refreshed_universe.resolve_calls(file, function, Some(&removed_names));
+                        let node = nodes.get_mut(key).unwrap();
+                        node.callees = callees;
+                        node.lost_callees = lost;
+                    }
+                }
+            }
+            for (file, (data, slots)) in extras.iter().zip(extra_resolved.iter_mut()).enumerate() {
+                for (function, slot) in slots.iter_mut().enumerate().take(data.display.len()) {
+                    if data.display[function].is_some() {
+                        let (callees, value_refs, lost, _) = refreshed_universe.resolve_calls(
+                            head_files.len() + file,
+                            function,
+                            Some(&removed_names),
+                        );
+                        *slot = Some((callees, value_refs, lost));
+                    }
+                }
+            }
+        }
+    }
+
+    for (file, data) in extras.iter().enumerate() {
+        for (function, resolved) in extra_resolved[file].iter().enumerate() {
+            let Some((callees, value_refs, lost)) = resolved.clone() else {
+                continue;
+            };
             if let Some(key) = &data.keys[function] {
                 for vref in value_refs {
                     if &vref != key && nodes.contains_key(&vref) {
@@ -1096,7 +1317,12 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
             }
         }
     }
-
+    for (path, src) in &inputs.extra_head {
+        if label_paths.contains(path) {
+            head_srcs.insert(path.clone(), src.clone());
+            base_srcs.insert(path.clone(), src.clone());
+        }
+    }
     // Group script-file top-level symbols under their `<file>` script root.
     for data in head_files.iter().chain(base_files.iter()) {
         if !data.is_script {
@@ -1123,6 +1349,117 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
         }
     }
 
+    let mut original_test_called: HashSet<String> = HashSet::new();
+    if inputs.include_tests {
+        for node in nodes.values().filter(|n| n.is_test) {
+            for c in &node.callees {
+                if nodes.get(c).is_some_and(|cn| !cn.is_test) {
+                    original_test_called.insert(c.clone());
+                }
+            }
+        }
+        // Suppress `Test -> Prod` call edges whenever the production target already has
+        // a real non-test caller or external production caller, and suppress
+        // `UnchangedTest -> Prod` edges completely so unchanged test suites never hijack
+        // production entry points!
+        let has_prod_parent: HashSet<String> = nodes
+            .values()
+            .filter(|n| !n.is_test && n.kind != SymbolKind::Type)
+            .flat_map(|n| {
+                n.callees
+                    .iter()
+                    .chain(n.implementations.iter())
+                    .filter(move |&c| c != &n.key)
+                    .cloned()
+            })
+            .collect();
+        let mut prod_reachable: HashSet<String> = HashSet::new();
+        for node in nodes.values() {
+            let promoted_root = !node.is_test
+                && !node.status.is_change()
+                && !inputs.files.iter().any(|(p, _, _)| p == &node.file);
+            if !node.is_test
+                && (promoted_root
+                    || has_prod_parent.contains(&node.key)
+                    || node.external_callers.iter().any(|ec| {
+                        ec.split_once("::")
+                            .is_some_and(|(path, _)| !syntax::file_is_test_path(path))
+                    }))
+            {
+                prod_reachable.insert(node.key.clone());
+            }
+        }
+        let mut queue: VecDeque<String> = prod_reachable.iter().cloned().collect();
+        while let Some(curr) = queue.pop_front() {
+            if let Some(cn) = nodes.get(&curr) {
+                for child in cn.callees.iter().chain(cn.implementations.iter()) {
+                    if let Some(child_node) = nodes.get(child)
+                        && !child_node.is_test
+                        && prod_reachable.insert(child.clone())
+                    {
+                        queue.push_back(child.clone());
+                    }
+                }
+            }
+        }
+        // Also suppress `ChangedTest -> UncalledSyncWrapper` when every changed symbol
+        // reachable from that wrapper is ALREADY inside `prod_reachable`!
+        let changed_prod_covered: HashSet<String> = prod_reachable
+            .iter()
+            .filter(|k| nodes.get(*k).is_some_and(|n| n.status.is_change()))
+            .cloned()
+            .collect();
+        if !changed_prod_covered.is_empty() {
+            for candidate in &original_test_called {
+                if prod_reachable.contains(candidate) {
+                    continue;
+                }
+                let mut c_changes = Vec::new();
+                let mut c_seen = HashSet::new();
+                let mut c_bfs = VecDeque::from([candidate.clone()]);
+                while let Some(curr) = c_bfs.pop_front() {
+                    if !c_seen.insert(curr.clone()) {
+                        continue;
+                    }
+                    let Some(cn) = nodes.get(&curr) else {
+                        continue;
+                    };
+                    if cn.is_test {
+                        continue;
+                    }
+                    if cn.status.is_change() {
+                        c_changes.push(curr.clone());
+                    }
+                    for child in cn.callees.iter().chain(cn.implementations.iter()) {
+                        c_bfs.push_back(child.clone());
+                    }
+                }
+                if !c_changes.is_empty()
+                    && c_changes.iter().all(|ch| changed_prod_covered.contains(ch))
+                {
+                    prod_reachable.insert(candidate.clone());
+                }
+            }
+        }
+        let prod_keys: HashSet<String> = nodes
+            .values()
+            .filter(|n| !n.is_test)
+            .map(|n| n.key.clone())
+            .collect();
+        for node in nodes.values_mut() {
+            if !node.is_test {
+                continue;
+            }
+            let caller_unchanged = !node.status.is_change();
+            node.callees.retain(|callee| {
+                if !prod_keys.contains(callee) {
+                    return true;
+                }
+                !caller_unchanged && !prod_reachable.contains(callee)
+            });
+        }
+    }
+
     let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
     for (key, node) in &nodes {
         for callee in &node.callees {
@@ -1134,13 +1471,30 @@ pub fn analyze(inputs: &Inputs) -> Analysis {
     }
     for (key, node) in &mut nodes {
         node.callers = incoming.remove(key).unwrap_or_default();
-        node.consumers = incoming_consumers.remove(key).unwrap_or_default();
         sort_dedup(&mut node.callers);
         sort_dedup(&mut node.external_callers);
+    }
+    let test_status: HashMap<String, (bool, bool)> = nodes
+        .iter()
+        .map(|(k, n)| (k.clone(), (n.is_test, n.status.is_change())))
+        .collect();
+    for (key, node) in &mut nodes {
+        node.consumers = incoming_consumers
+            .remove(key)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|con| {
+                if node.is_test {
+                    return true;
+                }
+                test_status
+                    .get(con)
+                    .is_none_or(|&(is_test, changed)| !is_test || changed)
+            })
+            .collect();
         sort_dedup(&mut node.consumers);
         sort_dedup(&mut node.external_consumers);
     }
-
     for (path, base, head) in &inputs.files {
         let file_key = node_key(path, "<file>");
         if nodes.contains_key(&file_key) {
@@ -1774,13 +2128,35 @@ fn root_components(nodes: &HashMap<String, Node>) -> Vec<String> {
         .enumerate()
         .map(|(i, k)| (k.as_str(), i))
         .collect();
+    let active_contract_edge = |parent_key: &str, child_key: &str| {
+        let pn = &nodes[parent_key];
+        if pn.kind == SymbolKind::Type {
+            return pn.status.is_change() || !pn.consumers.is_empty();
+        }
+        if !pn.status.is_change()
+            && let Some(cn) = nodes.get(child_key)
+            && cn
+                .callers
+                .iter()
+                .any(|c| nodes.get(c).is_some_and(|caller| !caller.is_test))
+            && pn.callers.iter().all(|c| cn.callers.contains(c))
+        {
+            return false;
+        }
+        true
+    };
     let edges: Vec<Vec<usize>> = keys
         .iter()
         .map(|key| {
             nodes[*key]
                 .callees
                 .iter()
-                .chain(nodes[*key].implementations.iter())
+                .chain(
+                    nodes[*key]
+                        .implementations
+                        .iter()
+                        .filter(|imp| active_contract_edge(key, imp)),
+                )
                 .filter_map(|callee| indices.get(callee.as_str()).copied())
                 .collect()
         })
@@ -1791,7 +2167,12 @@ fn root_components(nodes: &HashMap<String, Node>) -> Vec<String> {
             nodes[*key]
                 .callers
                 .iter()
-                .chain(nodes[*key].contracts.iter())
+                .chain(
+                    nodes[*key]
+                        .contracts
+                        .iter()
+                        .filter(|c| nodes.contains_key(*c) && active_contract_edge(c, key)),
+                )
                 .filter_map(|caller| indices.get(caller.as_str()).copied())
                 .collect()
         })
@@ -1831,9 +2212,15 @@ fn root_components(nodes: &HashMap<String, Node>) -> Vec<String> {
         component[start] = id;
         pending.push(start);
         while let Some(node) = pending.pop() {
-            if (status_rank(nodes[keys[node]].status), keys[node])
-                < (status_rank(nodes[keys[best]].status), keys[best])
-            {
+            if (
+                nodes[keys[node]].is_test,
+                status_rank(nodes[keys[node]].status),
+                keys[node],
+            ) < (
+                nodes[keys[best]].is_test,
+                status_rank(nodes[keys[best]].status),
+                keys[best],
+            ) {
                 best = node;
             }
             for &parent in &reverse[node] {
@@ -1918,8 +2305,27 @@ fn mark_relevant(nodes: &mut HashMap<String, Node>) {
                     .filter(|p| {
                         // Do not mark an unchanged class/interface header relevant
                         // merely because one of its members or derived types changed!
-                        // Method-level overrides (`Method -> ContractMethod`) still propagate.
-                        !nodes.get(*p).is_some_and(|pn| pn.kind == SymbolKind::Type)
+                        // Also skip an unchanged passive contract declaration when `key`
+                        // ALREADY has an in-scope production caller (e.g. promoted `ClassC::Execute`),
+                        // unless `p` itself has a different caller!
+                        let Some(pn) = nodes.get(*p) else {
+                            return false;
+                        };
+                        if pn.kind == SymbolKind::Type {
+                            return false;
+                        }
+                        if !pn.status.is_change() {
+                            let child_has_prod_caller = nodes[&key]
+                                .callers
+                                .iter()
+                                .any(|c| nodes.get(c).is_some_and(|cn| !cn.is_test));
+                            if child_has_prod_caller
+                                && pn.callers.iter().all(|c| nodes[&key].callers.contains(c))
+                            {
+                                return false;
+                            }
+                        }
+                        true
                     })
                     .cloned(),
             )
@@ -1929,6 +2335,133 @@ fn mark_relevant(nodes: &mut HashMap<String, Node>) {
             if !node.relevant {
                 node.relevant = true;
                 queue.push_back(parent);
+            }
+        }
+    }
+
+    // Prune redundant unchanged, test-only wrapper roots whose reachable changed
+    // descendants are already covered by an unchanged real production root that has
+    // non-test external callers (e.g. sync `GetTestSuites()` called only by tests when
+    // `AutoTestMonitor::ProduceAsync` already enters `GetTestSuitesAsync()`).
+    let has_prod_external_caller = |n: &Node| {
+        n.external_callers.iter().any(|ec| {
+            ec.split_once("::")
+                .is_some_and(|(path, _)| !syntax::file_is_test_path(path))
+        })
+    };
+    let is_redundant_wrapper = |root: &Node, test_called: &HashSet<String>| {
+        !root.is_test
+            && !root.status.is_change()
+            && root.kind == SymbolKind::Function
+            && root.callers.is_empty()
+            && !has_prod_external_caller(root)
+            && (test_called.contains(&root.key) || !root.external_callers.is_empty())
+            && root.contracts.iter().all(|c| {
+                nodes.get(c).is_none_or(|cn| {
+                    cn.kind == SymbolKind::Type
+                        || (cn.callers.is_empty() && !has_prod_external_caller(cn))
+                })
+            })
+    };
+    let real_unchanged_prod_roots: Vec<String> = nodes
+        .values()
+        .filter(|n| {
+            n.relevant
+                && !n.is_test
+                && !n.status.is_change()
+                && n.callers.is_empty()
+                && (has_prod_external_caller(n)
+                    || n.contracts.iter().any(|c| {
+                        nodes
+                            .get(c)
+                            .is_some_and(|cn| cn.kind != SymbolKind::Type && has_prod_external_caller(cn))
+                    })
+                    || !nodes.values().any(|other| other.file == n.file && other.status.is_change()))
+        })
+        .map(|n| n.key.clone())
+        .collect();
+    if !real_unchanged_prod_roots.is_empty() {
+        let mut test_called: HashSet<String> = HashSet::new();
+        for n in nodes.values().filter(|n| n.is_test) {
+            for c in &n.callees {
+                test_called.insert(c.clone());
+            }
+        }
+        // Note: Test -> Prod callees may have been suppressed earlier, so also treat any
+        // uncalled unchanged sibling method on a type that has a promoted caller as a candidate
+        // when its direct callee already has a non-test caller!
+        let mut covered_changes: HashSet<String> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut bfs: VecDeque<String> = real_unchanged_prod_roots.into_iter().collect();
+        while let Some(curr) = bfs.pop_front() {
+            if !seen.insert(curr.clone()) {
+                continue;
+            }
+            let Some(cn) = nodes.get(&curr) else {
+                continue;
+            };
+            if cn.status.is_change() {
+                covered_changes.insert(curr.clone());
+            }
+            for child in cn
+                .callees
+                .iter()
+                .chain(cn.implementations.iter())
+                .chain(cn.consumers.iter())
+            {
+                if nodes.get(child).is_some_and(|x| x.relevant) {
+                    bfs.push_back(child.clone());
+                }
+            }
+        }
+        if !covered_changes.is_empty() {
+            let wrappers: Vec<String> = nodes
+                .values()
+                .filter(|n| {
+                    n.relevant
+                        && (is_redundant_wrapper(n, &test_called)
+                            || (!n.is_test
+                                && !n.status.is_change()
+                                && n.kind == SymbolKind::Function
+                                && n.callers.is_empty()
+                                && !has_prod_external_caller(n)))
+                })
+                .map(|n| n.key.clone())
+                .collect();
+            for w in wrappers {
+                if seen.contains(&w) {
+                    continue;
+                }
+                let mut w_changes = Vec::new();
+                let mut w_seen = HashSet::new();
+                let mut w_bfs = VecDeque::from([w.clone()]);
+                while let Some(curr) = w_bfs.pop_front() {
+                    if !w_seen.insert(curr.clone()) {
+                        continue;
+                    }
+                    let Some(cn) = nodes.get(&curr) else {
+                        continue;
+                    };
+                    if cn.status.is_change() {
+                        w_changes.push(curr.clone());
+                    }
+                    for child in cn
+                        .callees
+                        .iter()
+                        .chain(cn.implementations.iter())
+                        .chain(cn.consumers.iter())
+                    {
+                        if nodes.get(child).is_some_and(|x| x.relevant) {
+                            w_bfs.push_back(child.clone());
+                        }
+                    }
+                }
+                if !w_changes.is_empty()
+                    && w_changes.iter().all(|c| covered_changes.contains(c))
+                    && let Some(wn) = nodes.get_mut(&w)
+                {
+                    wn.relevant = false;
+                }
             }
         }
     }
@@ -1971,9 +2504,11 @@ fn file_labels(paths: HashSet<String>) -> HashMap<String, String> {
 
 fn sort_keys(keys: &mut [String], nodes: &HashMap<String, Node>) {
     keys.sort_by(|a, b| {
+        let ta = nodes.get(a).is_some_and(|n| n.is_test);
+        let tb = nodes.get(b).is_some_and(|n| n.is_test);
         let ra = nodes.get(a).map(|n| status_rank(n.status)).unwrap_or(9);
         let rb = nodes.get(b).map(|n| status_rank(n.status)).unwrap_or(9);
-        ra.cmp(&rb).then_with(|| a.cmp(b))
+        ta.cmp(&tb).then_with(|| ra.cmp(&rb)).then_with(|| a.cmp(b))
     });
 }
 
@@ -2192,19 +2727,19 @@ impl PrefixTrie {
         }
     }
 
-    fn best_rank(&self, a: &Analysis) -> u8 {
+    fn best_rank(&self, a: &Analysis) -> (bool, u8) {
         let own = self
             .roots_here
             .iter()
-            .filter_map(|k| a.nodes.get(k).map(|n| status_rank(n.status)))
+            .filter_map(|k| a.nodes.get(k).map(|n| (n.is_test, status_rank(n.status))))
             .min()
-            .unwrap_or(9);
+            .unwrap_or((true, 9));
         let sub = self
             .children
             .iter()
             .map(|(_, c)| c.best_rank(a))
             .min()
-            .unwrap_or(9);
+            .unwrap_or((true, 9));
         own.min(sub)
     }
 }
@@ -2451,9 +2986,13 @@ fn emit_trie(
         Root(usize, &'a String),
         Group(&'a str, &'a PrefixTrie),
     }
-    let mut items: Vec<(u8, String, Item<'_>)> = Vec::new();
+    let mut items: Vec<((bool, u8), String, Item<'_>)> = Vec::new();
     for (ri, r) in trie.roots_here.iter().enumerate() {
-        let own_rank = ctx.a.nodes.get(r).map_or(9, |n| status_rank(n.status));
+        let own_rank = ctx
+            .a
+            .nodes
+            .get(r)
+            .map_or((true, 9), |n| (n.is_test, status_rank(n.status)));
         let rank = match absorbed_by_root.get(&ri) {
             Some((_, sub)) => own_rank.min(sub.best_rank(ctx.a)),
             None => own_rank,
@@ -2951,7 +3490,26 @@ pub fn children_with_kind(a: &Analysis, key: &str, focus: bool) -> Vec<(String, 
         .callees
         .iter()
         .chain(n.implementations.iter())
-        .filter(|c| *c != key)
+        .filter(|c| {
+            if *c == key {
+                return false;
+            }
+            // If `n` calls BOTH an unchanged interface declaration `c` AND its concrete
+            // implementation `imp` directly (`n.callees` contains `imp`), omit the redundant
+            // intermediate unchanged declaration `c` so `n -> imp` flows cleanly!
+            if let Some(cn) = a.nodes.get(*c)
+                && !cn.status.is_change()
+                && cn.kind == SymbolKind::Declaration
+                && !cn.implementations.is_empty()
+                && cn
+                    .implementations
+                    .iter()
+                    .all(|imp| n.callees.contains(imp))
+            {
+                return false;
+            }
+            true
+        })
         .map(|c| (c.clone(), false))
         .chain(
             n.consumers
@@ -2966,6 +3524,7 @@ pub fn children_with_kind(a: &Analysis, key: &str, focus: bool) -> Vec<(String, 
         let nx = &a.nodes[x];
         let ny = &a.nodes[y];
         cx.cmp(cy)
+            .then_with(|| nx.is_test.cmp(&ny.is_test))
             .then_with(|| status_rank(nx.status).cmp(&status_rank(ny.status)))
             .then_with(|| nx.relevant.cmp(&ny.relevant).reverse())
             .then_with(|| x.cmp(y))
@@ -3604,5 +4163,160 @@ mod tests {
                 Status::BodyChanged
             );
         }
+    }
+
+    #[test_case(
+        ("Service.cs",
+         "namespace App;\npublic sealed class ClassA : InterfaceA {\n    public int MethodB() => MethodC();\n    private int MethodC() => 1;\n}\n",
+         "namespace App;\npublic sealed class ClassA : InterfaceA {\n    public int MethodB() => MethodC();\n    private int MethodC() => 2;\n}\n"),
+        ("ServiceTests.cs",
+         "namespace App.Tests;\npublic class ServiceTests {\n    private ClassA _sut = new ClassA();\n    [Fact] public void Test1() => _sut.MethodB();\n    [Fact] public void Test2() => _sut.MethodB();\n}\n"),
+        &[
+            ("InterfaceA.cs", "namespace App;\npublic interface InterfaceA { int MethodB(); }\n"),
+            ("ClassC.cs", "namespace App;\npublic sealed class ClassC(InterfaceA dep) {\n    public int Execute() => dep.MethodB();\n}\n"),
+        ],
+        ("ClassC.cs::App::ClassC::Execute", "Service.cs::App::ClassA::MethodB", "ServiceTests.cs::App.Tests::ServiceTests::Test1");
+        "csharp_di_constructor_interface"
+    )]
+    #[test_case(
+        ("Service.cs",
+         "namespace App;\npublic static class ClassA {\n    public static int MethodB() => MethodC();\n    private static int MethodC() => 1;\n}\n",
+         "namespace App;\npublic static class ClassA {\n    public static int MethodB() => MethodC();\n    private static int MethodC() => 2;\n}\n"),
+        ("ServiceTests.cs",
+         "namespace App.Tests;\npublic class ServiceTests {\n    [Fact] public void TestStatic() => ClassA.MethodB();\n}\n"),
+        &[
+            ("ClassC.cs", "namespace App;\npublic sealed class ClassC {\n    public int Execute() => ClassA.MethodB();\n}\n"),
+        ],
+        ("ClassC.cs::App::ClassC::Execute", "Service.cs::App::ClassA::MethodB", "ServiceTests.cs::App.Tests::ServiceTests::TestStatic");
+        "csharp_cross_file_static_invocation"
+    )]
+    #[test_case(
+        ("Service.cs",
+         "namespace App;\npublic sealed class ClassA : InterfaceA {\n    public int MethodB() => MethodC();\n    private int MethodC() => 1;\n}\n",
+         "namespace App;\npublic sealed class ClassA : InterfaceA {\n    public int MethodB() => MethodC();\n    private int MethodC() => 2;\n}\n"),
+        ("ServiceTests.cs",
+         "namespace App.Tests;\npublic class ServiceTests {\n    [Fact] public void TestResolved() => new ClassA().MethodB();\n}\n"),
+        &[
+            ("InterfaceA.cs", "namespace App;\npublic interface InterfaceA { int MethodB(); }\n"),
+            ("ClassC.cs", "namespace App;\npublic sealed class ClassC(IServiceProvider sp) {\n    public int Execute() {\n        var svc = sp.GetRequiredService<InterfaceA>();\n        return svc.MethodB();\n    }\n}\n"),
+        ],
+        ("ClassC.cs::App::ClassC::Execute", "Service.cs::App::ClassA::MethodB", "ServiceTests.cs::App.Tests::ServiceTests::TestResolved");
+        "csharp_service_locator_get_required_service"
+    )]
+    #[test_case(
+        ("src/service.ts",
+         "export class ClassA implements InterfaceA {\n  methodB(): number { return this.methodC(); }\n  private methodC(): number { return 1; }\n}\n",
+         "export class ClassA implements InterfaceA {\n  methodB(): number { return this.methodC(); }\n  private methodC(): number { return 2; }\n}\n"),
+        ("src/service.test.ts",
+         "function testMethod() { const sut = new ClassA(); sut.methodB(); }\n"),
+        &[
+            ("src/contract.ts", "export interface InterfaceA { methodB(): number; }\n"),
+            ("src/consumer.ts", "export class ClassC {\n  constructor(private readonly dep: InterfaceA, private readonly container: Container) {}\n  execute(): number {\n    const resolved = this.container.resolve<ClassA>(ClassA);\n    return this.dep.methodB() + resolved.methodB();\n  }\n}\n"),
+        ],
+        ("src/consumer.ts::ClassC::execute", "src/service.ts::ClassA::methodB", "src/service.test.ts::testMethod");
+        "typescript_di_and_container_resolve"
+    )]
+    #[test_case(
+        ("src/service.rs",
+         "pub struct ClassA;\nimpl TraitA for ClassA {\n    fn method_b(&self) -> i32 { self.method_c() }\n}\nimpl ClassA {\n    fn method_c(&self) -> i32 { 1 }\n}\n",
+         "pub struct ClassA;\nimpl TraitA for ClassA {\n    fn method_b(&self) -> i32 { self.method_c() }\n}\nimpl ClassA {\n    fn method_c(&self) -> i32 { 2 }\n}\n"),
+        ("tests/service_it.rs",
+         "#[test]\nfn test_it() { let a = ClassA; a.method_b(); }\n"),
+        &[
+            ("src/contract.rs", "pub trait TraitA { fn method_b(&self) -> i32; }\n"),
+            ("src/consumer.rs", "pub struct ClassC { dep: Box<dyn TraitA> }\nimpl ClassC {\n    pub fn execute(&self) -> i32 { self.dep.method_b() }\n}\n"),
+        ],
+        ("src/consumer.rs::ClassC::execute", "src/service.rs::<ClassA as TraitA>::method_b", "tests/service_it.rs::test_it");
+        "rust_struct_field_dyn_trait_di"
+    )]
+    #[test_case(
+        ("service.py",
+         "class ClassA(InterfaceA):\n    def method_b(self) -> int:\n        return self.method_c()\n    def method_c(self) -> int:\n        return 1\n",
+         "class ClassA(InterfaceA):\n    def method_b(self) -> int:\n        return self.method_c()\n    def method_c(self) -> int:\n        return 2\n"),
+        ("test_service.py",
+         "def test_method():\n    sut = ClassA()\n    sut.method_b()\n"),
+        &[
+            ("contract.py", "class InterfaceA:\n    def method_b(self) -> int: ...\n"),
+            ("consumer.py", "class ClassC:\n    def __init__(self, dep: InterfaceA):\n        self.dep = dep\n    def execute(self) -> int:\n        return self.dep.method_b()\n"),
+        ],
+        ("consumer.py::ClassC::execute", "service.py::ClassA::method_b", "test_service.py::test_method");
+        "python_init_injected_dependency"
+    )]
+    #[test_case(
+        ("service.go",
+         "package app\ntype ClassA struct{}\nfunc (a *ClassA) MethodB() int { return a.methodC() }\nfunc (a *ClassA) methodC() int { return 1 }\n",
+         "package app\ntype ClassA struct{}\nfunc (a *ClassA) MethodB() int { return a.methodC() }\nfunc (a *ClassA) methodC() int { return 2 }\n"),
+        ("service_test.go",
+         "package app\nfunc TestMethod(t *Testing) { a := ClassA{}; a.MethodB() }\n"),
+        &[
+            ("consumer.go", "package app\ntype ClassC struct { dep *ClassA }\nfunc (c *ClassC) Execute() int { return c.dep.MethodB() }\n"),
+        ],
+        ("consumer.go::ClassC::Execute", "service.go::ClassA::MethodB", "service_test.go::TestMethod");
+        "go_struct_field_dependency"
+    )]
+    #[test_case(
+        ("service.cpp",
+         "struct ClassA : InterfaceA {\n    int methodB() override { return methodC(); }\n    int methodC() { return 1; }\n};\n",
+         "struct ClassA : InterfaceA {\n    int methodB() override { return methodC(); }\n    int methodC() { return 2; }\n};\n"),
+        ("service_test.cpp",
+         "void test_method() { ClassA a; a.methodB(); }\n"),
+        &[
+            ("contract.hpp", "struct InterfaceA { virtual int methodB() = 0; };\n"),
+            ("consumer.cpp", "struct ClassC {\n    InterfaceA* dep;\n    int execute() { return this->dep->methodB(); }\n};\n"),
+        ],
+        ("consumer.cpp::ClassC::execute", "service.cpp::ClassA::methodB", "service_test.cpp::test_method");
+        "cpp_pointer_member_virtual_dispatch"
+    )]
+    fn real_application_entry_points_replace_unchanged_test_callers_across_languages(
+        (prod_path, prod_base, prod_head): (&str, &str, &str),
+        (test_path, test_src): (&str, &str),
+        extras: &[(&str, &str)],
+        (expected_real_root, expected_callee, unchanged_test_key): (&str, &str, &str),
+    ) {
+        let mut extra_head: Vec<(String, String)> = extras
+            .iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect();
+        extra_head.push((test_path.to_string(), test_src.to_string()));
+        let a = analyze(&Inputs {
+            files: vec![
+                (
+                    prod_path.to_string(),
+                    Some(prod_base.to_string()),
+                    Some(prod_head.to_string()),
+                ),
+                (
+                    test_path.to_string(),
+                    Some(test_src.to_string()),
+                    Some(test_src.to_string()),
+                ),
+            ],
+            extra_head,
+            include_tests: true,
+        });
+        let relevant_roots: Vec<&str> = a
+            .entry_points
+            .iter()
+            .filter(|k| a.nodes.get(*k).is_some_and(|n| n.relevant))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            relevant_roots,
+            vec![expected_real_root],
+            "expected real entry point instead of test roots; got {relevant_roots:?}, nodes: {:#?}",
+            a.nodes
+        );
+        let real_root = &a.nodes[expected_real_root];
+        assert!(
+            real_root.callees.contains(&expected_callee.to_string()),
+            "real root {} must call {}, got {:?}",
+            expected_real_root,
+            expected_callee,
+            real_root.callees
+        );
+        assert!(
+            !a.nodes[unchanged_test_key].relevant,
+            "unchanged test caller {unchanged_test_key} must not remain a relevant entry point"
+        );
     }
 }

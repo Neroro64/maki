@@ -115,16 +115,20 @@ removing the files under
 - Type headers and Rust impl headers are separate symbols whose hashes and diff
   source exclude member bodies, so a method edit does not mark its type header
   changed.
-- Receiver resolution uses local/parameter annotations, `self`/`this`, and
-  explicit qualified calls within the type hierarchy and lexical namespace.
-  Interface/virtual calls fan out to implementations, not unrelated same-name
-  methods. Unresolved calls stay `(ext)`; callers outside the diff stay
-  `(outside diff)`.
+- Receiver resolution uses local/parameter/member annotations, constructor/field
+  DI bindings (`self.dep`, `this.dep`, Go struct fields, smart-pointer/DI
+  wrappers like `Box<dyn T>` / `Arc<T>` / `unique_ptr<T>`), explicit static type
+  receivers (`ClassA.MethodB`), direct constructor/initializer types, and common
+  DI service-locator calls (`GetRequiredService<T>()`, `CreateInstance<T>()`,
+  `resolve<T>()`, `inject(T)`). Interface/virtual calls fan out to
+  implementations, not unrelated same-name methods.
 - Entry points are root components of the review graph (with deterministic
-  representatives for cycles); review order is deterministic and changed-first.
-  A symbol is relevant if it changes, is an explicit dependent of a changed
-  contract/type, or leads to relevant behavior.
-
+  representatives for cycles); when tests are included, real application callers
+  reached via DI/interfaces, static invocations, or service resolution are
+  promoted ahead of test-only callers so unchanged test suites never flood the
+  entry-point list. Review order is deterministic, production-first, and
+  changed-first. A symbol is relevant if it changes, is an explicit dependent of
+  a changed contract/type, or leads to relevant behavior.
 ## Limitations
 
 Conservative syntax-based review, not compiler-backed type checking. Only

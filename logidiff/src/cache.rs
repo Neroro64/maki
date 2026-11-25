@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 // Changing the executable also invalidates entries, including local rebuilds.
-const FORMAT: &[u8] = b"logidiff-analysis-v4";
+const FORMAT: &[u8] = b"logidiff-analysis-v5";
 const MAX_ENTRIES: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

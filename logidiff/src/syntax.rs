@@ -501,12 +501,13 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
                     | "mod_item"
                     | "impl_item"
             );
+        let is_go_method = lang == Lang::Go && kind == "method_declaration";
         let saved = (
             current_fn,
             current_type,
             in_test,
             containers.len(),
-            scope.then_some(bindings.len()),
+            (scope || is_go_method).then_some(bindings.len()),
         );
         if is_top_script_stmt {
             let s_byte = node.start_byte();
@@ -712,19 +713,12 @@ fn extract(tree: &Tree, src: &[u8], lang: Lang, file_is_test: bool) -> ParsedFil
             if type_node {
                 current_type = Some(idx);
                 current_fn = None;
-                if matches!(
-                    lang,
-                    Lang::CSharp
-                        | Lang::TypeScript
-                        | Lang::Tsx
-                        | Lang::JavaScript
-                        | Lang::Cpp
-                        | Lang::Rust
-                ) {
-                    collect_type_member_bindings(node, src, lang, &mut bindings);
-                }
+                collect_type_member_bindings(node, root, src, lang, &mut bindings);
             } else {
                 current_fn = Some(idx);
+                if is_go_method {
+                    collect_go_receiver_member_bindings(node, root, src, &mut bindings);
+                }
             }
             if lang == Lang::Rust
                 && kind == "impl_item"
@@ -1235,6 +1229,111 @@ fn value_is_static(
 
 fn collect_type_member_bindings(
     type_node: tree_sitter::Node,
+    root: tree_sitter::Node,
+    src: &[u8],
+    lang: Lang,
+    bindings: &mut Vec<(String, Option<String>)>,
+) {
+    if lang == Lang::Rust && type_node.kind() == "impl_item" {
+        let target = owner_type(&text_field(type_node, "type", src));
+        let target_simple = target.rsplit("::").next().unwrap_or(&target);
+        if !target_simple.is_empty() {
+            let mut rc = root.walk();
+            for item in root.named_children(&mut rc) {
+                if item.kind() == "struct_item"
+                    && owner_type(&text_field(item, "name", src)) == target_simple
+                {
+                    collect_type_body_bindings(item, src, lang, bindings);
+                }
+            }
+        }
+        return;
+    }
+    collect_type_body_bindings(type_node, src, lang, bindings);
+}
+
+fn collect_go_receiver_member_bindings(
+    method_node: tree_sitter::Node,
+    root: tree_sitter::Node,
+    src: &[u8],
+    bindings: &mut Vec<(String, Option<String>)>,
+) {
+    let Some(param) = method_node
+        .child_by_field_name("receiver")
+        .and_then(|r| r.named_child(0))
+    else {
+        return;
+    };
+    let recv_type = owner_type(&text_field(param, "type", src));
+    let Some(recv_name_node) = param
+        .child_by_field_name("name")
+        .or_else(|| param.named_child(0).filter(|n| n.kind() == "identifier"))
+    else {
+        return;
+    };
+    let recv_name = recv_name_node.utf8_text(src).unwrap_or_default().trim();
+    if recv_name.is_empty() || recv_type.is_empty() {
+        return;
+    }
+    let mut rc = root.walk();
+    for decl in root.named_children(&mut rc) {
+        if decl.kind() != "type_declaration" {
+            continue;
+        }
+        let mut dc = decl.walk();
+        for spec in decl.named_children(&mut dc) {
+            if spec.kind() == "type_spec"
+                && owner_type(&text_field(spec, "name", src)) == recv_type
+                && let Some(struct_ty) = spec
+                    .child_by_field_name("type")
+                    .filter(|t| t.kind() == "struct_type")
+            {
+                let mut sc = struct_ty.walk();
+                for list in struct_ty
+                    .named_children(&mut sc)
+                    .filter(|n| n.kind() == "field_declaration_list")
+                {
+                    let mut fc = list.walk();
+                    for field in list
+                        .named_children(&mut fc)
+                        .filter(|n| n.kind() == "field_declaration")
+                    {
+                        let ty = field
+                            .child_by_field_name("type")
+                            .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
+                            .filter(|t| !t.is_empty());
+                        let mut nc = field.walk();
+                        let mut has_explicit_name = false;
+                        for name in field.children_by_field_name("name", &mut nc) {
+                            has_explicit_name = true;
+                            let fname = name.utf8_text(src).unwrap_or_default().trim();
+                            if !fname.is_empty() {
+                                bindings.push((format!("{recv_name}.{fname}"), ty.clone()));
+                            }
+                        }
+                        // Embedded field: `type Server struct { Worker }` -> `s.Worker` has type `Worker`
+                        if !has_explicit_name && let Some(ref embedded_ty) = ty {
+                            let leaf = embedded_ty
+                                .rsplit([':', '.'])
+                                .next()
+                                .unwrap_or(embedded_ty)
+                                .split('[')
+                                .next()
+                                .unwrap_or(embedded_ty)
+                                .trim();
+                            if !leaf.is_empty() {
+                                bindings.push((format!("{recv_name}.{leaf}"), Some(embedded_ty.clone())));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_type_body_bindings(
+    type_node: tree_sitter::Node,
     src: &[u8],
     lang: Lang,
     bindings: &mut Vec<(String, Option<String>)>,
@@ -1248,7 +1347,7 @@ fn collect_type_member_bindings(
             }
         } else if matches!(
             child.kind(),
-            "declaration_list" | "class_body" | "field_declaration_list"
+            "declaration_list" | "class_body" | "field_declaration_list" | "block"
         ) {
             let mut bc = child.walk();
             for member in child.named_children(&mut bc) {
@@ -1257,7 +1356,7 @@ fn collect_type_member_bindings(
                         let mut mc = member.walk();
                         for sub in member.named_children(&mut mc) {
                             if sub.kind() == "variable_declaration" {
-                                let ty = sub
+                                let declared_ty = sub
                                     .child_by_field_name("type")
                                     .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
                                     .filter(|t| !t.is_empty() && t != "var");
@@ -1266,10 +1365,12 @@ fn collect_type_member_bindings(
                                     if decl.kind() == "variable_declarator"
                                         && let Some(n) = decl.child_by_field_name("name")
                                     {
-                                        bindings.push((
-                                            n.utf8_text(src).unwrap_or_default().to_string(),
-                                            ty.clone(),
-                                        ));
+                                        let ty = declared_ty.clone().or_else(|| {
+                                            inferred_initializer_type(decl, src, lang)
+                                        });
+                                        let bname =
+                                            n.utf8_text(src).unwrap_or_default().to_string();
+                                        push_member_binding(bindings, &bname, ty, lang);
                                     }
                                 }
                             }
@@ -1281,8 +1382,12 @@ fn collect_type_member_bindings(
                             .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
                             .filter(|t| !t.is_empty());
                         if let Some(n) = member.child_by_field_name("name") {
-                            bindings.push((n.utf8_text(src).unwrap_or_default().to_string(), ty));
+                            let bname = n.utf8_text(src).unwrap_or_default().to_string();
+                            push_member_binding(bindings, &bname, ty, lang);
                         }
+                    }
+                    "constructor_declaration" if lang == Lang::CSharp => {
+                        collect_constructor_assigned_bindings(member, src, lang, bindings);
                     }
                     "field_declaration" if matches!(lang, Lang::Rust | Lang::Cpp) => {
                         let ty = member
@@ -1295,34 +1400,384 @@ fn collect_type_member_bindings(
                                 .and_then(declarator_name)
                         });
                         if let Some(n) = name {
-                            bindings.push((n.utf8_text(src).unwrap_or_default().to_string(), ty));
+                            let bname = n.utf8_text(src).unwrap_or_default().to_string();
+                            push_member_binding(bindings, &bname, ty, lang);
                         }
                     }
                     "public_field_definition" | "field_definition" => {
                         let ty = member
                             .child_by_field_name("type")
                             .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
-                            .filter(|t| !t.is_empty());
+                            .filter(|t| !t.is_empty())
+                            .or_else(|| inferred_initializer_type(member, src, lang));
                         if let Some(n) = member
                             .child_by_field_name("name")
                             .or_else(|| member.child_by_field_name("property"))
                         {
-                            bindings.push((n.utf8_text(src).unwrap_or_default().to_string(), ty));
+                            let bname = n.utf8_text(src).unwrap_or_default().to_string();
+                            push_member_binding(bindings, &bname, ty, lang);
                         }
                     }
                     "method_definition" if text_field(member, "name", src) == "constructor" => {
                         if let Some(params) = member.child_by_field_name("parameters") {
                             let mut pc = params.walk();
                             for p in params.named_children(&mut pc) {
+                                let prev_len = bindings.len();
                                 collect_binding(p, src, lang, bindings);
+                                for idx in prev_len..bindings.len() {
+                                    let (bname, bty) = bindings[idx].clone();
+                                    if !bname.contains('.') {
+                                        bindings.push((format!("this.{bname}"), bty));
+                                    }
+                                }
                             }
                         }
+                        collect_constructor_assigned_bindings(member, src, lang, bindings);
+                    }
+                    "expression_statement" if lang == Lang::Python => {
+                        if let Some(assign) = member
+                            .named_child(0)
+                            .filter(|n| n.kind() == "assignment")
+                            && let Some(left) = assign.child_by_field_name("left")
+                            && left.kind() == "identifier"
+                        {
+                            let ty = assign
+                                .child_by_field_name("type")
+                                .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
+                                .filter(|t| !t.is_empty())
+                                .or_else(|| inferred_initializer_type(assign, src, lang));
+                            if ty.is_some() {
+                                let bname = left.utf8_text(src).unwrap_or_default().to_string();
+                                push_member_binding(bindings, &bname, ty, lang);
+                            }
+                        }
+                    }
+                    "function_definition"
+                        if lang == Lang::Python
+                            && text_field(member, "name", src) == "__init__" =>
+                    {
+                        collect_constructor_assigned_bindings(member, src, lang, bindings);
                     }
                     _ => {}
                 }
             }
         }
     }
+}
+
+fn push_member_binding(
+    bindings: &mut Vec<(String, Option<String>)>,
+    name: &str,
+    ty: Option<String>,
+    lang: Lang,
+) {
+    if name.is_empty() {
+        return;
+    }
+    if matches!(lang, Lang::CSharp | Lang::Cpp) {
+        bindings.push((name.to_string(), ty.clone()));
+        bindings.push((format!("this.{name}"), ty.clone()));
+        if lang == Lang::Cpp {
+            bindings.push((format!("this->{name}"), ty));
+        }
+    } else if matches!(lang, Lang::TypeScript | Lang::Tsx | Lang::JavaScript) {
+        bindings.push((format!("this.{name}"), ty));
+    } else if matches!(lang, Lang::Rust | Lang::Python) {
+        bindings.push((format!("self.{name}"), ty));
+    } else {
+        bindings.push((name.to_string(), ty));
+    }
+}
+
+fn collect_constructor_assigned_bindings(
+    ctor_node: tree_sitter::Node,
+    src: &[u8],
+    lang: Lang,
+    bindings: &mut Vec<(String, Option<String>)>,
+) {
+    let mut param_types = Vec::new();
+    if let Some(params) = ctor_node
+        .child_by_field_name("parameters")
+        .or_else(|| {
+            let mut c = ctor_node.walk();
+            ctor_node
+                .named_children(&mut c)
+                .find(|n| matches!(n.kind(), "parameter_list" | "formal_parameters"))
+        })
+    {
+        let mut pc = params.walk();
+        for p in params.named_children(&mut pc) {
+            collect_binding(p, src, lang, &mut param_types);
+        }
+    }
+    let Some(body) = ctor_node.child_by_field_name("body") else {
+        return;
+    };
+    visit_nodes(body, |node| {
+        if !matches!(node.kind(), "assignment_expression" | "assignment") {
+            return;
+        }
+        let Some(left) = node.child_by_field_name("left") else {
+            return;
+        };
+        let Some(right) = node
+            .child_by_field_name("right")
+            .or_else(|| node.child_by_field_name("value"))
+        else {
+            return;
+        };
+        let left_text = left.utf8_text(src).unwrap_or_default().trim();
+        let member_name = if let Some(rest) = left_text
+            .strip_prefix("self.")
+            .or_else(|| left_text.strip_prefix("this."))
+            .or_else(|| left_text.strip_prefix("this->"))
+        {
+            (!rest.contains(['.', '-', '[', '('])).then_some(rest)
+        } else if lang == Lang::CSharp && !left_text.contains(['.', '[', '(']) {
+            Some(left_text)
+        } else {
+            None
+        };
+        let Some(member_name) = member_name else {
+            return;
+        };
+        // Do not overwrite an already-annotated field type with None
+        let right_text = right.utf8_text(src).unwrap_or_default().trim();
+        let rhs_ty = param_types
+            .iter()
+            .rev()
+            .find(|(pname, _)| pname == right_text)
+            .and_then(|(_, pty)| pty.clone())
+            .or_else(|| inferred_expr_type(right, src, lang));
+        if let Some(ty) = rhs_ty {
+            push_member_binding(bindings, member_name, Some(ty), lang);
+        }
+    });
+}
+
+/// Extract explicit target type from local/field initializers:
+/// - `new Foo(...)` (C#, TS/JS, C++)
+/// - `Foo { ... }` (Rust struct literal)
+/// - `provider.GetRequiredService<IFoo>()` / `ActivatorUtilities.CreateInstance<Foo>(...)`
+///   and explicit cast/service-locator type arguments (`resolve<IFoo>(...)`, `inject(Foo)`, `Foo(...)` in Python)
+fn inferred_initializer_type(
+    decl_node: tree_sitter::Node,
+    src: &[u8],
+    lang: Lang,
+) -> Option<String> {
+    if let Some(val) = decl_node
+        .child_by_field_name("value")
+        .or_else(|| decl_node.child_by_field_name("right"))
+    {
+        let expr = if val.kind() == "expression_list" {
+            val.named_child(0)?
+        } else {
+            val
+        };
+        return inferred_expr_type(expr, src, lang);
+    }
+    if matches!(lang, Lang::CSharp | Lang::Cpp) {
+        let mut c = decl_node.walk();
+        let name_node = decl_node.child_by_field_name("name").or_else(|| {
+            decl_node
+                .child_by_field_name("declarator")
+                .and_then(declarator_name)
+        });
+        for child in decl_node.named_children(&mut c) {
+            if name_node.is_some_and(|n| n.id() == child.id())
+                || matches!(
+                    child.kind(),
+                    "declarator"
+                        | "pointer_declarator"
+                        | "reference_declarator"
+                        | "type_identifier"
+                        | "bracketed_argument_list"
+                )
+            {
+                continue;
+            }
+            if child.kind() == "equals_value_clause" {
+                if let Some(inner) = child.named_child(0) {
+                    return inferred_expr_type(inner, src, lang);
+                }
+            } else if let Some(ty) = inferred_expr_type(child, src, lang) {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
+fn inferred_expr_type(mut expr: tree_sitter::Node, src: &[u8], lang: Lang) -> Option<String> {
+    loop {
+        expr = unparenthesized(expr);
+        match expr.kind() {
+            "await_expression" | "await" | "try_expression" | "non_null_expression" => {
+                expr = expr.named_child(0)?;
+            }
+            "as_expression" | "type_assertion" | "satisfies_expression" => {
+                let ty_node = expr.child_by_field_name("type").or_else(|| {
+                    let mut c = expr.walk();
+                    expr.named_children(&mut c).last()
+                })?;
+                let ty = clean_type(ty_node.utf8_text(src).unwrap_or_default());
+                return (!ty.is_empty()).then_some(ty);
+            }
+            "cast_expression" => {
+                let ty_node = expr.child_by_field_name("type")?;
+                let ty = clean_type(ty_node.utf8_text(src).unwrap_or_default());
+                return (!ty.is_empty()).then_some(ty);
+            }
+            _ => break,
+        }
+    }
+    match expr.kind() {
+        "object_creation_expression" | "new_expression" => {
+            let ty_node = expr
+                .child_by_field_name("type")
+                .or_else(|| expr.child_by_field_name("constructor"))?;
+            let ty = clean_type(ty_node.utf8_text(src).unwrap_or_default());
+            (!ty.is_empty()).then_some(ty)
+        }
+        "struct_expression" if lang == Lang::Rust => {
+            let ty_node = expr.child_by_field_name("name")?;
+            let ty = clean_type(ty_node.utf8_text(src).unwrap_or_default());
+            (!ty.is_empty()).then_some(ty)
+        }
+        "composite_literal" if lang == Lang::Go => {
+            let ty_node = expr.child_by_field_name("type")?;
+            let ty = clean_type(ty_node.utf8_text(src).unwrap_or_default());
+            (!ty.is_empty()).then_some(ty)
+        }
+        kind if is_call(kind) => service_locator_or_ctor_call_type(expr, src, lang),
+        _ => None,
+    }
+}
+
+fn is_service_locator_method(name: &str) -> bool {
+    matches!(
+        name,
+        "GetService"
+            | "GetRequiredService"
+            | "GetKeyedService"
+            | "GetRequiredKeyedService"
+            | "CreateInstance"
+            | "GetInstance"
+            | "Resolve"
+            | "ResolveKeyed"
+            | "ResolveOptional"
+            | "TryResolve"
+            | "get"
+            | "resolve"
+            | "getService"
+            | "getRequiredService"
+            | "inject"
+            | "useContext"
+            | "Invoke"
+    )
+}
+
+fn first_explicit_call_type_arg(call: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let expr = call
+        .child_by_field_name("function")
+        .or_else(|| call.child_by_field_name("type"))?;
+    let mut cursor = expr.walk();
+    let mut check_nodes = vec![call, expr];
+    if let Some(last) = expr.named_children(&mut cursor).last() {
+        check_nodes.push(last);
+    }
+    for target in check_nodes {
+        let mut tc = target.walk();
+        for child in target.named_children(&mut tc) {
+            if matches!(
+                child.kind(),
+                "type_argument_list" | "type_arguments" | "template_argument_list"
+            ) {
+                let mut ac = child.walk();
+                if let Some(arg) = child.named_children(&mut ac).next() {
+                    let ty = clean_type(arg.utf8_text(src).unwrap_or_default());
+                    if !ty.is_empty() {
+                        return Some(ty);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn service_locator_or_ctor_call_type(
+    call: tree_sitter::Node,
+    src: &[u8],
+    lang: Lang,
+) -> Option<String> {
+    let callee = callee_name(call, src)?;
+    if is_service_locator_method(&callee) {
+        if let Some(ty) = first_explicit_call_type_arg(call, src) {
+            return Some(ty);
+        }
+        // Value-passed class/token: `container.get(ServiceA)`, `inject(ServiceA)`, `container.resolve(ServiceA)`
+        if let Some(args) = call
+            .child_by_field_name("arguments")
+            .or_else(|| {
+                let mut c = call.walk();
+                call.named_children(&mut c)
+                    .find(|n| matches!(n.kind(), "argument_list" | "arguments"))
+            })
+            && let Some(first_arg) = args.named_child(0)
+        {
+            let arg = if first_arg.kind() == "argument" {
+                first_arg.named_child(0).unwrap_or(first_arg)
+            } else {
+                first_arg
+            };
+            let text = arg.utf8_text(src).unwrap_or_default().trim();
+            // Also support C# `typeof(ServiceA)`
+            let text = text
+                .strip_prefix("typeof(")
+                .and_then(|s| s.strip_suffix(')'))
+                .map(str::trim)
+                .unwrap_or(text);
+            let leaf = text.rsplit([':', '.']).next().unwrap_or(text);
+            if !leaf.is_empty()
+                && leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && leaf.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                return Some(clean_type(text));
+            }
+        }
+    }
+    // Direct UpperCamelCase constructor / Rust `Type::new()` / Go `NewType(...)`
+    let func_expr = call.child_by_field_name("function")?;
+    if lang == Lang::Rust
+        && matches!(callee.as_str(), "new" | "default")
+        && matches!(func_expr.kind(), "scoped_identifier" | "generic_function")
+    {
+        let target = if func_expr.kind() == "generic_function" {
+            func_expr.child_by_field_name("function")?
+        } else {
+            func_expr
+        };
+        if let Some(path_node) = target.child_by_field_name("path") {
+            let ty = clean_type(path_node.utf8_text(src).unwrap_or_default());
+            let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+            if leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                return Some(ty);
+            }
+        }
+    }
+    if matches!(lang, Lang::Python | Lang::Cpp) {
+        let text = func_expr.utf8_text(src).unwrap_or_default().trim();
+        let head = text.split(['<', '(']).next().unwrap_or(text).trim();
+        let leaf = head.rsplit([':', '.']).next().unwrap_or(head);
+        if !leaf.is_empty()
+            && leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && leaf.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Some(clean_type(text));
+        }
+    }
+    None
 }
 
 fn collect_call_type_arg_refs(
@@ -1615,19 +2070,62 @@ fn type_header_end(node: tree_sitter::Node) -> usize {
 fn clean_type(text: &str) -> String {
     let mut ty = text.trim().trim_start_matches(':').trim();
     loop {
-        let next = ty.trim_start_matches(['&', '*']).trim_start();
-        let next = next
+        let mut next = ty.trim_start_matches(['&', '*']).trim_start();
+        next = next
             .strip_prefix("mut ")
             .or_else(|| next.strip_prefix("const "))
             .or_else(|| next.strip_prefix("dyn "))
             .or_else(|| next.strip_prefix("impl "))
             .unwrap_or(next);
-        let next = if next.starts_with('\'') {
-            next.split_once(char::is_whitespace)
-                .map_or(next, |(_, tail)| tail.trim_start())
-        } else {
-            next
-        };
+        if next.starts_with('\'') {
+            next = next
+                .split_once(char::is_whitespace)
+                .map_or(next, |(_, tail)| tail.trim_start());
+        }
+        // Unwrap smart-pointer / DI-handle wrappers (`Box<dyn T>`, `Arc<T>`, `Rc<T>`,
+        // `std::unique_ptr<T>`, `std::shared_ptr<T>`, `Lazy<T>`, `Readonly<T>`).
+        if let Some((wrapper, rest)) = next.split_once('<')
+            && let Some(inner) = rest.strip_suffix('>')
+        {
+            let wrapper_leaf = wrapper
+                .trim()
+                .rsplit([':', '.'])
+                .next()
+                .unwrap_or(wrapper.trim());
+            if matches!(
+                wrapper_leaf,
+                "Box"
+                    | "Arc"
+                    | "Rc"
+                    | "Pin"
+                    | "MutexGuard"
+                    | "RwLockReadGuard"
+                    | "RwLockWriteGuard"
+                    | "unique_ptr"
+                    | "shared_ptr"
+                    | "Lazy"
+                    | "Readonly"
+            ) {
+                // Only unwrap single-type-arg wrappers (or `unique_ptr<T, Deleter>` taking first arg)
+                let mut depth = 0usize;
+                let mut first_end = inner.len();
+                for (idx, ch) in inner.char_indices() {
+                    match ch {
+                        '<' | '[' | '(' => depth += 1,
+                        '>' | ']' | ')' => depth = depth.saturating_sub(1),
+                        ',' if depth == 0 => {
+                            first_end = idx;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                let candidate = inner[..first_end].trim();
+                if !candidate.is_empty() {
+                    next = candidate;
+                }
+            }
+        }
         if next == ty {
             break;
         }
@@ -1987,7 +2485,10 @@ fn collect_binding(
     }
     let ty = ty
         .map(|t| clean_type(t.utf8_text(src).unwrap_or_default()))
-        .filter(|t| !t.is_empty() && !matches!(t.as_str(), "var" | "auto"));
+        .filter(|t| !t.is_empty() && !matches!(t.as_str(), "var" | "auto"))
+        .or_else(|| {
+            (!parameter).then(|| inferred_initializer_type(node, src, lang)).flatten()
+        });
     let mut names = Vec::new();
     let mut c = node.walk();
     names.extend(node.children_by_field_name("name", &mut c));
@@ -2098,6 +2599,19 @@ fn call_receiver(
         "qualified_identifier" => expr.child_by_field_name("scope"),
         _ => None,
     }?;
+    let unparen_receiver = unparenthesized(receiver);
+    if is_call(unparen_receiver.kind())
+        && let Some(ty) = service_locator_or_ctor_call_type(unparen_receiver, src, lang)
+    {
+        return Some((ty, dispatch));
+    }
+    if matches!(
+        unparen_receiver.kind(),
+        "object_creation_expression" | "new_expression"
+    ) && let Some(ty) = inferred_expr_type(unparen_receiver, src, lang)
+    {
+        return Some((ty, dispatch));
+    }
     let text = receiver.utf8_text(src).ok()?.trim();
     let binding = bindings.iter().rev().find(|(name, _)| name == text);
     if let Some((_, Some(ty))) = binding {
@@ -2131,7 +2645,18 @@ fn call_receiver(
     if binding.is_some() {
         return None;
     }
-    if qualified || known_types.contains(text) {
+    let looks_like_type = text
+        .split(['<', '['])
+        .next()
+        .unwrap_or(text)
+        .rsplit([':', '.'])
+        .next()
+        .and_then(|s| s.chars().next())
+        .is_some_and(|c| c.is_ascii_uppercase())
+        && text
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '<' | '>' | ',' | ' '));
+    if qualified || known_types.contains(text) || looks_like_type {
         return Some((text.to_string(), dispatch));
     }
     None
