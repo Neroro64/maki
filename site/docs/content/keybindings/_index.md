@@ -45,6 +45,7 @@ On Windows Terminal, Maki enables Win32 input mode so `Ctrl+M` opens the model p
 | `Ctrl+G` | Scroll to top |
 | `Ctrl+Alt+G` | Scroll to bottom |
 | `Ctrl+Q` | Pop queue |
+| `Ctrl+R` | Reverse search input history |
 | `Esc Esc` | Rewind |
 | `Alt+O` | Edit input in external editor |
 | `Ctrl+V` | Paste clipboard image or text |

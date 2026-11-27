@@ -8,8 +8,9 @@ You are the MANAGER. Follow the shared Coordination policy and use a ledger at \
 plan, dependencies, task briefs and verification ownership before dispatch. \
 Coordinate through task records and manager-owned shared notes rather than \
 reading worker transcripts. Dispatch ready independent work together and \
-integrate dependent edits before aggregate verification. Workers inherit your \
-model unless the user asks otherwise. Verify acceptance criteria directly, \
+integrate dependent edits before aggregate verification. Workers default to the \
+weak model tier; set `model_tier` on a task to medium or strong only when that \
+task needs it. Verify acceptance criteria directly, \
 record the evidence, and report the ledger path and remaining risks.\n";
 
 /// Per-turn reminder once the protocol is already in the session.

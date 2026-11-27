@@ -58,6 +58,7 @@ const BACKGROUND_WAIT_MANY: &str = " background tasks...";
 
 /// What opens the command palette at the start of [`sent_text`].
 pub(crate) const COMMAND_PREFIX: char = '/';
+const SEARCH_PROMPT: &str = "bck-i-search: ";
 
 /// The input as Enter reads it, trimmed. The command palette, the send and
 /// history all read it so, which keeps a `/yolo ` from going out as a
@@ -85,6 +86,33 @@ pub enum InputAction {
     Changed,
     Passthrough(KeyEvent),
     None,
+}
+
+/// The live `Ctrl+R` reverse search. The text it displaced lives in the
+/// box's draft slot, where a history recall parks what it covers.
+#[derive(Default)]
+pub struct HistorySearch {
+    query: String,
+    cursor: usize,
+    /// Entry whose text is displayed. `None` when the pattern matches nothing.
+    matched: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Backward,
+    Forward,
+}
+
+/// What the app does with a key the search was given.
+pub enum HistorySearchKey {
+    Consumed,
+    Accept,
+    Abort,
+    /// A Ctrl key with no meaning for the search, e.g. quit, so the user is
+    /// never trapped in it. The app handles the key as it normally would.
+    Passthrough,
+    NotSearching,
 }
 
 #[derive(Default)]
@@ -119,6 +147,8 @@ pub struct InputBox {
     /// What a history recall covers, marks and all, put back
     /// when the user walks past the newest entry.
     draft: Prompt,
+    /// Live `Ctrl+R` reverse search, see [`Self::history_search`].
+    search: Option<HistorySearch>,
     scroll_y: u16,
     follow_cursor: bool,
     placeholder_hint: &'static str,
@@ -265,6 +295,7 @@ impl InputBox {
             history,
             history_index: None,
             draft: Prompt::default(),
+            search: None,
             scroll_y: 0,
             follow_cursor: true,
             placeholder_hint: random_placeholder_hint(),
@@ -400,6 +431,7 @@ impl InputBox {
     pub fn discard(&mut self) {
         self.pending_images.clear();
         self.history_index = None;
+        self.search = None;
         self.draft = Prompt::default();
         self.buffer.clear();
         self.scroll_y = 0;
@@ -600,6 +632,170 @@ impl InputBox {
             (false, None) => None,
             (false, Some(index)) => Some(Some(index + 1).filter(|&next| next < self.history.len())),
         }
+    }
+
+    /// `true` when a `Ctrl+R` reverse search owns the keys.
+    pub fn in_history_search(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Starts a reverse search. The composing text, its images and marks
+    /// become what the search covers, in the draft slot, exactly as a history
+    /// recall covers them: `Esc` gives them back, and an accepted match
+    /// leaves them there for `Down` to return to. An empty pattern matches
+    /// the newest entry at once, so one `Ctrl+R` lands on the last prompt.
+    pub fn history_search_start(&mut self) {
+        let images = mem::take(&mut self.pending_images);
+        let covered = self.buffer.swap_prompt(Prompt::default());
+        self.draft = Prompt {
+            text: covered.text,
+            marks: covered.marks,
+            writers: covered.writers,
+        };
+        self.pending_images = images;
+        self.history_index = None;
+        self.search = Some(HistorySearch::default());
+        self.search_find(Direction::Backward);
+    }
+
+    /// The hint drawn on the box's top border while searching. `None` outside
+    /// a search.
+    pub fn history_search_hint(&self) -> Option<Line<'static>> {
+        let search = self.search.as_ref()?;
+        let theme = theme::current();
+        let position = search
+            .matched
+            .map(|index| format!("{}/{}", index + 1, self.history.len()))
+            .unwrap_or_else(|| "0/0".to_owned());
+        Some(Line::from(vec![
+            Span::styled(
+                SEARCH_PROMPT,
+                theme.input_placeholder.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(search.query.clone(), theme.foreground),
+            Span::styled(format!(" {position}"), theme.input_placeholder),
+        ]))
+    }
+
+    /// One key of the search. `Enter` accepts what is displayed, `Esc` and
+    /// `Ctrl+G` abort back to the parked text, `Ctrl+R`/`Down` walk to the
+    /// previous match and `Up` to the next; a Ctrl key with no meaning for
+    /// the search is handed back.
+    pub fn history_search_key(&mut self, key: KeyEvent) -> HistorySearchKey {
+        use HistorySearchKey as K;
+        let Some(search) = self.search.as_mut() else {
+            return K::NotSearching;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Enter, _) => K::Accept,
+            (KeyCode::Esc, _) | (KeyCode::Char('g'), true) => K::Abort,
+            (KeyCode::Char('r'), true) => {
+                self.search_find(Direction::Backward);
+                K::Consumed
+            }
+            (KeyCode::Up, false) => {
+                self.search_find(Direction::Forward);
+                K::Consumed
+            }
+            (KeyCode::Down, false) => {
+                self.search_find(Direction::Backward);
+                K::Consumed
+            }
+            (KeyCode::Char('h'), true) | (KeyCode::Backspace, _) => {
+                if search.cursor > 0 {
+                    search.query.remove(search.cursor - 1);
+                    search.cursor -= 1;
+                    self.search_find(Direction::Backward);
+                }
+                K::Consumed
+            }
+            (KeyCode::Delete, _) => {
+                if search.cursor < search.query.len() {
+                    search.query.remove(search.cursor);
+                    self.search_find(Direction::Backward);
+                }
+                K::Consumed
+            }
+            (KeyCode::Left, _) => {
+                search.cursor = search.cursor.saturating_sub(1);
+                K::Consumed
+            }
+            (KeyCode::Right, _) => {
+                search.cursor = (search.cursor + 1).min(search.query.len());
+                K::Consumed
+            }
+            (KeyCode::Char(c), false) if key.modifiers.is_empty() => {
+                search.query.insert(search.cursor, c);
+                search.cursor += 1;
+                self.search_find(Direction::Backward);
+                K::Consumed
+            }
+            (_, true) => K::Passthrough,
+            _ => K::Consumed,
+        }
+    }
+
+    /// Accepts the displayed match as a plain history recall, so `Up`/`Down`
+    /// keep walking from it and the covered draft stays put for `Down`.
+    /// Nothing matched: the covered text comes back as the input.
+    pub fn history_search_accept(&mut self) {
+        let matched = self.search.take().and_then(|search| search.matched);
+        match matched {
+            Some(index) => {
+                let entry = self.history_entry(index);
+                self.buffer.swap_prompt(entry);
+                self.history_index = Some(index);
+                self.buffer.move_to_end();
+            }
+            None => self.history_search_abort(),
+        }
+    }
+
+    /// Aborts the search: the draft the search covered goes back into the box
+    /// the way a recall hands a draft back.
+    pub fn history_search_abort(&mut self) {
+        self.search = None;
+        self.history_index = None;
+        self.buffer.swap_prompt(mem::take(&mut self.draft));
+        self.draft = Prompt::default();
+    }
+
+    /// Moves to the next match of the pattern in `dir` and displays the entry
+    /// it lands on. A move with no match keeps the one on screen.
+    fn search_find(&mut self, dir: Direction) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let query = &search.query;
+        let current = search.matched;
+        let len = self.history.len();
+        let mut window = match (dir, current) {
+            (Direction::Backward, _) => 0..current.unwrap_or(len),
+            (Direction::Forward, Some(starts)) => starts + 1..len,
+            (Direction::Forward, None) => 0..len,
+        };
+        let found = match dir {
+            Direction::Backward => window.rev().find(|&i| self.matches(i, query)),
+            Direction::Forward => window.find(|&i| self.matches(i, query)),
+        };
+        let matched = found.or(current);
+        self.search.as_mut().unwrap().matched = matched;
+        match matched {
+            Some(index) => {
+                let entry = self.history_entry(index);
+                self.buffer.swap_prompt(entry);
+                self.buffer.move_to_end();
+            }
+            None => self.buffer.clear(),
+        }
+        self.follow_cursor = true;
+    }
+
+    fn matches(&self, index: usize, query: &str) -> bool {
+        self.history
+            .get(index)
+            .is_some_and(|entry| entry.contains(query))
     }
 
     /// Returns the screen cell the caret is on. The terminal draws the cursor
@@ -924,6 +1120,7 @@ fn caret_column(spans: &[Span<'_>], caret_chars: usize) -> u16 {
 mod tests {
     use super::*;
     use crate::app::shell::parse_shell_prefix;
+    use crate::components::key;
     use crate::components::scrollbar::SCROLLBAR_THUMB;
     use crate::components::tool_display::resolve_span_style;
     use crate::decor_worker;
@@ -2157,6 +2354,175 @@ mod tests {
 
     fn shift(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn search_to(input: &mut InputBox, query: &str) {
+        for c in query.chars() {
+            input.history_search_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn history_search_start_shows_the_newest_entry() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, "first");
+        submit_text(&mut input, "second");
+        type_text(&mut input, "draft");
+
+        input.history_search_start();
+        assert!(input.in_history_search());
+        assert_eq!(input.buffer.value(), "second");
+        assert_eq!(input.draft.text, "draft");
+
+        input.history_search_key(ctrl(KeyCode::Char('r')));
+        assert_eq!(input.buffer.value(), "first");
+        input.history_search_key(ctrl(KeyCode::Char('r')));
+        assert_eq!(input.buffer.value(), "first", "the oldest match holds");
+
+        input.history_search_key(key(KeyCode::Up));
+        assert_eq!(input.buffer.value(), "second");
+
+        input.history_search_accept();
+        assert!(!input.in_history_search());
+        assert_eq!(input.buffer.value(), "second");
+        assert_eq!(input.draft.text, "draft");
+        input.history_down();
+        assert_eq!(input.buffer.value(), "draft");
+    }
+
+    /// An empty pattern matches every entry, so `Ctrl+R` walks one entry
+    /// back per press; typing a query keeps the newest match it can find.
+    /// `Ctrl+R` walks the whole history newest-first, typing narrows the
+    /// pattern searching older than the match on screen, and `Up` walks
+    /// forward through it.
+    #[test]
+    fn history_search_types_a_query_and_walks_the_matches() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, "fix the bug");
+        submit_text(&mut input, "read the book");
+        submit_text(&mut input, "fix the build");
+
+        input.history_search_start();
+        assert_eq!(input.buffer.value(), "fix the build");
+        input.history_search_key(ctrl(KeyCode::Char('r')));
+        assert_eq!(input.buffer.value(), "read the book");
+        input.history_search_key(ctrl(KeyCode::Char('r')));
+        assert_eq!(input.buffer.value(), "fix the bug");
+
+        search_to(&mut input, "the book");
+        assert_eq!(
+            input.buffer.value(),
+            "fix the bug",
+            "typing searches older than the match"
+        );
+        input.history_search_key(ctrl(KeyCode::Char('r')));
+        assert_eq!(input.buffer.value(), "fix the bug", "no older match");
+        input.history_search_key(key(KeyCode::Up));
+        assert_eq!(
+            input.buffer.value(),
+            "read the book",
+            "walking forward refinds it"
+        );
+    }
+
+    /// Backspacing widens the pattern, which searches older than the match on
+    /// screen: the last match holds while the widening finds nothing older.
+    #[test]
+    fn history_search_editing_the_query_rematches() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, "alpha");
+        submit_text(&mut input, "beta");
+
+        input.history_search_start();
+        search_to(&mut input, "beta");
+        assert_eq!(input.buffer.value(), "beta");
+        for _ in 0..3 {
+            input.history_search_key(key(KeyCode::Backspace));
+            assert_eq!(
+                input.buffer.value(),
+                "beta",
+                "the widening finds no older match"
+            );
+        }
+        input.history_search_key(key(KeyCode::Backspace));
+        assert_eq!(
+            input.buffer.value(),
+            "alpha",
+            "an empty pattern finds the older entry"
+        );
+
+        search_to(&mut input, "gamma");
+        assert_eq!(input.buffer.value(), "alpha", "no match keeps the screen");
+        assert!(matches!(
+            input.history_search_key(ctrl(KeyCode::Char('g'))),
+            HistorySearchKey::Abort
+        ));
+        input.history_search_abort();
+        assert!(
+            input.buffer.value().is_empty(),
+            "abort with no draft empties the box"
+        );
+    }
+
+    #[test]
+    fn history_search_abort_gives_the_parked_text_back() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, "older");
+        type_text(&mut input, "work in progress");
+
+        input.history_search_start();
+        search_to(&mut input, "older");
+        assert_eq!(input.buffer.value(), "older");
+        input.history_search_abort();
+        assert!(!input.in_history_search());
+        assert_eq!(input.buffer.value(), "work in progress");
+
+        input.history_search_start();
+        search_to(&mut input, "older");
+        assert!(matches!(
+            input.history_search_key(ctrl(KeyCode::Char('g'))),
+            HistorySearchKey::Abort
+        ));
+        input.history_search_abort();
+        assert_eq!(input.buffer.value(), "work in progress");
+    }
+
+    #[test]
+    fn history_search_lets_a_ctrl_key_that_is_not_its_own_pass_through() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        submit_text(&mut input, "x");
+        input.history_search_start();
+        for code in [ctrl(KeyCode::Char('c')), ctrl(KeyCode::Char('d'))] {
+            assert!(matches!(
+                input.history_search_key(code),
+                HistorySearchKey::Passthrough
+            ));
+        }
+        assert!(matches!(
+            input.history_search_key(key(KeyCode::Esc)),
+            HistorySearchKey::Abort
+        ));
+    }
+
+    #[test]
+    fn history_search_hint_shows_the_query_and_position() {
+        let mut input = InputBox::new(InputHistory::default(), 20);
+        assert!(input.history_search_hint().is_none());
+        submit_text(&mut input, "one");
+        submit_text(&mut input, "two");
+        input.history_search_start();
+        search_to(&mut input, "t");
+        let hint = input.history_search_hint().unwrap();
+        let drawn = hint
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert_eq!(drawn, format!("{SEARCH_PROMPT}t 2/2"));
     }
 
     /// Shift+Right over `a`, the space and the chip takes the chip whole. It

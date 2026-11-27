@@ -507,6 +507,29 @@ fn teardown() {
     stdout().flush().ok();
 }
 
+/// Win32 input mode is on for the whole session, so the release of the very
+/// key the user pressed to quit (Ctrl+C's key-up) is generated as its
+/// `ESC [ vk;scan;3;mods;state;codepoint _` report, queued behind the quit
+/// key we already consumed. Raw mode comes off before that report is read,
+/// so the shell's first read gets the raw escape bytes and prints them at the
+/// prompt. Discard the queued input at the same moment the mode sequences are
+/// sent: echo is still off, so the drop is silent, and a report generated
+/// after `?9001l` lands is a plain key release, which produces no text.
+#[cfg(windows)]
+fn flush_console_input() {
+    use windows_sys::Win32::System::Console::{
+        FlushConsoleInputBuffer, GetStdHandle, STD_INPUT_HANDLE,
+    };
+
+    // Safety: the handle comes from GetStdHandle and is passed to a call that
+    // only discards queued input records. Both calls fail on their own when
+    // stdin is not a console, which is logged below.
+    let stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if unsafe { FlushConsoleInputBuffer(stdin) } == 0 {
+        tracing::debug!("could not flush the console input buffer");
+    }
+}
+
 /// Set once a shape was sent. xterm takes the reset for a blinking block, so
 /// a terminal nobody changed the shape of must not be sent one on exit.
 static CURSOR_STYLED: AtomicBool = AtomicBool::new(false);
@@ -541,6 +564,8 @@ fn pop_terminal_modes() {
     stdout().execute(PopKeyboardEnhancementFlags).ok();
     #[cfg(windows)]
     write_sequence(DISABLE_WIN32_INPUT).ok();
+    #[cfg(windows)]
+    flush_console_input();
     disable_focus_change();
     stdout().execute(DisableMouseCapture).ok();
     stdout().execute(DisableBracketedPaste).ok();

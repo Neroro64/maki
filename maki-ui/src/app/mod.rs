@@ -46,6 +46,7 @@ use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, PluginAccess, SUBMITS_PROMPT};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
+use crate::components::input::HistorySearchKey;
 use crate::components::input::{InputAction, InputBox, Placeholder, Submission, sent_text};
 use crate::components::keybindings::key;
 use crate::components::list_picker::ListPicker;
@@ -1429,6 +1430,34 @@ impl App {
         Some(zone)
     }
 
+    /// The `Ctrl+R` reverse search owns every key while it is open, except
+    /// `Ctrl+C`, which keeps its meaning: clear the input, and quit when the
+    /// box is empty. `Enter` accepts the match on screen, `Esc` and `Ctrl+G`
+    /// abort back to the text the search parked, and other Ctrl keys pass
+    /// through to their built-in meaning.
+    fn handle_history_search(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        if !self.input_box.in_history_search() || key::QUIT.matches(key) {
+            return None;
+        }
+        let outcome = self.input_box.history_search_key(key);
+        match outcome {
+            HistorySearchKey::Passthrough => None,
+            HistorySearchKey::Accept => {
+                self.input_box.history_search_accept();
+                Some(vec![])
+            }
+            HistorySearchKey::Abort => {
+                self.input_box.history_search_abort();
+                Some(vec![])
+            }
+            HistorySearchKey::Consumed => {
+                self.input_changed(InputWriter::Anyone);
+                Some(vec![])
+            }
+            HistorySearchKey::NotSearching => None,
+        }
+    }
+
     fn handle_ctrl(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
         if !is_ctrl(&key) {
             return None;
@@ -1962,6 +1991,9 @@ impl App {
 
     /// Step 6, also what `ev.fallback()` runs for a key.
     fn handle_builtin_key(&mut self, key: KeyEvent, sight: Sight, mode: InputMode) -> Vec<Action> {
+        if let Some(actions) = self.handle_history_search(key) {
+            return actions;
+        }
         if let Some(actions) = self.handle_ctrl(key) {
             return actions;
         }
@@ -2255,6 +2287,10 @@ impl App {
             if mode == InputMode::Insert && self.input_box.undo() {
                 self.input_changed(InputWriter::Anyone);
             }
+            return vec![];
+        }
+        if key::HISTORY_SEARCH.matches(key) {
+            self.input_box.history_search_start();
             return vec![];
         }
         if is_ctrl(&key) {

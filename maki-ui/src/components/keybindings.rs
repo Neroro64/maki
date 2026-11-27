@@ -92,6 +92,7 @@ pub mod key {
         label: mod_key!("]"),
     };
     pub const REFRESH: Bind = ctrl_bind!("R");
+    pub const HISTORY_SEARCH: Bind = ctrl_bind!("R");
     pub const SUSPEND: Bind = ctrl_bind!("Z");
     pub const DELETE: Bind = ctrl_bind!("D");
     pub const KILL_LINE: Bind = ctrl_bind!("K");
@@ -346,6 +347,11 @@ pub const KEYBINDS: &[Keybind] = &[
     single(key::SCROLL_TOP.label, "Scroll to top", Ctx::Editing),
     single(key::SCROLL_BOTTOM.label, "Scroll to bottom", Ctx::Editing),
     single(key::POP_QUEUE.label, "Pop queue", Ctx::Editing),
+    single(
+        key::HISTORY_SEARCH.label,
+        "Reverse search input history",
+        Ctx::Editing,
+    ),
     single("Esc Esc", "Rewind", Ctx::Editing),
     single(
         key::EDIT_INPUT.label,

@@ -52,7 +52,7 @@ arboard = { workspace = true, features = ["wayland-data-control"] }
 rustix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 test-case = { workspace = true }

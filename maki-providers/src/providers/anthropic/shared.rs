@@ -20,6 +20,8 @@ pub(super) const BETA_TOOL_EXAMPLES_BEDROCK: &str = "tool-examples-2025-10-29";
 /// no longer requires it, but gateways that pin an older surface still do.
 pub(super) const BETA_DEFERRED_TOOLS: &str = "advanced-tool-use-2025-11-20";
 pub(super) const BETA_DEFERRED_TOOLS_BEDROCK: &str = "tool-search-tool-2025-10-19";
+const BEDROCK_VENDOR_PREFIX: &str = "anthropic.";
+const BEDROCK_VERSION_MARK: &str = "-v";
 
 /// The messages API refuses requests without max_tokens. Anthropic-kind
 /// models always get a window from the fallback table, so this only fires if
@@ -39,6 +41,19 @@ pub(crate) fn strip_long_context(model_id: &str) -> &str {
     model_id
         .strip_suffix(LONG_CONTEXT_SUFFIX)
         .unwrap_or(model_id)
+}
+
+/// Bedrock names a Claude model by its inference profile,
+/// `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Curated rows and the catalog
+/// key on the direct id inside it, so the profile's region and version wrap come off.
+pub(crate) fn direct_model_id(model_id: &str) -> &str {
+    let Some((_, claude)) = model_id.split_once(BEDROCK_VENDOR_PREFIX) else {
+        return model_id;
+    };
+    match claude.rsplit_once(BEDROCK_VERSION_MARK) {
+        Some((id, version)) if version.contains(':') => id,
+        _ => claude,
+    }
 }
 
 /// A `-1m` model is just its base entry with a wider window.
@@ -600,7 +615,7 @@ mod tests {
 
     use super::{
         LONG_CONTEXT_SUFFIX, LONG_CONTEXT_WINDOW, SystemBlock, build_request_body_with_system,
-        long_context_window, strip_long_context,
+        direct_model_id, long_context_window, strip_long_context,
     };
     use crate::model::{Model, ModelFamily, ModelPricing, ModelTier};
     use crate::{ContentBlock, Message, Role, ThinkingConfig};
@@ -623,6 +638,14 @@ mod tests {
     fn long_context_window_follows_suffix(model_id: &str, expected: Option<u32>) {
         assert_eq!(long_context_window(model_id), expected);
         assert!(LONG_CONTEXT_SUFFIX.ends_with("1m"));
+    }
+
+    #[test_case("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929" ; "bedrock_profile")]
+    #[test_case("us.anthropic.claude-sonnet-4-5-20250929-v1:0-1m", "claude-sonnet-4-5-20250929" ; "bedrock_profile_long_context")]
+    #[test_case("anthropic.claude-opus-5-5", "claude-opus-5-5" ; "bedrock_base_id")]
+    #[test_case("claude-opus-4-8-1m", "claude-opus-4-8-1m" ; "direct_id_untouched")]
+    fn direct_model_id_strips_bedrock_wrapping(model_id: &str, expected: &str) {
+        assert_eq!(direct_model_id(model_id), expected);
     }
 
     fn test_model() -> Model {

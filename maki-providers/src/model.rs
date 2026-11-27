@@ -378,6 +378,11 @@ struct ModelSources<'a> {
 
 impl<'a> ModelSources<'a> {
     fn resolve(spec: &'a ProviderSpec, model_id: &str) -> Self {
+        let model_id = if spec.slug == anthropic::SLUG {
+            anthropic::shared::direct_model_id(model_id)
+        } else {
+            model_id
+        };
         let entry = lookup_entry(spec.models(), model_id);
         let exact = entry.is_some_and(|entry| names_exactly(entry, model_id));
         let catalog_slug = plugin::base_spec(spec.slug).map_or(spec.slug, |base| base.slug);
@@ -1742,6 +1747,16 @@ mod tests {
             (p.input, p.output, p.cache_write, p.cache_read),
             (0.0, 0.0, 0.0, 0.0)
         );
+    }
+
+    #[test_case("anthropic/us.anthropic.claude-sonnet-4-5-20250929-v1:0" ; "regional_profile")]
+    #[test_case("anthropic/anthropic.claude-sonnet-4-5-20250929-v1:0" ; "base_profile")]
+    fn bedrock_profile_is_priced_like_its_direct_id(spec: &str) {
+        let direct = Model::from_spec("anthropic/claude-sonnet-4-5-20250929").unwrap();
+        let profile = Model::from_spec(spec).unwrap();
+        assert_eq!(profile.pricing.input, direct.pricing.input);
+        assert_eq!(profile.pricing.output, direct.pricing.output);
+        assert!(profile.list_cost(&TokenUsage::default(), false).is_some());
     }
 
     #[test_case("anthropic/claude-opus-4-8",       true  ; "claude")]

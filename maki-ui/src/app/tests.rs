@@ -13816,3 +13816,85 @@ fn a_requested_compaction_wins_its_single_taker(status: Status, claimed: bool) {
         );
     }
 }
+
+const SEARCH_HISTORY: [&str; 2] = ["first prompt", "second prompt"];
+const SEARCH_DRAFT: &str = "draft text";
+
+fn app_with_prompt_history() -> App {
+    let mut app = test_app();
+    for prompt in SEARCH_HISTORY {
+        type_and_submit(&mut app, prompt);
+    }
+    type_text(&mut app, SEARCH_DRAFT);
+    app
+}
+
+fn press_ctrl(app: &mut App, code: KeyCode) {
+    app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::CONTROL)));
+}
+
+#[test]
+fn ctrl_r_reverse_search_walks_the_history_and_enter_accepts_the_match() {
+    let mut app = app_with_prompt_history();
+    app.status = Status::Idle;
+
+    press_ctrl(&mut app, KeyCode::Char('r'));
+    assert!(app.input_box.in_history_search());
+    assert_eq!(app.input_box.buffer.value(), SEARCH_HISTORY[1]);
+
+    press_ctrl(&mut app, KeyCode::Char('r'));
+    assert_eq!(app.input_box.buffer.value(), SEARCH_HISTORY[0]);
+
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.input_box.buffer.value(), SEARCH_HISTORY[1]);
+
+    press(&mut app, KeyCode::Enter);
+    assert!(!app.input_box.in_history_search());
+    assert_eq!(app.input_box.buffer.value(), SEARCH_HISTORY[1]);
+    assert_eq!(app.input_box.draft_text(), SEARCH_DRAFT);
+
+    app.input_box.history_down();
+    assert_eq!(app.input_box.buffer.value(), SEARCH_DRAFT);
+
+    type_text(&mut app, "x");
+    assert_eq!(app.input_box.buffer.value(), format!("x{SEARCH_DRAFT}"));
+}
+
+#[test]
+fn ctrl_r_search_typing_filters_and_esc_gives_the_draft_back() {
+    let mut app = app_with_prompt_history();
+
+    press_ctrl(&mut app, KeyCode::Char('r'));
+    type_text(&mut app, "first");
+    assert_eq!(app.input_box.buffer.value(), SEARCH_HISTORY[0]);
+    type_text(&mut app, "?nomatch");
+    assert_eq!(
+        app.input_box.buffer.value(),
+        SEARCH_HISTORY[0],
+        "no match keeps the screen"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.input_box.in_history_search());
+    assert_eq!(app.input_box.buffer.value(), SEARCH_DRAFT);
+}
+
+/// Ctrl+C inside a search behaves like Ctrl+C on a draft: the first press
+/// discards the input (the parked text with it) and closes the search, and
+/// the next press quits from the now-empty box.
+#[test]
+fn ctrl_c_inside_a_search_clears_then_quits() {
+    let mut app = app_with_prompt_history();
+    app.status = Status::Idle;
+
+    press_ctrl(&mut app, KeyCode::Char('r'));
+    assert_eq!(app.input_box.buffer.value(), SEARCH_HISTORY[1]);
+
+    press_ctrl(&mut app, KeyCode::Char('c'));
+    assert!(!app.input_box.in_history_search());
+    assert!(app.input_box.is_empty());
+    assert_eq!(app.exit_request, ExitRequest::None);
+
+    press_ctrl(&mut app, KeyCode::Char('c'));
+    assert_eq!(app.exit_request, ExitRequest::Success);
+}

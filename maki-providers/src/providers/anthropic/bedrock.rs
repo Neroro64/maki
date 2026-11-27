@@ -20,6 +20,7 @@ use base64::Engine;
 use maki_storage::id::SessionRef;
 use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::{Client, Request};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, OnceCell};
@@ -27,7 +28,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::headers::header_pairs;
-use crate::model::Model;
+use crate::model::{Model, ModelInfo};
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
@@ -50,6 +51,9 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// Claude Code's limit, for a `credential_process` waiting on input it never
 /// gets.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(60);
+const INFERENCE_PROFILES_PATH: &str = "/inference-profiles";
+const SYSTEM_DEFINED_PROFILES: &str = "SYSTEM_DEFINED";
+const CLAUDE_MODEL_MARKER: &str = "anthropic.claude";
 const NO_CREDENTIALS_HINT: &str = "set AWS_PROFILE (after `aws sso login` for SSO), AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or AWS_BEARER_TOKEN_BEDROCK";
 
 fn io_error(kind: std::io::ErrorKind, e: impl Into<Box<dyn Error + Send + Sync>>) -> AgentError {
@@ -394,6 +398,35 @@ impl Bedrock {
         }
     }
 
+    /// Claude's system inference profiles, the ids Bedrock invokes. Base model
+    /// ids are left out: newer Claude models only answer through a profile.
+    async fn do_list_models(&self) -> Result<Vec<ModelInfo>, AgentError> {
+        let region = self.region().await;
+        let mut models = Vec::new();
+        let mut next_token: Option<String> = None;
+        loop {
+            let mut url = format!(
+                "https://bedrock.{region}.amazonaws.com{INFERENCE_PROFILES_PATH}?typeEquals={SYSTEM_DEFINED_PROFILES}"
+            );
+            if let Some(token) = &next_token {
+                url.push_str("&nextToken=");
+                url.push_str(&super::super::urlenc(token));
+            }
+            let mut request = self.client.get(&url).build()?;
+            self.authorize(&mut request, &[], region).await?;
+            let body = super::super::ok_text(&self.client, request).await?;
+            let page: InferenceProfilesPage = serde_json::from_str(&body)?;
+            models.extend(claude_profiles(&page));
+            match page.next_token {
+                Some(token) if next_token.as_ref() != Some(&token) => next_token = Some(token),
+                _ => break,
+            }
+        }
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models.dedup_by(|a, b| a.id == b.id);
+        Ok(models)
+    }
+
     /// The next request asks the credential chain again, which picks up a new
     /// `aws sso login` or rotated keys. The region stays until a restart.
     async fn forget_credentials(&self) {
@@ -531,15 +564,8 @@ impl Provider for Bedrock {
         })
     }
 
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<crate::model::ModelInfo>, AgentError>> {
-        Box::pin(async {
-            let models: Vec<crate::model::ModelInfo> = super::SPEC
-                .models()
-                .iter()
-                .map(|entry| crate::model::ModelInfo::id_only(entry.prefixes[0].to_string()))
-                .collect();
-            Ok(models)
-        })
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
+        Box::pin(self.do_list_models())
     }
 
     fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
@@ -552,6 +578,37 @@ impl Provider for Bedrock {
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         self.refresh_auth()
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InferenceProfilesPage {
+    #[serde(default)]
+    inference_profile_summaries: Vec<InferenceProfileSummary>,
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InferenceProfileSummary {
+    inference_profile_id: String,
+}
+
+fn claude_profiles(page: &InferenceProfilesPage) -> impl Iterator<Item = ModelInfo> + '_ {
+    page.inference_profile_summaries
+        .iter()
+        .filter(|profile| profile.inference_profile_id.contains(CLAUDE_MODEL_MARKER))
+        .flat_map(|profile| {
+            let id = profile.inference_profile_id.clone();
+            [
+                ModelInfo {
+                    id: format!("{id}{}", shared::LONG_CONTEXT_SUFFIX),
+                    context_window: Some(shared::LONG_CONTEXT_WINDOW),
+                    ..Default::default()
+                },
+                ModelInfo::id_only(id),
+            ]
+        })
 }
 
 fn decode_event_payload(payload: &[u8]) -> Result<(String, String), AgentError> {
@@ -895,5 +952,28 @@ mod tests {
             iter::from_fn(|| rx.try_recv().ok())
                 .any(|e| matches!(e, ProviderEvent::TextDelta { text } if text == "Hello"))
         );
+    }
+    #[test_case(
+        r#"{"inferenceProfileSummaries":[{"inferenceProfileId":"us.anthropic.claude-sonnet-4-5-20250929-v1:0"},{"inferenceProfileId":"us.meta.llama3-1-70b-instruct-v1:0"},{"inferenceProfileId":"eu.anthropic.claude-haiku-4-5-20251001-v1:0"}]}"#,
+        &[
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0-1m",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "eu.anthropic.claude-haiku-4-5-20251001-v1:0-1m",
+            "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        ]
+        ; "keeps_only_claude_profiles_with_long_context_variants"
+    )]
+    #[test_case(r#"{"inferenceProfileSummaries":[]}"#, &[] ; "empty_page")]
+    fn claude_profiles_are_filtered_from_the_listing(page: &str, expected: &[&str]) {
+        let page: InferenceProfilesPage = serde_json::from_str(page).unwrap();
+        let ids: Vec<String> = claude_profiles(&page).map(|m| m.id).collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn inference_profiles_page_reads_the_pagination_token() {
+        let page: InferenceProfilesPage =
+            serde_json::from_str(r#"{"inferenceProfileSummaries":[],"nextToken":"NEXT"}"#).unwrap();
+        assert_eq!(page.next_token.as_deref(), Some("NEXT"));
     }
 }
